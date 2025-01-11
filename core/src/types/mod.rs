@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use crate::util::correspond::CorrespondExt as _;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TellurRefType {
@@ -71,13 +71,234 @@ impl TellurTypedValue {
             (TellurTypedValue::Array(values), TellurType::Array(t)) => {
                 values.iter().all(|v| v.is_instance_of(t))
             }
-            (TellurTypedValue::Struct(fields), TellurType::Struct(t)) => fields
-                .iter()
-                .correspond(
-                    t.iter(),
-                    |(k1, v1), (k2, v2)| *k1 == *k2 && v1.is_instance_of(v2)
-                ),
+            (TellurTypedValue::Struct(fields), TellurType::Struct(t)) => {
+                fields.iter().correspond(t.iter(), |(k1, v1), (k2, v2)| {
+                    *k1 == *k2 && v1.is_instance_of(v2)
+                })
+            }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use rstest::rstest;
+
+    #[rstest]
+    #[test]
+    #[case::usize(TellurTypedValue::USize(1), TellurType::USize)]
+    #[case::i64(TellurTypedValue::I64(1), TellurType::I64)]
+    #[case::f64(TellurTypedValue::F64(1.0), TellurType::F64)]
+    #[case::string(TellurTypedValue::String("foo".to_string()), TellurType::String)]
+    #[case::bool(TellurTypedValue::Bool(true), TellurType::Bool)]
+    #[case::array(TellurTypedValue::Array(vec![TellurTypedValue::USize(1), TellurTypedValue::USize(2)]), TellurType::Array(Box::new(TellurType::USize)))]
+    #[case::struct_fields(TellurTypedValue::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+            ("bar".to_string(), Box::new(TellurTypedValue::USize(2)))
+        ]
+        .into_iter()
+        .collect()
+    ), TellurType::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurType::USize)),
+            ("bar".to_string(), Box::new(TellurType::USize))
+        ]
+        .into_iter()
+        .collect()
+    ))]
+    #[case::struct_with_array_field(TellurTypedValue::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurTypedValue::Array(vec![TellurTypedValue::USize(1), TellurTypedValue::USize(2)])))
+        ]
+        .into_iter()
+        .collect()
+    ), TellurType::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurType::Array(Box::new(TellurType::USize))))
+        ]
+        .into_iter()
+        .collect()
+    ))]
+    fn to_original_type_primitive_ok(
+        #[case] value: TellurTypedValue,
+        #[case] expected: TellurType,
+    ) {
+        assert_eq!(value.to_original_type(), Some(expected));
+    }
+
+    #[test]
+    fn to_original_type_empty_array_none() {
+        assert_eq!(TellurTypedValue::Array(vec![]).to_original_type(), None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn to_original_type_arbitary_array_panic() {
+        TellurTypedValue::Array(vec![
+            TellurTypedValue::USize(1),
+            TellurTypedValue::I64(2),
+            TellurTypedValue::USize(3),
+        ])
+        .to_original_type();
+    }
+
+    #[test]
+    fn to_original_type_struct_ok() {
+        assert_eq!(
+            TellurTypedValue::Struct(
+                vec![
+                    ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+                    ("bar".to_string(), Box::new(TellurTypedValue::USize(2))),
+                    ("baz".to_string(), Box::new(TellurTypedValue::USize(3)))
+                ]
+                .into_iter()
+                .collect()
+            )
+            .to_original_type(),
+            Some(TellurType::Struct(
+                vec![
+                    ("foo".to_string(), Box::new(TellurType::USize)),
+                    ("bar".to_string(), Box::new(TellurType::USize)),
+                    ("baz".to_string(), Box::new(TellurType::USize))
+                ]
+                .into_iter()
+                .collect()
+            ))
+        );
+    }
+
+    #[rstest]
+    #[test]
+    #[case::usize(TellurTypedValue::USize(1), TellurType::USize)]
+    #[case::i64(TellurTypedValue::I64(1), TellurType::I64)]
+    #[case::f64(TellurTypedValue::F64(1.0), TellurType::F64)]
+    #[case::string(TellurTypedValue::String("foo".to_string()), TellurType::String)]
+    #[case::bool(TellurTypedValue::Bool(true), TellurType::Bool)]
+    #[case::empty_array(TellurTypedValue::Array(vec![]), TellurType::Array(Box::new(TellurType::USize)))]
+    #[case::array(TellurTypedValue::Array(vec![TellurTypedValue::USize(1), TellurTypedValue::USize(2)]), TellurType::Array(Box::new(TellurType::USize)))]
+    #[case::empty_struct(
+        TellurTypedValue::Struct(BTreeMap::new()),
+        TellurType::Struct(BTreeMap::new())
+    )]
+    #[case::struct_fields(TellurTypedValue::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+            ("bar".to_string(), Box::new(TellurTypedValue::USize(2)))
+        ]
+        .into_iter()
+        .collect()
+    ), TellurType::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurType::USize)),
+            ("bar".to_string(), Box::new(TellurType::USize))
+        ]
+        .into_iter()
+        .collect()
+    ))]
+    #[case::struct_fields_unordered(TellurTypedValue::Struct(
+        vec![
+            ("bar".to_string(), Box::new(TellurTypedValue::USize(2))),
+            ("foo".to_string(), Box::new(TellurTypedValue::USize(1)))
+        ]
+        .into_iter()
+        .collect()
+    ), TellurType::Struct(
+        vec![
+            ("foo".to_string(), Box::new(TellurType::USize)),
+            ("bar".to_string(), Box::new(TellurType::USize))
+        ]
+        .into_iter()
+        .collect()
+    ))]
+    fn is_instance_of_primitive_ok(#[case] value: TellurTypedValue, #[case] t: TellurType) {
+        assert!(value.is_instance_of(&t));
+    }
+
+    #[rstest]
+    #[test]
+    #[case::not_array(
+        TellurTypedValue::Bool(true),
+        TellurType::Array(Box::new(TellurType::USize))
+    )]
+    #[case::struct_fields_lack(
+        TellurTypedValue::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+                ("bar".to_string(), Box::new(TellurTypedValue::USize(2)))
+            ]
+            .into_iter()
+            .collect()
+        ),
+        TellurType::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurType::USize)),
+                ("bar".to_string(), Box::new(TellurType::USize)),
+                ("baz".to_string(), Box::new(TellurType::USize))
+            ]
+            .into_iter()
+            .collect()
+        )
+    )]
+    #[case::struct_fields_type_mismatch(
+        TellurTypedValue::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+                ("bar".to_string(), Box::new(TellurTypedValue::I64(2)))
+            ]
+            .into_iter()
+            .collect()
+        ),
+        TellurType::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurType::USize)),
+                ("bar".to_string(), Box::new(TellurType::USize))
+            ]
+            .into_iter()
+            .collect()
+        )
+    )]
+    #[case::struct_fields_name_mismatch(
+        TellurTypedValue::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+                ("bar".to_string(), Box::new(TellurTypedValue::USize(2)))
+            ]
+            .into_iter()
+            .collect()
+        ),
+        TellurType::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurType::USize)),
+                ("baz".to_string(), Box::new(TellurType::USize))
+            ]
+            .into_iter()
+            .collect()
+        )
+    )]
+    #[case::struct_extra_fields(
+        TellurTypedValue::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurTypedValue::USize(1))),
+                ("bar".to_string(), Box::new(TellurTypedValue::USize(2))),
+                ("baz".to_string(), Box::new(TellurTypedValue::USize(3)))
+            ]
+            .into_iter()
+            .collect()
+        ),
+        TellurType::Struct(
+            vec![
+                ("foo".to_string(), Box::new(TellurType::USize)),
+                ("bar".to_string(), Box::new(TellurType::USize))
+            ]
+            .into_iter()
+            .collect()
+        )
+    )]
+    fn is_instance_of_primitive_fail(#[case] value: TellurTypedValue, #[case] t: TellurType) {
+        assert!(!value.is_instance_of(&t));
     }
 }
