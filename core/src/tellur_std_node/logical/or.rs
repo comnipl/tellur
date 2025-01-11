@@ -5,14 +5,19 @@ use crate::node::{TellurNode, TellurNodePlanned, TellurParameters, TellurReturns
 use crate::types::{TellurRefType, TellurType, TellurTypedValue, TellurTypedValueContainer};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotNode {}
-struct NotNodePlanned {}
+pub struct OrNode {}
+struct OrNodePlanned {}
 
-const IDENT: &str = "not";
+const IDENT: &str = "or";
+
 static PARAMETERS: LazyLock<TellurParameters> = LazyLock::new(|| {
     let mut parameters = TellurParameters::new();
     parameters.insert(
-        "value".to_string(),
+        "left".to_string(),
+        (TellurRefType::Immutable, TellurType::Bool),
+    );
+    parameters.insert(
+        "right".to_string(),
         (TellurRefType::Immutable, TellurType::Bool),
     );
     parameters
@@ -24,7 +29,7 @@ static RETURNS: LazyLock<crate::node::TellurReturns> = LazyLock::new(|| {
     returns
 });
 
-impl TellurNode for NotNode {
+impl TellurNode for OrNode {
     fn ident(&self) -> &str {
         IDENT
     }
@@ -37,21 +42,26 @@ impl TellurNode for NotNode {
         &RETURNS
     }
     fn planned(&self) -> Box<dyn TellurNodePlanned> {
-        Box::new(NotNodePlanned {})
+        Box::new(OrNodePlanned {})
     }
 }
 
-impl TellurNodePlanned for NotNodePlanned {
+impl TellurNodePlanned for OrNodePlanned {
     fn evaluate(
         &self,
         args: Vec<TellurTypedValueContainer>,
     ) -> Result<Vec<TellurTypedValueContainer>, TellurException> {
-        let [value] = args.as_slice() else { panic!() };
-        let TellurTypedValue::Bool(value) = *value.try_read().unwrap() else {
+        let [left, right] = args.as_slice() else {
+            panic!()
+        };
+        let TellurTypedValue::Bool(left) = *left.try_read().unwrap() else {
+            panic!()
+        };
+        let TellurTypedValue::Bool(right) = *right.try_read().unwrap() else {
             panic!()
         };
         Ok(vec![TellurTypedValueContainer::new(
-            TellurTypedValue::Bool(!value).into(),
+            TellurTypedValue::Bool(left || right).into(),
         )])
     }
 }

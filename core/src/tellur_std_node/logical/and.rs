@@ -6,7 +6,7 @@ use crate::types::{TellurRefType, TellurType, TellurTypedValue, TellurTypedValue
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AndNode {}
-pub struct AndNodePlanned {}
+struct AndNodePlanned {}
 
 const IDENT: &str = "and";
 
