@@ -33,6 +33,25 @@ pub enum TellurTypedValue {
     // TODO: Implement Function TypedValue
 }
 
+impl TellurType {
+    pub fn default_value(&self) -> TellurTypedValue {
+        match self {
+            TellurType::USize => TellurTypedValue::USize(0),
+            TellurType::I64 => TellurTypedValue::I64(0),
+            TellurType::F64 => TellurTypedValue::F64(0.0),
+            TellurType::String => TellurTypedValue::String("".to_string()),
+            TellurType::Bool => TellurTypedValue::Bool(false),
+            TellurType::Array(_) => TellurTypedValue::Array(vec![]),
+            TellurType::Struct(fields) => TellurTypedValue::Struct(
+                fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Box::new(v.default_value())))
+                    .collect(),
+            ),
+        }
+    }
+}
+
 impl TellurTypedValue {
     pub fn to_original_type(&self) -> Option<TellurType> {
         Some(match self {

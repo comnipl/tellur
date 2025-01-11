@@ -106,7 +106,13 @@ fn construct_or_tree() -> TellurNodeTree {
         },
         outputs: {
             let mut outputs = BTreeMap::new();
-            outputs.insert("result".to_string(), (NodeId(3), "result".to_string()));
+            outputs.insert(
+                "result".to_string(),
+                TreeInput::NodeOutput {
+                    id: NodeId(3),
+                    output_name: "result".to_string(),
+                },
+            );
             outputs
         },
     }
@@ -212,7 +218,13 @@ fn construct_and_tree() -> TellurNodeTree {
         },
         outputs: {
             let mut outputs = BTreeMap::new();
-            outputs.insert("result".to_string(), (NodeId(3), "result".to_string()));
+            outputs.insert(
+                "result".to_string(),
+                TreeInput::NodeOutput {
+                    id: NodeId(3),
+                    output_name: "result".to_string(),
+                },
+            );
             outputs
         },
     }

@@ -2,14 +2,15 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::exception::TellurException;
 use crate::node::TellurNodePlanned;
-use crate::types::TellurTypedValueContainer;
+use crate::types::{TellurTypedValue, TellurTypedValueContainer};
 
 pub(super) struct TellurNodeTreePlanned {
     nodes: Vec<(Vec<PlannedInput>, Box<dyn TellurNodePlanned>)>,
-    outputs: Vec<(usize, usize)>,
+    outputs: Vec<PlannedInput>,
 }
 pub(super) enum PlannedInput {
     Parameter(usize),
+    Fixed(TellurTypedValue),
     NodeOutput(usize, usize),
 }
 
@@ -24,7 +25,7 @@ enum State {
 impl TellurNodeTreePlanned {
     pub(super) fn new(
         nodes: Vec<(Vec<PlannedInput>, Box<dyn TellurNodePlanned>)>,
-        outputs: Vec<(usize, usize)>,
+        outputs: Vec<PlannedInput>,
     ) -> TellurNodeTreePlanned {
         TellurNodeTreePlanned { nodes, outputs }
     }
@@ -45,7 +46,7 @@ impl TellurNodePlanned for TellurNodeTreePlanned {
                         continue;
                     }
                     if p.iter().all(|p| match p {
-                        PlannedInput::Parameter(_) => true,
+                        PlannedInput::Parameter(_) | PlannedInput::Fixed(_) => true,
                         PlannedInput::NodeOutput(n, _) => state[*n] == State::Finished,
                     }) {
                         state[idx] = State::Ready;
@@ -53,15 +54,18 @@ impl TellurNodePlanned for TellurNodeTreePlanned {
                     }
                 }
             }
-            if self
-                .outputs
-                .iter()
-                .all(|(n, _)| state[*n] == State::Finished)
-            {
+            if self.outputs.iter().all(|p| match p {
+                PlannedInput::Parameter(_) | PlannedInput::Fixed(_) => true,
+                PlannedInput::NodeOutput(n, _) => state[*n] == State::Finished,
+            }) {
                 return Ok(self
                     .outputs
                     .iter()
-                    .map(|(n, o)| memory.get(&(*n, *o)).unwrap().clone())
+                    .map(|p| match p {
+                        PlannedInput::Parameter(i) => args[*i].clone(),
+                        PlannedInput::NodeOutput(n, o) => memory.get(&(*n, *o)).unwrap().clone(),
+                        PlannedInput::Fixed(v) => TellurTypedValueContainer::new(v.clone().into()),
+                    })
                     .collect());
             } else if executable.is_empty() {
                 panic!("No evaluatable nodes remain but outputs are not ready");
@@ -76,6 +80,7 @@ impl TellurNodePlanned for TellurNodeTreePlanned {
                     .map(|p| match p {
                         PlannedInput::Parameter(i) => args[*i].clone(),
                         PlannedInput::NodeOutput(n, o) => memory.get(&(*n, *o)).unwrap().clone(),
+                        PlannedInput::Fixed(v) => TellurTypedValueContainer::new(v.clone().into()),
                     })
                     .collect(),
             )?;

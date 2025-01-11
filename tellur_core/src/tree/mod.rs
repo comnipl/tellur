@@ -3,15 +3,16 @@ mod plan;
 use std::collections::BTreeMap;
 
 use crate::node::{TellurNode, TellurNodePlanned};
-use crate::types::{TellurRefType, TellurType};
+use crate::types::{TellurRefType, TellurType, TellurTypedValue};
 
 use self::plan::{PlannedInput, TellurNodeTreePlanned};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
 pub enum TreeInput {
     Parameter { name: String },
+    Fixed { value: TellurTypedValue },
     NodeOutput { id: NodeId, output_name: String },
 }
 
@@ -20,7 +21,7 @@ pub struct TellurNodeTree {
     pub parameters: BTreeMap<String, (TellurRefType, TellurType)>,
     pub returns: BTreeMap<String, TellurType>,
     pub nodes: BTreeMap<NodeId, (BTreeMap<String, TreeInput>, Box<dyn TellurNode>)>,
-    pub outputs: BTreeMap<String, (NodeId, String)>,
+    pub outputs: BTreeMap<String, TreeInput>,
 }
 
 impl TellurNode for TellurNodeTree {
@@ -75,6 +76,7 @@ impl TellurNode for TellurNodeTree {
                                         .unwrap(),
                                 )
                             }
+                            Some(TreeInput::Fixed { value }) => PlannedInput::Fixed(value.clone()),
                             // TODO: パラメーターに対応する入力がないよ,というエラー
                             None => panic!(),
                         }
@@ -90,16 +92,22 @@ impl TellurNode for TellurNodeTree {
             .keys()
             .map(|name| {
                 // TODO: ここで型チェックを実施
-                let (id, output_name) = self.outputs.get(name).unwrap();
-                (
-                    nodes_map[id],
-                    self.nodes[id]
-                        .1
-                        .returns()
-                        .keys()
-                        .position(|k| k == output_name)
-                        .unwrap(),
-                )
+                match self.outputs.get(name) {
+                    Some(TreeInput::Parameter { name }) => PlannedInput::Parameter(
+                        self.parameters.keys().position(|k| k == name).unwrap(),
+                    ),
+                    Some(TreeInput::NodeOutput { id, output_name }) => PlannedInput::NodeOutput(
+                        nodes_map[id],
+                        self.nodes[id]
+                            .1
+                            .returns()
+                            .keys()
+                            .position(|k| k == output_name)
+                            .unwrap(),
+                    ),
+                    Some(TreeInput::Fixed { value }) => PlannedInput::Fixed(value.clone()),
+                    None => panic!(),
+                }
             })
             .collect();
 
