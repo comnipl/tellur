@@ -1,5 +1,6 @@
 use crate::util::correspond::CorrespondExt as _;
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TellurRefType {
@@ -16,8 +17,9 @@ pub enum TellurType {
     Bool,
     Array(Box<TellurType>),
     Struct(BTreeMap<String, Box<TellurType>>),
-    Function(Vec<(TellurRefType, Box<TellurType>)>, Vec<Box<TellurType>>),
 }
+
+pub type TellurTypedValueContainer = Arc<RwLock<TellurTypedValue>>;
 
 #[derive(Clone, Debug)]
 pub enum TellurTypedValue {
