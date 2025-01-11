@@ -1,5 +1,3 @@
-pub mod tree;
-
 use std::collections::BTreeMap;
 
 use crate::exception::TellurException;

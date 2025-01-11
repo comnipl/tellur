@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::exception::TellurException;
+use crate::node::{TellurNode, TellurNodePlanned};
 use crate::types::{TellurRefType, TellurType, TellurTypedValueContainer};
-
-use super::{TellurNode, TellurNodePlanned};
 
 enum Input {
     Parameter { name: String },
