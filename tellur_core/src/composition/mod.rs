@@ -1,14 +1,28 @@
 use core::panic;
 use std::collections::{BTreeMap, BTreeSet};
-use std::iter;
 
+use crate::exception::TellurException;
 use crate::node::TellurNode;
 use crate::tree::{NodeId, TellurNodeTree, TreeInput};
-use crate::types::{TellurRefType, TellurType, TellurTypedValue};
+use crate::types::{TellurRefType, TellurType, TellurTypedValue, TellurTypedValueContainer};
 
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Placement {
     pub x: f64,
     pub y: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeView {
+    pub placement: Placement,
+    pub parameters: BTreeMap<String, (TellurRefType, TellurType, InputView)>,
+    pub returns: BTreeMap<String, TellurType>,
+}
+
+#[derive(Debug, Clone)]
+pub enum InputView {
+    ComponentOutput(ComponentId, String),
+    Fixed(TellurTypedValue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -19,17 +33,15 @@ pub enum ComponentId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CompositionEdge {
-    pub from: ComponentId,
-    pub from_output: String,
-    pub to: ComponentId,
-    pub to_input: String,
+pub struct Edge {
+    pub from: (ComponentId, String),
+    pub to: (ComponentId, String),
 }
 
 pub struct TellurComposition {
     tree: TellurNodeTree,
     placements: BTreeMap<ComponentId, Placement>,
-    edges: BTreeSet<CompositionEdge>,
+    edges: BTreeSet<Edge>,
 }
 
 impl TellurComposition {
@@ -78,10 +90,10 @@ impl TellurComposition {
                         edges
                             .iter()
                             .filter(|&e| {
-                                e.from == ComponentId::Input
-                                    && e.from_output == *name
-                                    && e.to == ComponentId::Node(*nodeid)
-                                    && e.to_input == *key
+                                e.from.0 == ComponentId::Input
+                                    && e.from.1 == *name
+                                    && e.to.0 == ComponentId::Node(*nodeid)
+                                    && e.to.1 == *key
                             })
                             .cloned()
                             .collect::<Vec<_>>()
@@ -94,10 +106,10 @@ impl TellurComposition {
                         edges
                             .iter()
                             .filter(|&e| {
-                                e.from == ComponentId::Node(id)
-                                    && e.from_output == *output_name
-                                    && e.to == ComponentId::Node(*nodeid)
-                                    && e.to_input == *key
+                                e.from.0 == ComponentId::Node(id)
+                                    && e.from.1 == *output_name
+                                    && e.to.0 == ComponentId::Node(*nodeid)
+                                    && e.to.1 == *key
                             })
                             .cloned()
                             .collect::<Vec<_>>()
@@ -156,7 +168,9 @@ impl TellurComposition {
         self.placements.remove(&ComponentId::Node(id));
         self.edges
             .iter()
-            .filter(|edge| edge.from == ComponentId::Node(id) || edge.to == ComponentId::Node(id))
+            .filter(|edge| {
+                edge.from.0 == ComponentId::Node(id) || edge.to.0 == ComponentId::Node(id)
+            })
             .cloned()
             .collect::<Vec<_>>()
             .iter()
@@ -164,7 +178,81 @@ impl TellurComposition {
         self.clean_parameters();
     }
 
-    pub fn edges(&self) -> &BTreeSet<CompositionEdge> {
+    pub fn nodes(&self) -> BTreeMap<NodeId, NodeView> {
+        self.placements
+            .iter()
+            .filter_map(|(k, v)| match k {
+                ComponentId::Node(id) => Some((*id, v)),
+                _ => None,
+            })
+            .map(|(k, v)| {
+                (
+                    k,
+                    NodeView {
+                        placement: v.clone(),
+                        parameters: self.tree.nodes[&k]
+                            .0
+                            .iter()
+                            .zip(self.tree.nodes[&k].1.parameters().iter())
+                            .map(|((k, v), (_, t))| {
+                                (
+                                    k.clone(),
+                                    (
+                                        t.0.clone(),
+                                        t.1.clone(),
+                                        match v {
+                                            TreeInput::Parameter { name } => {
+                                                InputView::ComponentOutput(
+                                                    ComponentId::Input,
+                                                    name.clone(),
+                                                )
+                                            }
+                                            TreeInput::NodeOutput { id, output_name } => {
+                                                InputView::ComponentOutput(
+                                                    ComponentId::Node(*id),
+                                                    output_name.clone(),
+                                                )
+                                            }
+                                            TreeInput::Fixed { value } => {
+                                                InputView::Fixed(value.clone())
+                                            }
+                                        },
+                                    ),
+                                )
+                            })
+                            .collect(),
+                        returns: self.tree.nodes[&k].1.returns().clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub fn components(&self) -> BTreeSet<ComponentId> {
+        self.placements.keys().cloned().collect()
+    }
+
+    pub fn evaluate(
+        &self,
+        inputs: BTreeMap<String, TellurTypedValue>,
+    ) -> Result<BTreeMap<String, TellurTypedValue>, TellurException> {
+        self.tree
+            .planned()
+            .evaluate(
+                inputs
+                    .into_values()
+                    .map(|v| TellurTypedValueContainer::new(v.into()))
+                    .collect(),
+            )
+            .map(|r| {
+                r.into_iter()
+                    .zip(self.tree.returns().keys())
+                    .map(|(v, k)| (k.clone(), v.try_read().unwrap().clone()))
+                    .collect()
+            })
+    }
+
+    pub fn edges(&self) -> &BTreeSet<Edge> {
         &self.edges
     }
 
@@ -179,10 +267,9 @@ impl TellurComposition {
         }
     }
 
-    pub fn add_edge(&mut self, edge: CompositionEdge) {
+    pub fn add_edge(&mut self, edge: Edge) {
         let adding_edge = edge.clone();
-        let (from, from_output, to, to_input) =
-            (edge.from, edge.from_output, edge.to, edge.to_input);
+        let (from, from_output, to, to_input) = (edge.from.0, edge.from.1, edge.to.0, edge.to.1);
         let input = Self::to_tree_input(from, from_output);
         match to {
             ComponentId::Node(id) => {
@@ -202,18 +289,13 @@ impl TellurComposition {
         self.clean_parameters();
     }
 
-    pub fn remove_edge(&mut self, edge: &CompositionEdge) {
-        match edge.to {
+    pub fn remove_edge(&mut self, edge: &Edge) {
+        match edge.to.0 {
             ComponentId::Node(id) => {
-                self.tree
-                    .nodes
-                    .get_mut(&id)
-                    .unwrap()
-                    .0
-                    .remove(&edge.to_input);
+                self.tree.nodes.get_mut(&id).unwrap().0.remove(&edge.to.1);
             }
             ComponentId::Output => {
-                self.tree.outputs.remove(&edge.to_input);
+                self.tree.outputs.remove(&edge.to.1);
             }
             ComponentId::Input => panic!("Input cannot be a destination"),
         }

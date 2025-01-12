@@ -10,12 +10,14 @@ use self::plan::{PlannedInput, TellurNodeTreePlanned};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
+#[derive(Debug)]
 pub enum TreeInput {
     Parameter { name: String },
     Fixed { value: TellurTypedValue },
     NodeOutput { id: NodeId, output_name: String },
 }
 
+#[derive(Debug)]
 pub struct TellurNodeTree {
     pub name: String,
     pub parameters: BTreeMap<String, (TellurRefType, TellurType)>,

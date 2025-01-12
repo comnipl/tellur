@@ -1,12 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 use crate::exception::TellurException;
-use crate::types::{TellurRefType, TellurType, TellurTypedValue, TellurTypedValueContainer};
+use crate::types::{TellurRefType, TellurType, TellurTypedValueContainer};
 
 pub type TellurParameters = BTreeMap<String, (TellurRefType, TellurType)>;
 pub type TellurReturns = BTreeMap<String, TellurType>;
 
-pub trait TellurNode: Send + Sync + 'static {
+pub trait TellurNode: Debug + Send + Sync + 'static {
     fn ident(&self) -> &str;
     fn parameters(&self) -> &TellurParameters;
     fn returns(&self) -> &TellurReturns;
