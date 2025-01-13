@@ -5,6 +5,13 @@ edition = "2021"
 
 [dependencies]
 
+
 [dev-dependencies]
-pretty_assertions = "1.4.1"
-rstest = "0.24.0"
+assert_matches.workspace = true
+criterion.workspace = true
+pretty_assertions.workspace = true
+rstest.workspace = true
+
+[[bench]]
+name = "benchmark"
+harness = false
