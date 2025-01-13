@@ -11,3 +11,7 @@ assert_matches.workspace = true
 criterion.workspace = true
 pretty_assertions.workspace = true
 rstest.workspace = true
+
+[[bench]]
+name = "benchmark"
+harness = false
