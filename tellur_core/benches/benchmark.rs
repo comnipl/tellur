@@ -1,52 +1,24 @@
-use std::collections::BTreeMap;
+mod or_with_andnot;
+mod wrapped_not;
 
 use criterion::{criterion_group, criterion_main};
 use tellur_core::node::TellurNode;
-use tellur_core::tellur_std_node::logical::not::NotNode;
-use tellur_core::tree::{NodeId, TellurNodeTree, TreeInput};
-use tellur_core::types::{TellurRefType, TellurType, TellurTypedValueContainer};
+use tellur_core::types::TellurTypedValueContainer;
 
-fn not_tree() -> TellurNodeTree {
-    TellurNodeTree {
-        name: "not_wrapped".to_string(),
-        parameters: BTreeMap::from([(
-            "value".to_string(),
-            (TellurRefType::Immutable, TellurType::Bool),
-        )]),
-        returns: BTreeMap::from([("result".to_string(), TellurType::Bool)]),
-        nodes: BTreeMap::from([(
-            NodeId(0),
-            (
-                BTreeMap::from([(
-                    "value".to_string(),
-                    TreeInput::Parameter {
-                        name: "value".to_string(),
-                    },
-                )]),
-                Box::new(NotNode {}) as Box<dyn TellurNode>,
-            ),
-        )]),
-        outputs: BTreeMap::from([(
-            "result".to_string(),
-            TreeInput::NodeOutput {
-                id: NodeId(0),
-                output_name: "result".to_string(),
-            },
-        )]),
-    }
-}
+use self::or_with_andnot::or_with_andnot_tree;
+use self::wrapped_not::wrapped_not_tree;
 
-fn plan(c: &mut criterion::Criterion) {
+fn plan_wrapped_not(c: &mut criterion::Criterion) {
     c.bench_function("Planning Not-Wrapped Tree", |b| {
         b.iter(|| {
-            let tree = not_tree();
+            let tree = wrapped_not_tree();
             let _ = tree.planned();
         })
     });
 }
 
-fn run(c: &mut criterion::Criterion) {
-    let planned = not_tree().planned();
+fn run_wrapped_not(c: &mut criterion::Criterion) {
+    let planned = wrapped_not_tree().planned();
     let vec = vec![TellurTypedValueContainer::new(
         tellur_core::types::TellurTypedValue::Bool(true).into(),
     )];
@@ -57,5 +29,33 @@ fn run(c: &mut criterion::Criterion) {
     });
 }
 
-criterion_group!(benches, plan, run);
+fn plan_or_with_andnot(c: &mut criterion::Criterion) {
+    c.bench_function("Planning Or-With-Andnot Tree", |b| {
+        b.iter(|| {
+            let tree = or_with_andnot_tree();
+            let _ = tree.planned();
+        })
+    });
+}
+
+fn run_or_with_andnot(c: &mut criterion::Criterion) {
+    let planned = or_with_andnot_tree().planned();
+    let vec = vec![
+        TellurTypedValueContainer::new(tellur_core::types::TellurTypedValue::Bool(true).into()),
+        TellurTypedValueContainer::new(tellur_core::types::TellurTypedValue::Bool(false).into()),
+    ];
+    c.bench_function("Running Or-With-Andnot Tree", |b| {
+        b.iter(|| {
+            let _ = planned.evaluate(vec.clone());
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    plan_wrapped_not,
+    run_wrapped_not,
+    plan_or_with_andnot,
+    run_or_with_andnot
+);
 criterion_main!(benches);
