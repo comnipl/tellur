@@ -32,6 +32,12 @@ pub enum ComponentId {
     Output,
 }
 
+impl From<NodeId> for ComponentId {
+    fn from(id: NodeId) -> Self {
+        ComponentId::Node(id)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Edge {
     pub from: (ComponentId, String),
@@ -45,10 +51,10 @@ pub struct TellurComposition {
 }
 
 impl TellurComposition {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: impl Into<String>) -> Self {
         Self {
             tree: TellurNodeTree {
-                name,
+                name: name.into(),
                 parameters: BTreeMap::new(),
                 returns: BTreeMap::new(),
                 nodes: BTreeMap::new(),
