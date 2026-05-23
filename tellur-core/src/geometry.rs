@@ -122,11 +122,19 @@ pub struct AnchoredSize {
 }
 
 impl AnchoredSize {
-    /// Computes the offset for a box of `self.size` so that `self.anchor` on
-    /// it lands on `target_anchor` of a box of `target_size`. The returned
-    /// `Vec2` is the top-left position of the placed box in the target's
-    /// coordinate space.
-    pub fn snap_to(self, target_size: Vec2, target_anchor: Anchor) -> Vec2 {
-        target_anchor.point(target_size) - self.anchor.point(self.size)
+    /// Computes the offset for a box of `self.size` so that `self.anchor`
+    /// on it lands on `target_point` (already in the parent's coordinate
+    /// space). The returned `Vec2` is the top-left position of the placed
+    /// box in that coordinate space.
+    pub fn snap_to(self, target_point: Vec2) -> Vec2 {
+        target_point - self.anchor.point(self.size)
+    }
+
+    /// Snaps so that `self.anchor` lands on `target_anchor` of a parent box
+    /// of `target_size`. Convenience for the common case where the target
+    /// point is expressed as a fractional anchor on a known parent size:
+    /// equivalent to `self.snap_to(target_anchor.point(target_size))`.
+    pub fn snap_to_anchor(self, target_size: Vec2, target_anchor: Anchor) -> Vec2 {
+        self.snap_to(target_anchor.point(target_size))
     }
 }

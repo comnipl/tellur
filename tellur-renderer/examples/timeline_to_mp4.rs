@@ -42,21 +42,24 @@ impl VectorComponent for BouncingDot {
     }
 
     fn render(&self) -> VectorGraphic {
-        // phase ∈ [0, 1) over one period.
-        let phase = self.t.seconds().rem_euclid(Self::PERIOD) / Self::PERIOD;
-        // Triangle wave: 0 → 1 → 0 over one period.
-        let normalized = 1.0 - (2.0 * phase - 1.0).abs();
-        let travel = self.scene_width - 2.0 * (Self::SIDE_PADDING + Self::RADIUS);
-        let center_x = Self::SIDE_PADDING + Self::RADIUS + normalized * travel;
+        let (phase, _) = self.t.bounce(Self::PERIOD);
+        // The dot bounces between two points, vertically centered in the track.
+        let center_y = self.view_box().1 * 0.5;
+        let target = phase.interpolate(
+            Vec2(Self::SIDE_PADDING + Self::RADIUS, center_y),
+            Vec2(self.scene_width - Self::SIDE_PADDING - Self::RADIUS, center_y),
+        );
+
+        let circle = Circle {
+            radius: Self::RADIUS,
+            fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
+            stroke: None,
+        };
 
         let mut layer = VectorLayer::new(self.view_box());
         layer.add(
-            Vec2(center_x - Self::RADIUS, 0.0),
-            Circle {
-                radius: Self::RADIUS,
-                fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
-                stroke: None,
-            },
+            circle.view_box().anchor(Anchor::CENTER).snap_to(target),
+            circle,
         );
         layer.render()
     }
@@ -87,7 +90,7 @@ fn main() {
             let position = dot
                 .view_box()
                 .anchor(Anchor::CENTER_LEFT)
-                .snap_to(scene_size, stripe_anchor);
+                .snap_to_anchor(scene_size, stripe_anchor);
             scene.add(position, dot);
         }
 

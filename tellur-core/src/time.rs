@@ -10,8 +10,10 @@
 //!   timeline origin but to whatever local frame the remap established.
 //!
 //! Both implement the [`Time`] trait, which provides the gating /
-//! remapping / quantization combinators. The trait methods are defaulted so
-//! the operations work identically on either type; the only difference is
+//! remapping / quantization combinators, plus periodic decompositions
+//! ([`Time::cycle`], [`Time::bounce`]) and range mapping ([`Time::phase`])
+//! that return a [`Phase`]. The trait methods are defaulted so the
+//! operations work identically on either type; the only difference is
 //! which type a method returns.
 //!
 //! ```ignore
@@ -28,11 +30,14 @@
 //! // `warped: LocalTime`, 2x speed of the [3, 5) source range.
 //! ```
 
+use crate::phase::Phase;
+
 /// A point in time, measured in seconds.
 ///
-/// All combinators (`during`, `during_ripple`, `lerp`, `fps`) are provided
-/// as default methods so implementors only need to express their own
-/// representation via [`Self::seconds`] and [`Self::from_seconds`].
+/// All combinators (`during`, `during_ripple`, `lerp`, `fps`, `cycle`,
+/// `bounce`, `phase`) are provided as default methods so implementors only
+/// need to express their own representation via [`Self::seconds`] and
+/// [`Self::from_seconds`].
 pub trait Time: Copy + Sized {
     fn seconds(&self) -> f32;
     fn from_seconds(seconds: f32) -> Self;
@@ -80,6 +85,47 @@ pub trait Time: Copy + Sized {
         }
         let step = 1.0 / fps as f32;
         Self::from_seconds((self.seconds() / step).floor() * step)
+    }
+
+    /// Decomposes time into `(phase within the current cycle, cycle index)`,
+    /// where one cycle spans `period` seconds starting at `seconds() == 0`.
+    /// The phase rises linearly from 0 to 1 across each cycle; the cycle
+    /// index is the floor of `seconds() / period` and can be negative when
+    /// time precedes the zero point.
+    fn cycle(&self, period: f32) -> (Phase, i32) {
+        self.cycle_with_zero(period, 0.0)
+    }
+
+    /// Like [`Self::cycle`] but treats `zero` as the start of cycle 0 — i.e.,
+    /// the cycle boundary nearest the start of the animation can be shifted
+    /// to an arbitrary timeline position.
+    fn cycle_with_zero(&self, period: f32, zero: f32) -> (Phase, i32) {
+        let s = self.seconds() - zero;
+        let cycle = (s / period).floor() as i32;
+        let p = s.rem_euclid(period) / period;
+        (Phase::saturating(p), cycle)
+    }
+
+    /// Triangle-wave decomposition: `phase` rises from 0 → 1 across the first
+    /// half of each `period`-second cycle and falls 1 → 0 across the second
+    /// half. Cycle index increments at every full period boundary.
+    fn bounce(&self, period: f32) -> (Phase, i32) {
+        self.bounce_with_zero(period, 0.0)
+    }
+
+    /// Like [`Self::bounce`] but with `zero` as the start of cycle 0.
+    fn bounce_with_zero(&self, period: f32, zero: f32) -> (Phase, i32) {
+        let (p, c) = self.cycle_with_zero(period, zero);
+        let triangle = 1.0 - (2.0 * p.get() - 1.0).abs();
+        (Phase::saturating(triangle), c)
+    }
+
+    /// Maps `[start, end]` to `[0.0, 1.0]` linearly, clamping outside.
+    /// Useful for driving an easing or interpolation whose input is a
+    /// [`Phase`] rather than a raw time value.
+    fn phase(&self, start: f32, end: f32) -> Phase {
+        let u = (self.seconds() - start) / (end - start);
+        Phase::saturating(u)
     }
 }
 
@@ -148,6 +194,11 @@ pub trait TimeOptionExt<T: Time> {
     fn during_ripple(self, start: f32, end: f32) -> Option<LocalTime>;
     fn lerp(self, src: (f32, f32), dst: (f32, f32)) -> Option<LocalTime>;
     fn fps(self, fps: u32) -> Option<T>;
+    fn cycle(self, period: f32) -> Option<(Phase, i32)>;
+    fn cycle_with_zero(self, period: f32, zero: f32) -> Option<(Phase, i32)>;
+    fn bounce(self, period: f32) -> Option<(Phase, i32)>;
+    fn bounce_with_zero(self, period: f32, zero: f32) -> Option<(Phase, i32)>;
+    fn phase(self, start: f32, end: f32) -> Option<Phase>;
 }
 
 impl<T: Time> TimeOptionExt<T> for Option<T> {
@@ -162,6 +213,21 @@ impl<T: Time> TimeOptionExt<T> for Option<T> {
     }
     fn fps(self, fps: u32) -> Option<T> {
         self.map(|t| t.fps(fps))
+    }
+    fn cycle(self, period: f32) -> Option<(Phase, i32)> {
+        self.map(|t| t.cycle(period))
+    }
+    fn cycle_with_zero(self, period: f32, zero: f32) -> Option<(Phase, i32)> {
+        self.map(|t| t.cycle_with_zero(period, zero))
+    }
+    fn bounce(self, period: f32) -> Option<(Phase, i32)> {
+        self.map(|t| t.bounce(period))
+    }
+    fn bounce_with_zero(self, period: f32, zero: f32) -> Option<(Phase, i32)> {
+        self.map(|t| t.bounce_with_zero(period, zero))
+    }
+    fn phase(self, start: f32, end: f32) -> Option<Phase> {
+        self.map(|t| t.phase(start, end))
     }
 }
 
@@ -264,5 +330,95 @@ mod tests {
         let warped = t.during(3.0, 5.0).lerp((3.0, 5.0), (0.0, 4.0));
         // 4.0 maps to 2.0 (halfway of dst).
         assert!((warped.expect("in range").seconds() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cycle_decomposes_into_phase_and_index() {
+        let t = TimelineTime::new(2.5);
+        let (p, c) = t.cycle(1.0);
+        assert_eq!(c, 2);
+        assert!((p.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cycle_at_period_boundary_advances_to_next_cycle() {
+        let t = TimelineTime::new(1.0);
+        let (p, c) = t.cycle(1.0);
+        assert_eq!(c, 1);
+        assert_eq!(p.get(), 0.0);
+    }
+
+    #[test]
+    fn cycle_handles_negative_time() {
+        let t = LocalTime::new(-0.3);
+        let (p, c) = t.cycle(1.0);
+        assert_eq!(c, -1);
+        assert!((p.get() - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cycle_with_zero_shifts_origin() {
+        let t = TimelineTime::new(3.0);
+        // zero at 2.5, period 1.0 → effective offset of 0.5 into cycle 0.
+        let (p, c) = t.cycle_with_zero(1.0, 2.5);
+        assert_eq!(c, 0);
+        assert!((p.get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bounce_peaks_at_half_period() {
+        let t = TimelineTime::new(0.5);
+        let (p, c) = t.bounce(1.0);
+        assert_eq!(c, 0);
+        assert!((p.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bounce_is_zero_at_period_boundaries() {
+        let (p0, _) = TimelineTime::new(0.0).bounce(1.0);
+        assert_eq!(p0.get(), 0.0);
+        let (p1, c1) = TimelineTime::new(1.0).bounce(1.0);
+        assert_eq!(p1.get(), 0.0);
+        assert_eq!(c1, 1);
+        let (p2, c2) = TimelineTime::new(2.0).bounce(1.0);
+        assert_eq!(p2.get(), 0.0);
+        assert_eq!(c2, 2);
+    }
+
+    #[test]
+    fn bounce_with_zero_offsets_phase() {
+        // zero at 0.5, period 1.0 → at t=1.0, effective t' = 0.5, bounce peak.
+        let t = TimelineTime::new(1.0);
+        let (p, c) = t.bounce_with_zero(1.0, 0.5);
+        assert_eq!(c, 0);
+        assert!((p.get() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn phase_maps_range_to_unit_interval() {
+        let t = TimelineTime::new(4.0);
+        // (4 - 3) / (5 - 3) = 0.5
+        assert_eq!(t.phase(3.0, 5.0).get(), 0.5);
+    }
+
+    #[test]
+    fn phase_clamps_outside_range() {
+        let before = TimelineTime::new(2.0);
+        assert_eq!(before.phase(3.0, 5.0), Phase::ZERO);
+        let after = TimelineTime::new(6.0);
+        assert_eq!(after.phase(3.0, 5.0), Phase::ONE);
+    }
+
+    #[test]
+    fn option_chain_phase_propagates_some() {
+        let t = TimelineTime::new(4.0);
+        let p = t.during(3.0, 5.0).phase(3.0, 5.0);
+        assert_eq!(p.map(Phase::get), Some(0.5));
+    }
+
+    #[test]
+    fn option_chain_cycle_propagates_none() {
+        let t = TimelineTime::new(10.0);
+        assert!(t.during(3.0, 5.0).cycle(1.0).is_none());
     }
 }

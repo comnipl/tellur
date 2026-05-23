@@ -55,7 +55,7 @@ fn main() {
     scene.add(
         red.view_box()
             .anchor(Anchor::CENTER)
-            .snap_to(scene.size, Anchor::new(0.4, 0.4)),
+            .snap_to_anchor(scene.size, Anchor::new(0.4, 0.4)),
         red,
     );
 
@@ -68,7 +68,7 @@ fn main() {
         green
             .view_box()
             .anchor(Anchor::CENTER)
-            .snap_to(scene.size, Anchor::new(0.6, 0.4)),
+            .snap_to_anchor(scene.size, Anchor::new(0.6, 0.4)),
         green,
     );
 
@@ -80,7 +80,7 @@ fn main() {
     scene.add(
         blue.view_box()
             .anchor(Anchor::CENTER)
-            .snap_to(scene.size, Anchor::new(0.5, 0.65)),
+            .snap_to_anchor(scene.size, Anchor::new(0.5, 0.65)),
         blue,
     );
 
