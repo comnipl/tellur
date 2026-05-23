@@ -1,0 +1,3 @@
+[workspace]
+members = ["tellur-core", "tellur-renderer"]
+resolver = "2"

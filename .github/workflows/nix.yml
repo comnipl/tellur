@@ -1,0 +1,21 @@
+name: Nix Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  nix-build:
+    name: Nix Build
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      - run: nix develop --command true

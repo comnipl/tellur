@@ -1,0 +1,29 @@
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  pr-title:
+    name: Conventional Commit
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|refactor|ci|test|chore|docs|perf|style|build|revert)(\((core|renderer|deps)\))?!?: [a-z].+'
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "✓ $PR_TITLE"
+          else
+            echo "::error::PR title does not follow Conventional Commits format."
+            echo ""
+            echo "Expected: <type>(<scope>): <description>"
+            echo "Got:      $PR_TITLE"
+            echo ""
+            echo "Allowed types: feat, fix, refactor, ci, test, chore, docs, perf, style, build, revert"
+            echo "Allowed scopes (optional): core, renderer, deps"
+            echo "Description must start with a lowercase letter."
+            exit 1
+          fi
