@@ -3,6 +3,7 @@
 //! The project uses a coordinate system with **origin at the top-left and Y axis
 //! pointing down**.
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -12,6 +13,7 @@ pub struct Vec2 {
 ///
 /// `origin` is the top-left corner (the smaller-coordinate side); `origin + size`
 /// is the bottom-right corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub origin: Vec2,
     pub size: Vec2,
@@ -24,6 +26,7 @@ pub struct Rect {
 /// | b d ty |
 /// | 0 0  1 |
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {
     pub a: f32,
     pub b: f32,

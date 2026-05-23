@@ -2,6 +2,7 @@ use crate::color::Color;
 use crate::component::Component;
 use crate::geometry::{Rect, Transform, Vec2};
 
+#[derive(Debug, Clone)]
 pub struct VectorGraphic {
     pub view_box: Rect,
     pub root: Node,
@@ -15,17 +16,20 @@ pub trait VectorComponent: Component {
 // Compile-time guarantee that `VectorComponent` is dyn-safe.
 const _: Option<&dyn VectorComponent> = None;
 
+#[derive(Debug, Clone)]
 pub enum Node {
     Group(Group),
     Path(Path),
 }
 
+#[derive(Debug, Clone)]
 pub struct Group {
     pub transform: Transform,
     pub opacity: f32,
     pub children: Vec<Node>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Path {
     pub commands: Vec<PathCommand>,
     pub fill: Option<Fill>,
@@ -33,6 +37,7 @@ pub struct Path {
     pub transform: Transform,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PathCommand {
     MoveTo(Vec2),
     LineTo(Vec2),
@@ -41,16 +46,19 @@ pub enum PathCommand {
     Close,
 }
 
+#[derive(Debug, Clone)]
 pub struct Fill {
     pub paint: Paint,
     pub opacity: f32,
 }
 
+#[derive(Debug, Clone)]
 pub struct Stroke {
     pub paint: Paint,
     pub width: f32,
 }
 
+#[derive(Debug, Clone)]
 pub enum Paint {
     Solid(Color),
 }
