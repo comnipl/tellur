@@ -26,7 +26,7 @@ use tellur_renderer::{FfmpegEncoder, Rasterizable};
 /// component reads independently of the global timeline. Callers can pass
 /// `TimelineTime` directly via `.into()` since it converts to `LocalTime`.
 #[vector_component]
-fn bouncing_dot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
+fn BouncingDot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
     const PERIOD: f32 = 2.5;
     const RADIUS: f32 = 30.0;
     const SIDE_PADDING: f32 = 40.0;
@@ -45,31 +45,27 @@ fn bouncing_dot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
         stroke: None,
     };
 
-    let mut layer = VectorLayer::new(view);
-    layer.add(
-        circle.view_box().anchor(Anchor::CENTER).snap_to(target),
-        circle,
-    );
-    layer
+    VectorLayer {
+        size: view,
+        children: vec![(
+            circle.view_box().anchor(Anchor::CENTER).snap_to(target),
+            circle.boxed(),
+        )],
+    }
 }
 
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let tl = timeline(5.0, move |t, target| {
-        let mut scene = VectorLayer::new(scene_size);
-
-        scene.add(
-            Vec2::ZERO,
-            Rectangle {
-                size: scene_size,
-                fill: Paint::Solid(Color::rgb_u8(20, 20, 30)).into(),
-                stroke: None,
-            },
-        );
+        let background = Rectangle {
+            size: scene_size,
+            fill: Paint::Solid(Color::rgb_u8(20, 20, 30)).into(),
+            stroke: None,
+        };
 
         // Distribute four dots evenly along the Y axis by snapping each one's
         // CENTER_LEFT onto a fractional anchor at (0, (i + 0.5) / N) of the scene.
-        for (i, &fps) in [60u32, 30, 24, 16].iter().enumerate() {
+        let dots = [60u32, 30, 24, 16].iter().enumerate().map(|(i, &fps)| {
             let dot = BouncingDot {
                 t: t.fps(fps).into(),
                 scene_width: scene_size.0,
@@ -79,8 +75,15 @@ fn main() {
                 .view_box()
                 .anchor(Anchor::CENTER_LEFT)
                 .snap_to_anchor(scene_size, stripe_anchor);
-            scene.add(position, dot);
-        }
+            (position, dot.boxed())
+        });
+
+        let scene = VectorLayer {
+            size: scene_size,
+            children: std::iter::once((Vec2::ZERO, background.boxed()))
+                .chain(dots)
+                .collect(),
+        };
 
         scene.rasterize().render(target)
     });

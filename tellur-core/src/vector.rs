@@ -47,6 +47,16 @@ pub trait VectorComponent {
             VectorBody::Of(c) => c.render(),
         }
     }
+
+    /// Type-erases `self` into a heap-allocated trait object. Useful for
+    /// constructing heterogeneous containers like `VectorLayer.children`
+    /// in struct-literal form.
+    fn boxed(self) -> Box<dyn VectorComponent>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
 }
 
 /// Discriminates element components (own their `render`) from composite

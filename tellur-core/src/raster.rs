@@ -74,6 +74,16 @@ pub trait RasterComponent {
             RasterBody::Of(c) => c.render(target),
         }
     }
+
+    /// Type-erases `self` into a heap-allocated trait object. Useful for
+    /// constructing heterogeneous containers like `Layer.children` in
+    /// struct-literal form.
+    fn boxed(self) -> Box<dyn RasterComponent>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
 }
 
 /// Discriminates element components (own their `render`) from composite

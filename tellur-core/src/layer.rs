@@ -22,7 +22,7 @@ use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
 pub struct VectorLayer {
     pub size: Vec2,
-    children: Vec<(Vec2, Box<dyn VectorComponent>)>,
+    pub children: Vec<(Vec2, Box<dyn VectorComponent>)>,
 }
 
 impl VectorLayer {
@@ -70,7 +70,7 @@ impl VectorComponent for VectorLayer {
 
 pub struct Layer {
     pub size: Vec2,
-    children: Vec<(Vec2, Box<dyn RasterComponent>)>,
+    pub children: Vec<(Vec2, Box<dyn RasterComponent>)>,
 }
 
 impl Layer {
