@@ -3,7 +3,7 @@ use std::io::Write;
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::component::Component;
+use crate::geometry::Vec2;
 
 #[derive(Debug, Clone)]
 pub struct RasterImage {
@@ -34,14 +34,19 @@ impl Resolution {
     }
 }
 
-/// A `Component` that can produce a `RasterImage` at a caller-specified
+/// A component that can produce a `RasterImage` at a caller-specified
 /// resolution.
 ///
 /// `target` flows from the top-level call down through the component tree.
 /// Each intermediate component decides what resolution to request from its
 /// own children so that the final image is produced with the minimum work
 /// needed to fill `target`.
-pub trait RasterComponent: Component {
+///
+/// Implementors must keep `view_box()` consistent with the logical size
+/// they occupy in a parent's coordinate space, so layers can lay them out
+/// without forcing a render.
+pub trait RasterComponent {
+    fn view_box(&self) -> Vec2;
     fn render(&self, target: Resolution) -> RasterImage;
 }
 

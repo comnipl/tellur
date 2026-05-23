@@ -1,15 +1,25 @@
 use crate::color::Color;
-use crate::component::Component;
-use crate::geometry::{Rect, Transform, Vec2};
+use crate::geometry::{Transform, Vec2};
 
+/// A piece of vector content with an intrinsic size.
+///
+/// The graphic's coordinate space spans `(0, 0)..view_box` (top-left origin).
+/// Anything outside that box may still be present in the path commands but
+/// will be clipped when rasterized into the box-sized output region. Place
+/// the graphic in a parent coordinate space by composing it through a
+/// `Group` transform or a `VectorLayer`.
 #[derive(Debug, Clone)]
 pub struct VectorGraphic {
-    pub view_box: Rect,
+    pub view_box: Vec2,
     pub root: Node,
 }
 
-/// A `Component` that can produce a `VectorGraphic`.
-pub trait VectorComponent: Component {
+/// A component that can produce a `VectorGraphic`.
+///
+/// Implementors must keep `view_box()` consistent with `render().view_box`,
+/// so callers can query the intrinsic size without paying for a full render.
+pub trait VectorComponent {
+    fn view_box(&self) -> Vec2;
     fn render(&self) -> VectorGraphic;
 }
 
