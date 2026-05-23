@@ -47,7 +47,11 @@ fn main() {
     .rasterize();
     scene.add(Vec2::ZERO, background);
 
-    let red = Blob { radius: 200.0, hue: 0.0 }.rasterize();
+    let red = Blob {
+        radius: 200.0,
+        hue: 0.0,
+    }
+    .rasterize();
     scene.add(
         red.view_box()
             .anchor(Anchor::CENTER)
@@ -55,7 +59,11 @@ fn main() {
         red,
     );
 
-    let green = Blob { radius: 200.0, hue: 120.0 }.rasterize();
+    let green = Blob {
+        radius: 200.0,
+        hue: 120.0,
+    }
+    .rasterize();
     scene.add(
         green
             .view_box()
@@ -64,7 +72,11 @@ fn main() {
         green,
     );
 
-    let blue = Blob { radius: 200.0, hue: 240.0 }.rasterize();
+    let blue = Blob {
+        radius: 200.0,
+        hue: 240.0,
+    }
+    .rasterize();
     scene.add(
         blue.view_box()
             .anchor(Anchor::CENTER)

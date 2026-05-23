@@ -1,3 +1,3 @@
 pub mod rasterize;
 
-pub use rasterize::{Rasterize, Rasterizable};
+pub use rasterize::{Rasterizable, Rasterize};

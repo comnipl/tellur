@@ -32,8 +32,8 @@ pub trait Rasterizable: VectorComponent + Sized {
 impl<T: VectorComponent> Rasterizable for T {}
 
 fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
-    let mut pixmap = tiny_skia::Pixmap::new(width, height)
-        .expect("pixmap dimensions must be non-zero");
+    let mut pixmap =
+        tiny_skia::Pixmap::new(width, height).expect("pixmap dimensions must be non-zero");
 
     let view_box_xform = view_box_transform(graphic.view_box, width, height);
     render_node(&mut pixmap, &graphic.root, view_box_xform);
@@ -145,9 +145,7 @@ fn build_skia_path(commands: &[PathCommand]) -> Option<tiny_skia::Path> {
             PathCommand::MoveTo(p) => pb.move_to(p.0, p.1),
             PathCommand::LineTo(p) => pb.line_to(p.0, p.1),
             PathCommand::QuadTo { control, to } => pb.quad_to(control.0, control.1, to.0, to.1),
-            PathCommand::CubicTo { c1, c2, to } => {
-                pb.cubic_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1)
-            }
+            PathCommand::CubicTo { c1, c2, to } => pb.cubic_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1),
             PathCommand::Close => pb.close(),
         }
     }

@@ -85,11 +85,7 @@ const KAPPA: f32 = 0.552_284_8;
 
 // Builds an ellipse whose tight bounding box is anchored at the local origin
 // `(0, 0)` and has size `2 * radii`.
-fn ellipse_to_graphic(
-    radii: Vec2,
-    fill: Option<Fill>,
-    stroke: Option<Stroke>,
-) -> VectorGraphic {
+fn ellipse_to_graphic(radii: Vec2, fill: Option<Fill>, stroke: Option<Stroke>) -> VectorGraphic {
     let Vec2(rx, ry) = radii;
     let cx = rx;
     let cy = ry;

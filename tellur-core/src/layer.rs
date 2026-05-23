@@ -33,11 +33,7 @@ impl VectorLayer {
         }
     }
 
-    pub fn add<C: VectorComponent + 'static>(
-        &mut self,
-        position: Vec2,
-        child: C,
-    ) -> &mut Self {
+    pub fn add<C: VectorComponent + 'static>(&mut self, position: Vec2, child: C) -> &mut Self {
         self.children.push((position, Box::new(child)));
         self
     }
@@ -85,11 +81,7 @@ impl Layer {
         }
     }
 
-    pub fn add<C: RasterComponent + 'static>(
-        &mut self,
-        position: Vec2,
-        child: C,
-    ) -> &mut Self {
+    pub fn add<C: RasterComponent + 'static>(&mut self, position: Vec2, child: C) -> &mut Self {
         self.children.push((position, Box::new(child)));
         self
     }

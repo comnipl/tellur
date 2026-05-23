@@ -38,7 +38,12 @@ impl Color {
         let x = chroma_x(h, c);
         let m = v - c;
         let (r1, g1, b1) = hue_sector(h, c, x);
-        Self { r: r1 + m, g: g1 + m, b: b1 + m, a }
+        Self {
+            r: r1 + m,
+            g: g1 + m,
+            b: b1 + m,
+            a,
+        }
     }
 
     /// Opaque color from HSL.
@@ -55,7 +60,12 @@ impl Color {
         let x = chroma_x(h, c);
         let m = l - c / 2.0;
         let (r1, g1, b1) = hue_sector(h, c, x);
-        Self { r: r1 + m, g: g1 + m, b: b1 + m, a }
+        Self {
+            r: r1 + m,
+            g: g1 + m,
+            b: b1 + m,
+            a,
+        }
     }
 }
 
