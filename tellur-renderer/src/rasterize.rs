@@ -72,8 +72,10 @@ fn render_node(pixmap: &mut tiny_skia::Pixmap, node: &Node, parent_xform: tiny_s
                 for child in &group.children {
                     render_node(&mut layer, child, xform);
                 }
-                let mut pp = tiny_skia::PixmapPaint::default();
-                pp.opacity = group.opacity;
+                let pp = tiny_skia::PixmapPaint {
+                    opacity: group.opacity,
+                    ..Default::default()
+                };
                 pixmap.draw_pixmap(
                     0,
                     0,
@@ -98,8 +100,10 @@ fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Tr
     };
 
     if let Some(fill) = &path.fill {
-        let mut paint = tiny_skia::Paint::default();
-        paint.anti_alias = true;
+        let mut paint = tiny_skia::Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
         apply_paint(&mut paint, &fill.paint);
         pixmap.fill_path(
             &skia_path,
@@ -111,8 +115,10 @@ fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Tr
     }
 
     if let Some(stroke) = &path.stroke {
-        let mut paint = tiny_skia::Paint::default();
-        paint.anti_alias = true;
+        let mut paint = tiny_skia::Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
         apply_paint(&mut paint, &stroke.paint);
         let skia_stroke = tiny_skia::Stroke {
             width: stroke.width,

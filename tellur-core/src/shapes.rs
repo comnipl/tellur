@@ -79,7 +79,7 @@ impl VectorComponent for Ellipse {
 
 // Magic constant for approximating a quarter-circle with a cubic Bezier:
 // 4 * (sqrt(2) - 1) / 3. The maximum error is around 0.027% of the radius.
-const KAPPA: f32 = 0.5522847498307933;
+const KAPPA: f32 = 0.552_284_8;
 
 fn ellipse_to_graphic(
     center: Vec2,
