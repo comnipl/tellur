@@ -31,11 +31,20 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
     let view_box_xform = view_box_transform(&graphic.view_box, width, height);
     render_node(&mut pixmap, &graphic.root, view_box_xform, 1.0);
 
+    // tiny-skia outputs premultiplied alpha for efficient compositing, but
+    // `RasterImage` is defined as straight alpha (matching PNG, web, and most
+    // image libraries). Demultiply here so the public type stays consistent.
+    let mut straight = Vec::with_capacity(pixmap.data().len());
+    for p in pixmap.pixels() {
+        let c = p.demultiply();
+        straight.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+    }
+
     RasterImage {
         width,
         height,
         format: PixelFormat::Rgba8,
-        pixels: Bytes::copy_from_slice(pixmap.data()),
+        pixels: Bytes::from(straight),
     }
 }
 
