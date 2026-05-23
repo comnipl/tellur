@@ -29,7 +29,7 @@ fn main() {
         square
             .view_box()
             .anchor(Anchor::TOP_LEFT)
-            .snap_to(scene.size, Anchor::TOP_LEFT),
+            .snap_to_anchor(scene.size, Anchor::TOP_LEFT),
         square,
     );
 
@@ -42,7 +42,7 @@ fn main() {
         circle
             .view_box()
             .anchor(Anchor::BOTTOM_RIGHT)
-            .snap_to(scene.size, Anchor::BOTTOM_RIGHT),
+            .snap_to_anchor(scene.size, Anchor::BOTTOM_RIGHT),
         circle,
     );
 
