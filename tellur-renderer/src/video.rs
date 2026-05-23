@@ -9,11 +9,19 @@
 //!
 //! Frames are produced by repeatedly calling `Timeline::build(t, resolution)`
 //! with `t = frame_idx / fps` for `frame_idx` in `0..ceil(duration * fps)`.
+//!
+//! Progress: a two-row progress display (`Render` / `Encode`) is shown by
+//! default, driven by [`indicatif`]. The Render row counts frames as we
+//! produce them; the Encode row is updated by parsing `frame=N` lines that
+//! `ffmpeg` writes to stdout via `-progress pipe:1`. Disable via
+//! [`FfmpegEncoder::progress`].
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use tellur_core::raster::{PixelFormat, Resolution};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
@@ -29,6 +37,7 @@ pub struct FfmpegEncoder {
     fps: u32,
     resolution: Resolution,
     args: Vec<String>,
+    progress: bool,
 }
 
 #[derive(Debug, Error)]
@@ -67,6 +76,7 @@ impl FfmpegEncoder {
             fps,
             resolution,
             args: Vec::new(),
+            progress: true,
         }
     }
 
@@ -81,6 +91,14 @@ impl FfmpegEncoder {
         S: Into<String>,
     {
         self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Toggle the two-row progress display. Default is on. When the output
+    /// is not a TTY, `indicatif` automatically renders nothing, so leaving
+    /// this on is safe for piped/redirected runs.
+    pub fn progress(mut self, enabled: bool) -> Self {
+        self.progress = enabled;
         self
     }
 
@@ -108,18 +126,67 @@ impl FfmpegEncoder {
             .args(["-pix_fmt", "rgba"])
             .args(["-s", &size_arg])
             .args(["-r", &fps_arg])
-            .args(["-i", "-"])
-            .args(&self.args)
+            .args(["-i", "-"]);
+
+        // -progress pipe:1 makes ffmpeg emit machine-readable key=value lines
+        // to stdout; we parse `frame=N` off the stream to drive the Encode bar.
+        // Without progress, we just discard stdout.
+        if self.progress {
+            cmd.args(["-progress", "pipe:1"]).stdout(Stdio::piped());
+        } else {
+            cmd.stdout(Stdio::null());
+        }
+
+        cmd.args(&self.args)
             .arg(out)
             .stdin(Stdio::piped())
-            // Capture stderr so we can surface ffmpeg's error message on failure.
-            // ffmpeg is chatty on stderr even on success, but we only read it
-            // when something goes wrong.
-            .stderr(Stdio::piped())
-            .stdout(Stdio::null());
+            .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(FfmpegError::Spawn)?;
         let mut stdin = child.stdin.take().expect("stdin piped");
+
+        // Set up the two-row progress display and a thread that drains
+        // ffmpeg's progress output. The `_multi` guard keeps the multi-bar
+        // alive for the duration of the encode; dropping it after both bars
+        // finish lets indicatif clear/finalize the lines cleanly.
+        let (_multi, render_bar, encode_bar, progress_thread) = if self.progress {
+            let multi = MultiProgress::new();
+            let style = ProgressStyle::with_template(
+                "{msg:7} {bar:40.cyan/blue} {pos:>5}/{len} ({percent:>3}%) {elapsed_precise}",
+            )
+            .expect("static template parses")
+            .progress_chars("##-");
+
+            let render_bar = multi.add(ProgressBar::new(total_frames));
+            render_bar.set_style(style.clone());
+            render_bar.set_message("Render");
+
+            let encode_bar = multi.add(ProgressBar::new(total_frames));
+            encode_bar.set_style(style);
+            encode_bar.set_message("Encode");
+
+            let stdout = child.stdout.take().expect("stdout piped when progress=true");
+            let encode_bar_for_thread = encode_bar.clone();
+            let handle = thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    if let Some(rest) = line.strip_prefix("frame=") {
+                        if let Ok(n) = rest.trim().parse::<u64>() {
+                            encode_bar_for_thread.set_position(n);
+                        }
+                    }
+                }
+            });
+
+            (
+                Some(multi),
+                Some(render_bar),
+                Some(encode_bar),
+                Some(handle),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         let write_result = (|| -> Result<(), FfmpegError> {
             for frame_idx in 0..total_frames {
@@ -148,6 +215,10 @@ impl FfmpegEncoder {
                         frame: frame_idx,
                         source,
                     })?;
+
+                if let Some(bar) = &render_bar {
+                    bar.inc(1);
+                }
             }
             Ok(())
         })();
@@ -157,6 +228,18 @@ impl FfmpegEncoder {
         // cleanly so we can collect its stderr.
         drop(stdin);
 
+        // Render side is done; the encoder thread continues until ffmpeg
+        // closes stdout (which it does on exit).
+        if let Some(bar) = &render_bar {
+            bar.finish();
+        }
+
+        if let Some(handle) = progress_thread {
+            // Join is best-effort: a panic in the parsing thread should not
+            // shadow the actual ffmpeg outcome below.
+            let _ = handle.join();
+        }
+
         let mut stderr_buf = String::new();
         if let Some(mut stderr) = child.stderr.take() {
             stderr
@@ -164,6 +247,15 @@ impl FfmpegEncoder {
                 .map_err(FfmpegError::ReadStderr)?;
         }
         let status = child.wait().map_err(FfmpegError::Wait)?;
+
+        if let Some(bar) = &encode_bar {
+            // ffmpeg's last `frame=` might lag the actual final count; snap to
+            // total so the bar reads 100% on completion when it really finished.
+            if status.success() {
+                bar.set_position(total_frames);
+            }
+            bar.finish();
+        }
 
         write_result?;
 

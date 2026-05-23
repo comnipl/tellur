@@ -95,7 +95,7 @@ fn main() {
     });
 
     let out = Path::new("/tmp/timeline.mp4");
-    FfmpegEncoder::new(Resolution::new(1280, 720), 60)
+    FfmpegEncoder::new(Resolution::new(1920, 1080), 60)
         .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20"])
         .encode(&tl, out)
         .expect("encode mp4");
