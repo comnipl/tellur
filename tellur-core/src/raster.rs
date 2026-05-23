@@ -21,9 +21,28 @@ pub enum PixelFormat {
     Rgba16Float,
 }
 
-/// A `Component` that can produce a `RasterImage`.
+/// Target output resolution for a `RasterComponent::render` call, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Resolution {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
+/// A `Component` that can produce a `RasterImage` at a caller-specified
+/// resolution.
+///
+/// `target` flows from the top-level call down through the component tree.
+/// Each intermediate component decides what resolution to request from its
+/// own children so that the final image is produced with the minimum work
+/// needed to fill `target`.
 pub trait RasterComponent: Component {
-    fn render(&self) -> RasterImage;
+    fn render(&self, target: Resolution) -> RasterImage;
 }
 
 // Compile-time guarantee that `RasterComponent` is dyn-safe.

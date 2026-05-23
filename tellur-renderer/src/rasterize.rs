@@ -2,23 +2,21 @@ use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::component::Component;
 use tellur_core::geometry::{Rect, Transform};
-use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage};
+use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::vector::{Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic};
 
-/// A `RasterComponent` that takes a `VectorComponent` and produces a raster image
-/// at the given resolution.
+/// A `RasterComponent` that rasterizes a `VectorComponent` at the resolution
+/// requested by the caller of `render`.
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
-    pub width: u32,
-    pub height: u32,
 }
 
 impl<V: VectorComponent> Component for Rasterize<V> {}
 
 impl<V: VectorComponent> RasterComponent for Rasterize<V> {
-    fn render(&self) -> RasterImage {
+    fn render(&self, target: Resolution) -> RasterImage {
         let graphic = self.vector.render();
-        rasterize(&graphic, self.width, self.height)
+        rasterize(&graphic, target.width, target.height)
     }
 }
 
