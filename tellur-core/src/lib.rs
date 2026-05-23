@@ -1,5 +1,6 @@
 pub mod color;
 pub mod geometry;
+pub mod interpolate;
 pub mod layer;
 pub mod phase;
 pub mod raster;

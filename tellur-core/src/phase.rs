@@ -9,6 +9,8 @@ use std::fmt;
 
 use thiserror::Error;
 
+use crate::interpolate::Interpolate;
+
 /// A finite `f32` constrained to the unit interval `[0.0, 1.0]` (both
 /// endpoints included).
 ///
@@ -51,6 +53,13 @@ impl Phase {
     /// closed unit interval is closed under this reflection).
     pub fn invert(self) -> Self {
         Self(1.0 - self.0)
+    }
+
+    /// Linearly interpolates between `from` (at `self == 0`) and `to`
+    /// (at `self == 1`). Convenience wrapper for `from.interpolate(to, self)`
+    /// so the `Phase` reads as "the driver" in animation code.
+    pub fn interpolate<T: Interpolate>(self, from: T, to: T) -> T {
+        from.interpolate(to, self)
     }
 }
 
@@ -130,5 +139,12 @@ mod tests {
         assert_eq!(Phase::ZERO.get(), 0.0);
         assert_eq!(Phase::HALF.get(), 0.5);
         assert_eq!(Phase::ONE.get(), 1.0);
+    }
+
+    #[test]
+    fn interpolate_drives_f32_value() {
+        assert_eq!(Phase::HALF.interpolate(0.0, 10.0), 5.0);
+        assert_eq!(Phase::ZERO.interpolate(0.0, 10.0), 0.0);
+        assert_eq!(Phase::ONE.interpolate(0.0, 10.0), 10.0);
     }
 }
