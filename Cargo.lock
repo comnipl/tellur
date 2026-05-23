@@ -257,7 +257,17 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "png",
+ "tellur-macros",
  "thiserror",
+]
+
+[[package]]
+name = "tellur-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -16,56 +16,41 @@ use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::{Circle, Rectangle};
 use tellur_core::time::{LocalTime, Time};
 use tellur_core::timeline::timeline;
-use tellur_core::vector::{Paint, VectorComponent, VectorGraphic};
+use tellur_core::vector::{Paint, VectorComponent};
+use tellur_core::vector_component;
 use tellur_renderer::{FfmpegEncoder, Rasterizable};
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across a track
-/// of `scene_width`, with one full round trip per `Self::PERIOD` seconds.
-/// The motion is driven entirely by `t` — a `LocalTime` clock that the
+/// of `scene_width`, with one full round trip per `PERIOD` seconds. The
+/// motion is driven entirely by `t` — a `LocalTime` clock that the
 /// component reads independently of the global timeline. Callers can pass
 /// `TimelineTime` directly via `.into()` since it converts to `LocalTime`.
-struct BouncingDot {
-    t: LocalTime,
-    scene_width: f32,
-}
-
-impl BouncingDot {
+#[vector_component]
+fn bouncing_dot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
     const PERIOD: f32 = 2.5;
     const RADIUS: f32 = 30.0;
     const SIDE_PADDING: f32 = 40.0;
-}
 
-impl VectorComponent for BouncingDot {
-    fn view_box(&self) -> Vec2 {
-        // Track footprint: full track width, just tall enough to bound the dot.
-        Vec2(self.scene_width, Self::RADIUS * 2.0)
-    }
+    let (phase, _) = t.bounce(PERIOD);
+    let view = Vec2(scene_width, RADIUS * 2.0);
+    let center_y = view.1 * 0.5;
+    let target = phase.interpolate(
+        Vec2(SIDE_PADDING + RADIUS, center_y),
+        Vec2(scene_width - SIDE_PADDING - RADIUS, center_y),
+    );
 
-    fn render(&self) -> VectorGraphic {
-        let (phase, _) = self.t.bounce(Self::PERIOD);
-        // The dot bounces between two points, vertically centered in the track.
-        let center_y = self.view_box().1 * 0.5;
-        let target = phase.interpolate(
-            Vec2(Self::SIDE_PADDING + Self::RADIUS, center_y),
-            Vec2(
-                self.scene_width - Self::SIDE_PADDING - Self::RADIUS,
-                center_y,
-            ),
-        );
+    let circle = Circle {
+        radius: RADIUS,
+        fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
+        stroke: None,
+    };
 
-        let circle = Circle {
-            radius: Self::RADIUS,
-            fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
-            stroke: None,
-        };
-
-        let mut layer = VectorLayer::new(self.view_box());
-        layer.add(
-            circle.view_box().anchor(Anchor::CENTER).snap_to(target),
-            circle,
-        );
-        layer.render()
-    }
+    let mut layer = VectorLayer::new(view);
+    layer.add(
+        circle.view_box().anchor(Anchor::CENTER).snap_to(target),
+        circle,
+    );
+    layer
 }
 
 fn main() {

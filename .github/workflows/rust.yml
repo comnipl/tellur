@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [tellur-core, tellur-renderer]
+        package: [tellur-core, tellur-macros, tellur-renderer]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [tellur-core, tellur-renderer]
+        package: [tellur-core, tellur-macros, tellur-renderer]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
@@ -54,7 +54,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [tellur-core, tellur-renderer]
+        package: [tellur-core, tellur-macros, tellur-renderer]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
@@ -75,7 +75,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [tellur-core, tellur-renderer]
+        package: [tellur-core, tellur-macros, tellur-renderer]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
