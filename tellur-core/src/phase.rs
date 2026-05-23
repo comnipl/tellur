@@ -118,7 +118,10 @@ mod tests {
     fn invert_is_one_minus() {
         assert_eq!(Phase::ZERO.invert(), Phase::ONE);
         assert_eq!(Phase::ONE.invert(), Phase::ZERO);
-        assert_eq!(Phase::new(0.25).unwrap().invert(), Phase::new(0.75).unwrap());
+        assert_eq!(
+            Phase::new(0.25).unwrap().invert(),
+            Phase::new(0.75).unwrap()
+        );
     }
 
     #[test]

@@ -52,9 +52,7 @@ pub enum FfmpegError {
     Wait(std::io::Error),
     #[error("ffmpeg exited with status {status}:\n{stderr}")]
     NonZeroExit { status: String, stderr: String },
-    #[error(
-        "frame {frame} produced {actual} bytes, expected {expected} ({width}x{height} RGBA)"
-    )]
+    #[error("frame {frame} produced {actual} bytes, expected {expected} ({width}x{height} RGBA)")]
     FrameSizeMismatch {
         frame: u64,
         expected: usize,
@@ -165,7 +163,10 @@ impl FfmpegEncoder {
             encode_bar.set_style(style);
             encode_bar.set_message("Encode");
 
-            let stdout = child.stdout.take().expect("stdout piped when progress=true");
+            let stdout = child
+                .stdout
+                .take()
+                .expect("stdout piped when progress=true");
             let encode_bar_for_thread = encode_bar.clone();
             let handle = thread::spawn(move || {
                 let reader = BufReader::new(stdout);

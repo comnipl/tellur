@@ -181,9 +181,7 @@ impl Time for LocalTime {
 /// [`Time`].
 impl From<TimelineTime> for LocalTime {
     fn from(t: TimelineTime) -> Self {
-        Self {
-            seconds: t.seconds,
-        }
+        Self { seconds: t.seconds }
     }
 }
 

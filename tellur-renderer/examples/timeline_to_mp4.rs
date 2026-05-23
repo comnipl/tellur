@@ -47,7 +47,10 @@ impl VectorComponent for BouncingDot {
         let center_y = self.view_box().1 * 0.5;
         let target = phase.interpolate(
             Vec2(Self::SIDE_PADDING + Self::RADIUS, center_y),
-            Vec2(self.scene_width - Self::SIDE_PADDING - Self::RADIUS, center_y),
+            Vec2(
+                self.scene_width - Self::SIDE_PADDING - Self::RADIUS,
+                center_y,
+            ),
         );
 
         let circle = Circle {
