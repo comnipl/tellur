@@ -6,22 +6,14 @@ use tellur_core::color::Color;
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::RasterComponent;
 use tellur_core::shapes::Circle;
-use tellur_core::vector::{Fill, Paint};
+use tellur_core::vector::Paint;
 use tellur_renderer::Rasterize;
 
 fn main() {
     let circle = Circle {
-        center: Vec2 { x: 128.0, y: 128.0 },
+        center: Vec2(128.0, 128.0),
         radius: 100.0,
-        fill: Some(Fill {
-            paint: Paint::Solid(Color {
-                r: 0.9,
-                g: 0.3,
-                b: 0.4,
-                a: 1.0,
-            }),
-            opacity: 1.0,
-        }),
+        fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.55)).into(),
         stroke: None,
     };
 

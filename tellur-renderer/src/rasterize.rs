@@ -3,9 +3,7 @@ use tellur_core::color::Color;
 use tellur_core::component::Component;
 use tellur_core::geometry::{Rect, Transform};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage};
-use tellur_core::vector::{
-    Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic,
-};
+use tellur_core::vector::{Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic};
 
 /// A `RasterComponent` that takes a `VectorComponent` and produces a raster image
 /// at the given resolution.
@@ -29,7 +27,7 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
         .expect("pixmap dimensions must be non-zero");
 
     let view_box_xform = view_box_transform(&graphic.view_box, width, height);
-    render_node(&mut pixmap, &graphic.root, view_box_xform, 1.0);
+    render_node(&mut pixmap, &graphic.root, view_box_xform);
 
     // tiny-skia outputs premultiplied alpha for efficient compositing, but
     // `RasterImage` is defined as straight alpha (matching PNG, web, and most
@@ -51,40 +49,52 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
 /// Transform that maps the range of `view_box` into pixel space `(0, 0)..(width, height)`.
 /// Equivalent to SVG's `preserveAspectRatio="none"` (each axis is scaled independently).
 fn view_box_transform(view_box: &Rect, width: u32, height: u32) -> tiny_skia::Transform {
-    let sx = width as f32 / view_box.size.x;
-    let sy = height as f32 / view_box.size.y;
-    let tx = -view_box.origin.x * sx;
-    let ty = -view_box.origin.y * sy;
+    let sx = width as f32 / view_box.size.0;
+    let sy = height as f32 / view_box.size.1;
+    let tx = -view_box.origin.0 * sx;
+    let ty = -view_box.origin.1 * sy;
     tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty)
 }
 
-fn render_node(
-    pixmap: &mut tiny_skia::Pixmap,
-    node: &Node,
-    parent_xform: tiny_skia::Transform,
-    parent_opacity: f32,
-) {
+fn render_node(pixmap: &mut tiny_skia::Pixmap, node: &Node, parent_xform: tiny_skia::Transform) {
     match node {
         Node::Group(group) => {
             let xform = parent_xform.pre_concat(to_skia_transform(&group.transform));
-            let opacity = parent_opacity * group.opacity;
-            for child in &group.children {
-                render_node(pixmap, child, xform, opacity);
+            if group.opacity >= 1.0 {
+                for child in &group.children {
+                    render_node(pixmap, child, xform);
+                }
+            } else if group.opacity > 0.0 {
+                // Children are rendered into a separate layer, then composited
+                // with the group's opacity. This is required for correct alpha
+                // blending of overlapping descendants; multiplying opacity into
+                // each child's alpha would double-darken overlap regions.
+                let mut layer = tiny_skia::Pixmap::new(pixmap.width(), pixmap.height())
+                    .expect("pixmap dimensions must be non-zero");
+                for child in &group.children {
+                    render_node(&mut layer, child, xform);
+                }
+                let mut pp = tiny_skia::PixmapPaint::default();
+                pp.opacity = group.opacity;
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    layer.as_ref(),
+                    &pp,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
             }
+            // opacity <= 0.0: skip the group entirely.
         }
         Node::Path(path) => {
             let xform = parent_xform.pre_concat(to_skia_transform(&path.transform));
-            render_path(pixmap, path, xform, parent_opacity);
+            render_path(pixmap, path, xform);
         }
     }
 }
 
-fn render_path(
-    pixmap: &mut tiny_skia::Pixmap,
-    path: &Path,
-    xform: tiny_skia::Transform,
-    opacity: f32,
-) {
+fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Transform) {
     let Some(skia_path) = build_skia_path(&path.commands) else {
         return;
     };
@@ -92,7 +102,7 @@ fn render_path(
     if let Some(fill) = &path.fill {
         let mut paint = tiny_skia::Paint::default();
         paint.anti_alias = true;
-        apply_paint(&mut paint, &fill.paint, fill.opacity * opacity);
+        apply_paint(&mut paint, &fill.paint);
         pixmap.fill_path(
             &skia_path,
             &paint,
@@ -105,7 +115,7 @@ fn render_path(
     if let Some(stroke) = &path.stroke {
         let mut paint = tiny_skia::Paint::default();
         paint.anti_alias = true;
-        apply_paint(&mut paint, &stroke.paint, opacity);
+        apply_paint(&mut paint, &stroke.paint);
         let skia_stroke = tiny_skia::Stroke {
             width: stroke.width,
             ..Default::default()
@@ -118,11 +128,11 @@ fn build_skia_path(commands: &[PathCommand]) -> Option<tiny_skia::Path> {
     let mut pb = tiny_skia::PathBuilder::new();
     for cmd in commands {
         match cmd {
-            PathCommand::MoveTo(p) => pb.move_to(p.x, p.y),
-            PathCommand::LineTo(p) => pb.line_to(p.x, p.y),
-            PathCommand::QuadTo { control, to } => pb.quad_to(control.x, control.y, to.x, to.y),
+            PathCommand::MoveTo(p) => pb.move_to(p.0, p.1),
+            PathCommand::LineTo(p) => pb.line_to(p.0, p.1),
+            PathCommand::QuadTo { control, to } => pb.quad_to(control.0, control.1, to.0, to.1),
             PathCommand::CubicTo { c1, c2, to } => {
-                pb.cubic_to(c1.x, c1.y, c2.x, c2.y, to.x, to.y)
+                pb.cubic_to(c1.0, c1.1, c2.0, c2.1, to.0, to.1)
             }
             PathCommand::Close => pb.close(),
         }
@@ -130,20 +140,20 @@ fn build_skia_path(commands: &[PathCommand]) -> Option<tiny_skia::Path> {
     pb.finish()
 }
 
-fn apply_paint(paint: &mut tiny_skia::Paint, source: &Paint, opacity: f32) {
+fn apply_paint(paint: &mut tiny_skia::Paint, source: &Paint) {
     match source {
         Paint::Solid(color) => {
-            paint.set_color(to_skia_color(color, opacity));
+            paint.set_color(to_skia_color(color));
         }
     }
 }
 
-fn to_skia_color(color: &Color, opacity: f32) -> tiny_skia::Color {
+fn to_skia_color(color: &Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(
         color.r.clamp(0.0, 1.0),
         color.g.clamp(0.0, 1.0),
         color.b.clamp(0.0, 1.0),
-        (color.a * opacity).clamp(0.0, 1.0),
+        color.a.clamp(0.0, 1.0),
     )
     .expect("clamped components are within [0, 1]")
 }

@@ -49,7 +49,6 @@ pub enum PathCommand {
 #[derive(Debug, Clone)]
 pub struct Fill {
     pub paint: Paint,
-    pub opacity: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -61,4 +60,29 @@ pub struct Stroke {
 #[derive(Debug, Clone)]
 pub enum Paint {
     Solid(Color),
+}
+
+impl From<Paint> for Fill {
+    fn from(paint: Paint) -> Self {
+        Self { paint }
+    }
+}
+
+impl From<Paint> for Option<Fill> {
+    fn from(paint: Paint) -> Self {
+        Some(Fill { paint })
+    }
+}
+
+impl From<Paint> for Stroke {
+    fn from(paint: Paint) -> Self {
+        // Default stroke width mirrors SVG's `stroke-width="1"`.
+        Self { paint, width: 1.0 }
+    }
+}
+
+impl From<Paint> for Option<Stroke> {
+    fn from(paint: Paint) -> Self {
+        Some(paint.into())
+    }
 }

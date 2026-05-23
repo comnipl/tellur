@@ -23,9 +23,9 @@ impl VectorComponent for Rectangle {
         let s = self.rect.size;
         let commands = vec![
             PathCommand::MoveTo(o),
-            PathCommand::LineTo(Vec2 { x: o.x + s.x, y: o.y }),
-            PathCommand::LineTo(Vec2 { x: o.x + s.x, y: o.y + s.y }),
-            PathCommand::LineTo(Vec2 { x: o.x, y: o.y + s.y }),
+            PathCommand::LineTo(Vec2(o.0 + s.0, o.1)),
+            PathCommand::LineTo(Vec2(o.0 + s.0, o.1 + s.1)),
+            PathCommand::LineTo(Vec2(o.0, o.1 + s.1)),
             PathCommand::Close,
         ];
         VectorGraphic {
@@ -54,7 +54,7 @@ impl VectorComponent for Circle {
     fn render(&self) -> VectorGraphic {
         ellipse_to_graphic(
             self.center,
-            Vec2 { x: self.radius, y: self.radius },
+            Vec2(self.radius, self.radius),
             self.fill.clone(),
             self.stroke.clone(),
         )
@@ -87,39 +87,39 @@ fn ellipse_to_graphic(
     fill: Option<Fill>,
     stroke: Option<Stroke>,
 ) -> VectorGraphic {
-    let Vec2 { x: cx, y: cy } = center;
-    let Vec2 { x: rx, y: ry } = radii;
+    let Vec2(cx, cy) = center;
+    let Vec2(rx, ry) = radii;
     let ox = rx * KAPPA;
     let oy = ry * KAPPA;
 
     let commands = vec![
-        PathCommand::MoveTo(Vec2 { x: cx + rx, y: cy }),
+        PathCommand::MoveTo(Vec2(cx + rx, cy)),
         PathCommand::CubicTo {
-            c1: Vec2 { x: cx + rx, y: cy + oy },
-            c2: Vec2 { x: cx + ox, y: cy + ry },
-            to: Vec2 { x: cx, y: cy + ry },
+            c1: Vec2(cx + rx, cy + oy),
+            c2: Vec2(cx + ox, cy + ry),
+            to: Vec2(cx, cy + ry),
         },
         PathCommand::CubicTo {
-            c1: Vec2 { x: cx - ox, y: cy + ry },
-            c2: Vec2 { x: cx - rx, y: cy + oy },
-            to: Vec2 { x: cx - rx, y: cy },
+            c1: Vec2(cx - ox, cy + ry),
+            c2: Vec2(cx - rx, cy + oy),
+            to: Vec2(cx - rx, cy),
         },
         PathCommand::CubicTo {
-            c1: Vec2 { x: cx - rx, y: cy - oy },
-            c2: Vec2 { x: cx - ox, y: cy - ry },
-            to: Vec2 { x: cx, y: cy - ry },
+            c1: Vec2(cx - rx, cy - oy),
+            c2: Vec2(cx - ox, cy - ry),
+            to: Vec2(cx, cy - ry),
         },
         PathCommand::CubicTo {
-            c1: Vec2 { x: cx + ox, y: cy - ry },
-            c2: Vec2 { x: cx + rx, y: cy - oy },
-            to: Vec2 { x: cx + rx, y: cy },
+            c1: Vec2(cx + ox, cy - ry),
+            c2: Vec2(cx + rx, cy - oy),
+            to: Vec2(cx + rx, cy),
         },
         PathCommand::Close,
     ];
 
     let view_box = Rect {
-        origin: Vec2 { x: cx - rx, y: cy - ry },
-        size: Vec2 { x: rx * 2.0, y: ry * 2.0 },
+        origin: Vec2(cx - rx, cy - ry),
+        size: Vec2(rx * 2.0, ry * 2.0),
     };
 
     VectorGraphic {

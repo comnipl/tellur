@@ -4,10 +4,7 @@
 //! pointing down**.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Vec2 {
-    pub x: f32,
-    pub y: f32,
-}
+pub struct Vec2(pub f32, pub f32);
 
 /// Axis-aligned rectangle.
 ///
