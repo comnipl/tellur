@@ -1,0 +1,91 @@
+name: Rust Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Rustfmt (${{ matrix.package }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [tellur-core, tellur-renderer]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      - run: nix develop --command cargo fmt -p ${{ matrix.package }} -- --check
+
+  clippy:
+    name: Clippy (${{ matrix.package }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [tellur-core, tellur-renderer]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          key: ${{ matrix.package }}
+      - run: nix develop --command cargo clippy --locked -p ${{ matrix.package }} -- -D warnings
+
+  build:
+    name: Build (${{ matrix.package }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [tellur-core, tellur-renderer]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          key: ${{ matrix.package }}
+      - run: nix develop --command cargo build --locked -p ${{ matrix.package }}
+
+  test:
+    name: Test (${{ matrix.package }})
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [tellur-core, tellur-renderer]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          key: ${{ matrix.package }}
+      - run: nix develop --command cargo nextest run --locked -p ${{ matrix.package }} --no-tests=warn
