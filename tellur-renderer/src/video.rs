@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use tellur_core::raster::{PixelFormat, Resolution};
-use tellur_core::time::TimeView;
+use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use thiserror::Error;
 
@@ -123,7 +123,7 @@ impl FfmpegEncoder {
 
         let write_result = (|| -> Result<(), FfmpegError> {
             for frame_idx in 0..total_frames {
-                let t = TimeView::new(frame_idx as f32 / self.fps as f32);
+                let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
                 let image = tl.build(t, self.resolution);
 
                 if image.format != PixelFormat::Rgba8 {

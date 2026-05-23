@@ -14,17 +14,18 @@ use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::{Circle, Rectangle};
-use tellur_core::time::{Time, TimeView};
+use tellur_core::time::{LocalTime, Time};
 use tellur_core::timeline::timeline;
 use tellur_core::vector::{Paint, VectorComponent, VectorGraphic};
 use tellur_renderer::{FfmpegEncoder, Rasterizable};
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across a track
 /// of `scene_width`, with one full round trip per `Self::PERIOD` seconds.
-/// The motion is driven entirely by `t`, so callers can quantize or gate
-/// the time independently per instance.
+/// The motion is driven entirely by `t` — a `LocalTime` clock that the
+/// component reads independently of the global timeline. Callers can pass
+/// `TimelineTime` directly via `.into()` since it converts to `LocalTime`.
 struct BouncingDot {
-    t: TimeView,
+    t: LocalTime,
     scene_width: f32,
 }
 
@@ -79,7 +80,7 @@ fn main() {
         // CENTER_LEFT onto a fractional anchor at (0, (i + 0.5) / N) of the scene.
         for (i, &fps) in [60u32, 30, 24, 16].iter().enumerate() {
             let dot = BouncingDot {
-                t: t.fps(fps),
+                t: t.fps(fps).into(),
                 scene_width: scene_size.0,
             };
             let stripe_anchor = Anchor::new(0.0, (i as f32 + 0.5) / 4f32);
