@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 bytes = "1.11.1"
 tellur-core = { path = "../tellur-core" }
+thiserror = "2.0.18"
 tiny-skia = "0.12.0"
