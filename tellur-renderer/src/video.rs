@@ -175,8 +175,7 @@ impl FfmpegEncoder {
             // only the `@` separator is muted (applied inside `set_message`).
             let info_bar = multi.add(ProgressBar::new(1));
             info_bar.set_style(
-                ProgressStyle::with_template("          {msg}")
-                    .expect("static template parses"),
+                ProgressStyle::with_template("          {msg}").expect("static template parses"),
             );
             info_bar.set_message("-");
 
