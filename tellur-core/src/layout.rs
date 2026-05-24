@@ -688,7 +688,11 @@ pub mod raster {
                 .anchored(self.child_anchor)
                 .snap_to(self.at.point(size));
             let paint_rect = self.paint_bounds(size);
-            composite_children(paint_rect, target, &[(pos, child_size, self.child.as_ref())])
+            composite_children(
+                paint_rect,
+                target,
+                &[(pos, child_size, self.child.as_ref())],
+            )
         }
     }
 
@@ -729,7 +733,11 @@ pub mod raster {
                 .anchored(self.child_anchor)
                 .snap_to(self.at.point(size));
             let paint_rect = self.paint_bounds(size);
-            composite_children(paint_rect, target, &[(pos, child_size, self.child.as_ref())])
+            composite_children(
+                paint_rect,
+                target,
+                &[(pos, child_size, self.child.as_ref())],
+            )
         }
     }
 
