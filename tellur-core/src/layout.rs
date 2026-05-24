@@ -399,9 +399,7 @@ pub mod raster {
 
     use bytes::Bytes;
 
-    use super::{
-        compute_stack_layout, Axis, Color, CrossAlign, EdgeInsets, MainAlign, Vec2,
-    };
+    use super::{compute_stack_layout, Axis, Color, CrossAlign, EdgeInsets, MainAlign, Vec2};
     use crate::geometry::Anchor;
     use crate::layer::composite_children;
     use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
@@ -508,10 +506,8 @@ pub mod raster {
             match self.background {
                 Some(color) => {
                     let bg = SolidRect { size, color };
-                    let placed: Vec<(Vec2, &dyn RasterComponent)> = vec![
-                        (Vec2::ZERO, &bg),
-                        (Vec2::ZERO, self.child.as_ref()),
-                    ];
+                    let placed: Vec<(Vec2, &dyn RasterComponent)> =
+                        vec![(Vec2::ZERO, &bg), (Vec2::ZERO, self.child.as_ref())];
                     composite_children(size, target, &placed)
                 }
                 None => composite_children(size, target, &[(Vec2::ZERO, self.child.as_ref())]),
