@@ -3,7 +3,7 @@ use std::io::Write;
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::geometry::Vec2;
+use crate::geometry::{Constraints, Rect, Vec2};
 
 #[derive(Debug, Clone)]
 pub struct RasterImage {
@@ -34,46 +34,38 @@ impl Resolution {
     }
 }
 
-/// A component that can produce a `RasterImage` at a caller-specified
-/// resolution.
+/// A component that can produce a `RasterImage` at a parent-chosen
+/// resolution. Mirrors [`VectorComponent`](crate::vector::VectorComponent)
+/// with the same two-pass `layout` / `render` protocol, but `render`
+/// takes an extra `target: Resolution` so that the parent can request a
+/// specific pixel output size for the component's logical `size`.
 ///
-/// `target` flows from the top-level call down through the component tree.
-/// Each intermediate component decides what resolution to request from its
-/// own children so that the final image is produced with the minimum work
-/// needed to fill `target`.
-///
-/// Two roles share this trait, mirroring `VectorComponent`. **Element
-/// components** are leaves that own a concrete `render()` implementation
-/// (e.g. `Layer`, `Rasterize<V>`); they keep the default `body()` returning
-/// `RasterBody::Element` and override `render()` themselves. **Composite
-/// components** delegate to another component by overriding `body()` to
-/// return `RasterBody::Of(...)`; the default `render()` then forwards
-/// `target` through the chain until it reaches an element.
-///
-/// Implementors must keep `view_box()` consistent with the logical size
-/// they occupy in a parent's coordinate space, so layers can lay them out
-/// without forcing a render.
+/// 1. Parent calls [`layout`](RasterComponent::layout) with constraints;
+///    child returns its layout size.
+/// 2. Parent calls [`render`](RasterComponent::render) with that size
+///    and the pixel resolution the child should produce.
+/// 3. Optionally [`paint_bounds`](RasterComponent::paint_bounds) tells
+///    the parent how far the component paints outside the layout box,
+///    so `Layer` can grow the sub-resolution accordingly.
 pub trait RasterComponent {
-    fn view_box(&self) -> Vec2;
+    /// Decide the layout size given the parent's constraints.
+    fn layout(&self, constraints: Constraints) -> Vec2;
 
-    /// Identifies whether this component is a render-owning element or a
-    /// delegate to another component. Default is `Element` so that leaf types
-    /// only need to override `render()`.
-    fn body(&self) -> RasterBody {
-        RasterBody::Element
-    }
-
-    /// Produces the rasterized output. The default walks `body()` until it
-    /// reaches an `Element`, threading `target` through unchanged; elements
-    /// must override this with their own implementation.
-    fn render(&self, target: Resolution) -> RasterImage {
-        match self.body() {
-            RasterBody::Element => unimplemented!(
-                "RasterComponent with body() == RasterBody::Element must override render()"
-            ),
-            RasterBody::Of(c) => c.render(target),
+    /// Paint bounds for the component once `size` has been chosen. The
+    /// default returns a rectangle whose `origin` is `(0, 0)` and whose
+    /// `size` equals the layout size; effects override to widen it.
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        Rect {
+            origin: Vec2::ZERO,
+            size,
         }
     }
+
+    /// Render the component at `size` (logical) into a `target`-sized
+    /// pixel buffer. The pixel buffer covers exactly the `paint_bounds`
+    /// rectangle for `size` — for default `paint_bounds`, that's the
+    /// `(0, 0)..size` region.
+    fn render(&self, size: Vec2, target: Resolution) -> RasterImage;
 
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `Layer.children` in
@@ -84,15 +76,6 @@ pub trait RasterComponent {
     {
         Box::new(self)
     }
-}
-
-/// Discriminates element components (own their `render`) from composite
-/// components (delegate to another component).
-pub enum RasterBody {
-    /// This component owns a concrete `render()` implementation.
-    Element,
-    /// Delegate to another component — `render()` forwards `target` through it.
-    Of(Box<dyn RasterComponent>),
 }
 
 // Compile-time guarantee that `RasterComponent` is dyn-safe.

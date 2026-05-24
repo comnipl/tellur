@@ -1,30 +1,27 @@
 //! Layer types for composing components into a scene.
 //!
 //! Both layer types share the same coordinate model: each layer has a
-//! logical `size` defining its coordinate space (top-left at `(0, 0)`),
-//! and children are placed at logical positions within it.
+//! fixed logical `size` defining its coordinate space (top-left at
+//! `(0, 0)`), and children are placed at logical positions within it via
+//! [`Placed`].
 //!
-//! Children are stored as [`Placed<dyn _>`](Placed) — the position lives on
-//! a wrapper around the component rather than as a field of the component
-//! itself, keeping the component types focused on intrinsic shape. Use the
-//! placement extension traits in [`crate::placement`]
-//! ([`VectorPlacement`](crate::placement::VectorPlacement) /
-//! [`RasterPlacement`](crate::placement::RasterPlacement)) to construct
-//! placed children with `at`, `anchor(...).snap_to(...)`, etc.
+//! Layers participate in the constraint-based layout protocol:
+//! `layout(constraints)` returns `size` (clamped to the constraints), and
+//! `render(size)` lays out each child with constraints loose to `size`,
+//! then composes them at their stored positions.
 //!
 //! `VectorLayer` composes `VectorComponent` children into a single
-//! `VectorGraphic`. Each child is placed by wrapping it in a translating
-//! `Group` so the composed result remains pure vector data.
+//! `VectorGraphic`. Each child is wrapped in a translating `Group` so
+//! the composed result remains pure vector data.
 //!
-//! `Layer` composes `RasterComponent` children by rendering each one at a
-//! pixel sub-resolution that matches its logical size and source-over
-//! compositing it onto the output at the corresponding pixel offset.
-//! Vector content has to be rasterized before being added — see the
-//! `Rasterizable::rasterize` extension in `tellur-renderer`.
+//! `Layer` composes `RasterComponent` children by rendering each one at
+//! a pixel sub-resolution matching its logical paint bounds and
+//! source-over compositing it onto the output at the corresponding pixel
+//! offset.
 
 use bytes::Bytes;
 
-use crate::geometry::{Transform, Vec2};
+use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::Placed;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
@@ -49,25 +46,30 @@ impl VectorLayer {
 }
 
 impl VectorComponent for VectorLayer {
-    fn view_box(&self) -> Vec2 {
-        self.size
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        constraints.constrain(self.size)
     }
 
-    fn render(&self) -> VectorGraphic {
-        let children = self
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let child_constraints = Constraints::loose(size);
+        let children: Vec<Node> = self
             .children
             .iter()
             .map(|placed| {
-                let child = placed.child.render();
+                let child_size = placed.child.layout(child_constraints);
+                let child_graphic = placed.child.render(child_size);
                 Node::Group(Group {
                     transform: Transform::translate(placed.position),
                     opacity: 1.0,
-                    children: vec![child.root],
+                    children: vec![child_graphic.root],
                 })
             })
             .collect();
         VectorGraphic {
-            view_box: self.size,
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
             root: Node::Group(Group {
                 transform: Transform::IDENTITY,
                 opacity: 1.0,
@@ -97,48 +99,84 @@ impl Layer {
 }
 
 impl RasterComponent for Layer {
-    fn view_box(&self) -> Vec2 {
-        self.size
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        constraints.constrain(self.size)
     }
 
-    fn render(&self, target: Resolution) -> RasterImage {
-        let placed: Vec<(Vec2, &dyn RasterComponent)> = self
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        let child_constraints = Constraints::loose(size);
+        let mut bounds = Rect {
+            origin: Vec2::ZERO,
+            size,
+        };
+        for placed in &self.children {
+            let child_size = placed.child.layout(child_constraints);
+            let child_paint = placed.child.paint_bounds(child_size);
+            bounds = union_rect(bounds, translate_rect(child_paint, placed.position));
+        }
+        bounds
+    }
+
+    fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+        let paint_rect = self.paint_bounds(size);
+        let child_constraints = Constraints::loose(size);
+        let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = self
             .children
             .iter()
-            .map(|p| (p.position, p.child.as_ref()))
+            .map(|p| {
+                let child_size = p.child.layout(child_constraints);
+                (p.position, child_size, p.child.as_ref())
+            })
             .collect();
-        composite_children(self.size, target, &placed)
+        composite_children(paint_rect, target, &placed)
     }
 }
 
-/// Rasterizes a set of placed raster components into a `container_size`
-/// logical coordinate space and returns the composited image at `target`
-/// pixel resolution.
+/// Rasterizes a set of placed-and-sized raster components into the
+/// `paint_rect` logical region and returns the composited image at
+/// `target` pixel resolution.
 ///
-/// Shared between `Layer::render` and the raster layout containers, which
-/// all need the same "place children at logical offsets, then source-over
-/// composite" pipeline.
+/// `paint_rect` is the parent's own paint bounds expressed in the
+/// parent's logical coordinate space (its origin may be negative).
+/// `target` pixels span exactly that rectangle, so 1 target pixel
+/// equals `paint_rect.size / target` logical units on each axis.
+///
+/// Each entry's tuple is `(position, child_size, child)`:
+/// - `position` is the child's layout origin in the parent's logical
+///   coordinate space (i.e. relative to `paint_rect.origin = (0,0)` in
+///   the layout sense, not relative to `paint_rect.origin`).
+/// - `child_size` is the size returned by the child's `layout`.
+/// - The child's `paint_bounds(child_size)` decides the actual pixel
+///   region (the rectangle may have a negative origin or be larger than
+///   `child_size` for effects like drop shadows); the child renders
+///   into a buffer matching that paint-bounds size and the parent
+///   composites it at `position + child_paint_bounds.origin -
+///   paint_rect.origin` (i.e. shifted into the buffer's local space).
+///
+/// Any spill beyond the buffer is clipped at the buffer's edge — that
+/// is how containers like `DecoratedBox` (whose own paint_bounds equals
+/// its layout box) act as natural clip rectangles.
 pub(crate) fn composite_children(
-    container_size: Vec2,
+    paint_rect: Rect,
     target: Resolution,
-    placed: &[(Vec2, &dyn RasterComponent)],
+    placed: &[(Vec2, Vec2, &dyn RasterComponent)],
 ) -> RasterImage {
     let pixel_count = (target.width as usize) * (target.height as usize);
     let mut accum = vec![0u8; pixel_count * 4];
 
-    // Pixels per logical unit on each axis. SVG's `preserveAspectRatio="none"`
-    // — independent scaling on each axis.
-    let scale_x = target.width as f32 / container_size.0;
-    let scale_y = target.height as f32 / container_size.1;
+    let scale_x = target.width as f32 / paint_rect.size.0;
+    let scale_y = target.height as f32 / paint_rect.size.1;
 
-    for (position, child) in placed {
-        let child_size = child.view_box();
-        let child_px_w = (child_size.0 * scale_x).round().max(1.0) as u32;
-        let child_px_h = (child_size.1 * scale_y).round().max(1.0) as u32;
-        let offset_x = (position.0 * scale_x).round() as i32;
-        let offset_y = (position.1 * scale_y).round() as i32;
+    for (position, child_size, child) in placed {
+        let bounds = child.paint_bounds(*child_size);
+        let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
+        let child_px_h = (bounds.size.1 * scale_y).round().max(1.0) as u32;
+        let paint_x = position.0 + bounds.origin.0 - paint_rect.origin.0;
+        let paint_y = position.1 + bounds.origin.1 - paint_rect.origin.1;
+        let offset_x = (paint_x * scale_x).round() as i32;
+        let offset_y = (paint_y * scale_y).round() as i32;
 
-        let image = child.render(Resolution::new(child_px_w, child_px_h));
+        let image = child.render(*child_size, Resolution::new(child_px_w, child_px_h));
         composite_at(&mut accum, target, &image, offset_x, offset_y);
     }
 
@@ -147,6 +185,26 @@ pub(crate) fn composite_children(
         height: target.height,
         format: PixelFormat::Rgba8,
         pixels: Bytes::from(accum),
+    }
+}
+
+/// Smallest axis-aligned rectangle containing both `a` and `b`.
+pub(crate) fn union_rect(a: Rect, b: Rect) -> Rect {
+    let a_end = Vec2(a.origin.0 + a.size.0, a.origin.1 + a.size.1);
+    let b_end = Vec2(b.origin.0 + b.size.0, b.origin.1 + b.size.1);
+    let origin = Vec2(a.origin.0.min(b.origin.0), a.origin.1.min(b.origin.1));
+    let end = Vec2(a_end.0.max(b_end.0), a_end.1.max(b_end.1));
+    Rect {
+        origin,
+        size: Vec2(end.0 - origin.0, end.1 - origin.1),
+    }
+}
+
+/// Translates a rect by `delta`, leaving its size unchanged.
+pub(crate) fn translate_rect(r: Rect, delta: Vec2) -> Rect {
+    Rect {
+        origin: Vec2(r.origin.0 + delta.0, r.origin.1 + delta.1),
+        size: r.size,
     }
 }
 

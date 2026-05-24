@@ -1,22 +1,28 @@
 use bytes::Bytes;
 use tellur_core::color::Color;
-use tellur_core::geometry::{Transform, Vec2};
+use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::vector::{Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic};
 
-/// A `RasterComponent` that rasterizes a `VectorComponent` at the resolution
-/// requested by the caller of `render`.
+/// A `RasterComponent` that rasterizes a `VectorComponent`. The layout
+/// protocol forwards to the wrapped vector: layout / paint_bounds /
+/// render(size) all delegate, and `render(size, target)` rasterizes the
+/// vector's `render(size)` output into a `target`-sized pixel buffer.
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
 }
 
 impl<V: VectorComponent> RasterComponent for Rasterize<V> {
-    fn view_box(&self) -> Vec2 {
-        self.vector.view_box()
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.vector.layout(constraints)
     }
 
-    fn render(&self, target: Resolution) -> RasterImage {
-        let graphic = self.vector.render();
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        self.vector.paint_bounds(size)
+    }
+
+    fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+        let graphic = self.vector.render(size);
         rasterize(&graphic, target.width, target.height)
     }
 }
@@ -55,13 +61,20 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
     }
 }
 
-/// Transform that maps the graphic's local coordinate space `(0, 0)..view_box`
-/// into pixel space `(0, 0)..(width, height)`.
-/// Equivalent to SVG's `preserveAspectRatio="none"` (each axis is scaled independently).
-fn view_box_transform(view_box: Vec2, width: u32, height: u32) -> tiny_skia::Transform {
-    let sx = width as f32 / view_box.0;
-    let sy = height as f32 / view_box.1;
-    tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, 0.0, 0.0)
+/// Transform that maps the graphic's local coordinate space
+/// `view_box.origin..view_box.origin + view_box.size` into pixel space
+/// `(0, 0)..(width, height)`. Equivalent to SVG's
+/// `preserveAspectRatio="none"` (each axis is scaled independently). The
+/// `view_box.origin` offset shifts the graphic so the top-left of
+/// `view_box` lands on pixel `(0, 0)`, which is required for effects
+/// like drop shadows whose paint bounds extend into negative
+/// coordinates.
+fn view_box_transform(view_box: Rect, width: u32, height: u32) -> tiny_skia::Transform {
+    let sx = width as f32 / view_box.size.0;
+    let sy = height as f32 / view_box.size.1;
+    let tx = -view_box.origin.0 * sx;
+    let ty = -view_box.origin.1 * sy;
+    tiny_skia::Transform::from_row(sx, 0.0, 0.0, sy, tx, ty)
 }
 
 fn render_node(pixmap: &mut tiny_skia::Pixmap, node: &Node, parent_xform: tiny_skia::Transform) {

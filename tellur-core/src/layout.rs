@@ -1,40 +1,39 @@
 //! Layout containers for composing components.
 //!
-//! These containers describe CSS-Box / Flexbox-style arrangements without
-//! introducing a constraint-based layout pass: every container reports its
-//! `view_box` as a pure function of its children's intrinsic sizes (plus
-//! any explicit sizing it owns), matching the existing
-//! [`VectorComponent`](crate::vector::VectorComponent) /
-//! [`RasterComponent`](crate::raster::RasterComponent) model.
+//! All containers participate in the constraint-based layout protocol
+//! defined by [`VectorComponent`](crate::vector::VectorComponent) /
+//! [`RasterComponent`](crate::raster::RasterComponent): they accept a
+//! [`Constraints`] block from the parent, decide their layout size, and
+//! then render at that size.
 //!
 //! - [`Padding`] adds an outer border of empty space around a child.
-//! - [`Align`] places a child inside a fixed-size box at a chosen anchor.
-//! - [`Stack`] arranges children along an axis with spacing and alignment.
-//! - [`DecoratedBox`] paints a background fill (and optionally a border for
-//!   the vector variant) underneath its child.
-//! - [`SizedBox`] is an empty placeholder of a given size, useful as a
-//!   spacer or to reserve a region.
+//! - [`Sized`] picks the outer width / height per axis with `SizeMode`
+//!   (Fill / Hug / Fixed) and renders the child top-left.
+//! - [`Place`] fills the parent and snaps the child by an anchor pair.
+//! - [`Frame`] combines `Sized` + `Place` in one container.
+//! - [`Stack`] arranges children along an axis with spacing and
+//!   alignment; the `CrossAlign::Stretch` mode propagates a tight
+//!   cross-axis constraint so children can fill the stack's cross
+//!   extent.
+//! - [`DecoratedBox`] paints a background fill (and optionally a border
+//!   on the vector variant) behind the child.
+//! - [`SizedBox`] is an empty placeholder of a given size.
 //!
 //! Vector containers live at the module root and operate on
 //! `Box<dyn VectorComponent>`. Their raster counterparts share the same
 //! names under [`raster`] and operate on `Box<dyn RasterComponent>`.
 
 use crate::color::Color;
-use crate::geometry::{Anchor, EdgeInsets, Transform, Vec2};
+pub use crate::geometry::Axis;
+use crate::geometry::{Anchor, Constraints, EdgeInsets, Rect, Transform, Vec2};
 use crate::vector::{
     Fill, Group, Node, Paint, Path, PathCommand, Stroke, VectorComponent, VectorGraphic,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Axis {
-    Horizontal,
-    Vertical,
-}
-
 /// Main-axis distribution of children in a [`Stack`]. The `Space*` variants
-/// override `Stack::spacing` and derive the gap from the leftover space on
-/// the main axis; `Start` / `Center` / `End` keep `Stack::spacing` as the
-/// inter-child gap.
+/// override `Stack::spacing` and derive the gap from the leftover space
+/// on the main axis; `Start` / `Center` / `End` keep `Stack::spacing` as
+/// the inter-child gap.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MainAlign {
     Start,
@@ -46,55 +45,293 @@ pub enum MainAlign {
 }
 
 /// Cross-axis alignment of each child inside the stack's cross extent.
+/// `Stretch` propagates a tight cross-axis constraint to the child so
+/// it can fill the stack's full cross extent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CrossAlign {
     Start,
     Center,
     End,
+    Stretch,
 }
 
-// ─── shared stack measurement ────────────────────────────────────────────
-
-pub(crate) struct StackLayout {
-    pub own_size: Vec2,
-    /// Top-left position of each child in the stack's coordinate space,
-    /// same length as the input `child_sizes`.
-    pub placements: Vec<Vec2>,
+/// How a sizing-container picks its size on one axis, given the parent's
+/// constraints and the child's intrinsic size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeMode {
+    /// Take the parent's max constraint on this axis (collapse to `0.0`
+    /// if the max is unbounded). Equivalent to CSS `width: 100%` or
+    /// SwiftUI's `.frame(maxWidth: .infinity)`.
+    Fill,
+    /// Hug the child's intrinsic size on this axis. The child is
+    /// queried for its own preferred size and the result is used.
+    Hug,
+    /// Use exactly the given number of logical units on this axis.
+    Fixed(f32),
 }
 
-/// Pure layout math shared by the vector and raster [`Stack`] variants.
+pub(crate) fn resolve_size_mode<F: FnOnce(Constraints) -> Vec2>(
+    width: SizeMode,
+    height: SizeMode,
+    constraints: Constraints,
+    child_layout: F,
+) -> Vec2 {
+    let needs_hug = matches!(width, SizeMode::Hug) || matches!(height, SizeMode::Hug);
+    let hug = needs_hug.then(|| child_layout(constraints));
+    let w = match width {
+        SizeMode::Fill => finite_axis(constraints.max.0),
+        SizeMode::Hug => hug.unwrap().0,
+        SizeMode::Fixed(v) => v,
+    };
+    let h = match height {
+        SizeMode::Fill => finite_axis(constraints.max.1),
+        SizeMode::Hug => hug.unwrap().1,
+        SizeMode::Fixed(v) => v,
+    };
+    constraints.constrain(Vec2(w, h))
+}
+
+pub(crate) fn finite_axis(v: f32) -> f32 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
+}
+
+// ─── vector containers ───────────────────────────────────────────────────
+
+/// Wraps a child with empty space on each side.
+pub struct Padding {
+    pub insets: EdgeInsets,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl Padding {
+    fn inset_size(&self) -> Vec2 {
+        Vec2(self.insets.horizontal(), self.insets.vertical())
+    }
+}
+
+impl VectorComponent for Padding {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        let inset = self.inset_size();
+        let child_size = self.child.layout(constraints.shrink(inset));
+        Vec2(child_size.0 + inset.0, child_size.1 + inset.1)
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let inset = self.inset_size();
+        let inner_size = Vec2((size.0 - inset.0).max(0.0), (size.1 - inset.1).max(0.0));
+        let inner = self.child.render(inner_size);
+        VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
+            root: Node::Group(Group {
+                transform: Transform::translate(self.insets.top_left()),
+                opacity: 1.0,
+                children: vec![inner.root],
+            }),
+        }
+    }
+}
+
+/// Sizes the outer box independently on each axis (`Fill` / `Hug` /
+/// `Fixed`) and places the child at the outer box's top-left.
 ///
-/// `explicit_size` is the stack's outer size when the caller set it
-/// (`Stack::size`); otherwise the layout collapses to the intrinsic size
-/// `sum(children) + spacing*(n-1)` on the main axis and `max(children)` on
-/// the cross axis, and `main_align` / `cross_align` become no-ops because
-/// there is no free space to distribute.
-pub(crate) fn compute_stack_layout(
+/// Use [`Place`] alone if you need an anchor placement at the parent's
+/// max size, or [`Frame`] when you want sizing and anchored placement
+/// in one container.
+pub struct Sized {
+    pub width: SizeMode,
+    pub height: SizeMode,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl VectorComponent for Sized {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        resolve_size_mode(self.width, self.height, constraints, |c| {
+            self.child.layout(c)
+        })
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let child_size = self.child.layout(Constraints::loose(size));
+        let inner = self.child.render(child_size);
+        VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
+            root: inner.root,
+        }
+    }
+}
+
+/// Fills the parent's max constraint and places the child by snapping
+/// the child's `child_anchor` onto the `at` anchor of the outer box.
+///
+/// For an anchor placement that doesn't claim the whole available
+/// region, wrap a [`Sized`] inside `Place`, or use [`Frame`] which
+/// combines both in one container.
+pub struct Place {
+    pub child_anchor: Anchor,
+    pub at: Anchor,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl VectorComponent for Place {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        let max = Vec2(
+            finite_axis(constraints.max.0),
+            finite_axis(constraints.max.1),
+        );
+        constraints.constrain(max)
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let child_size = self.child.layout(Constraints::loose(size));
+        let pos = child_size
+            .anchored(self.child_anchor)
+            .snap_to(self.at.point(size));
+        let inner = self.child.render(child_size);
+        VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
+            root: Node::Group(Group {
+                transform: Transform::translate(pos),
+                opacity: 1.0,
+                children: vec![inner.root],
+            }),
+        }
+    }
+}
+
+/// Shorthand for `Sized` + `Place`: declares the outer size on each
+/// axis with a `SizeMode` and anchors the child inside that box. Pass
+/// `Anchor::TOP_LEFT` for both anchors to get pure top-left placement.
+pub struct Frame {
+    pub width: SizeMode,
+    pub height: SizeMode,
+    pub child_anchor: Anchor,
+    pub at: Anchor,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl VectorComponent for Frame {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        resolve_size_mode(self.width, self.height, constraints, |c| {
+            self.child.layout(c)
+        })
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let child_size = self.child.layout(Constraints::loose(size));
+        let pos = child_size
+            .anchored(self.child_anchor)
+            .snap_to(self.at.point(size));
+        let inner = self.child.render(child_size);
+        VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
+            root: Node::Group(Group {
+                transform: Transform::translate(pos),
+                opacity: 1.0,
+                children: vec![inner.root],
+            }),
+        }
+    }
+}
+
+/// Arranges children along [`axis`](Self::axis) with
+/// [`spacing`](Self::spacing) between them.
+///
+/// `size` lets the caller pin the stack's own outer size. When `None`,
+/// the stack expands to the parent's max constraint on the main axis
+/// (or collapses to the intrinsic sum if the constraint is unbounded),
+/// and follows the cross-align rule on the cross axis.
+pub struct Stack {
+    pub axis: Axis,
+    pub size: Option<Vec2>,
+    pub spacing: f32,
+    pub main_align: MainAlign,
+    pub cross_align: CrossAlign,
+    pub children: Vec<Box<dyn VectorComponent>>,
+}
+
+pub(crate) struct StackPass {
+    pub own_size: Vec2,
+    /// `(position, size)` for each child in the input order.
+    pub children: Vec<(Vec2, Vec2)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_stack_pass(
     axis: Axis,
     explicit_size: Option<Vec2>,
     spacing: f32,
     main_align: MainAlign,
     cross_align: CrossAlign,
-    child_sizes: &[Vec2],
-) -> StackLayout {
-    let n = child_sizes.len();
-    let (mains, crosses): (Vec<f32>, Vec<f32>) = match axis {
-        Axis::Horizontal => child_sizes.iter().map(|s| (s.0, s.1)).unzip(),
-        Axis::Vertical => child_sizes.iter().map(|s| (s.1, s.0)).unzip(),
+    parent_constraints: Constraints,
+    child_count: usize,
+    mut layout_child: impl FnMut(usize, Constraints) -> Vec2,
+) -> StackPass {
+    let horizontal = matches!(axis, Axis::Horizontal);
+    let (parent_main_max, parent_cross_max) = if horizontal {
+        (parent_constraints.max.0, parent_constraints.max.1)
+    } else {
+        (parent_constraints.max.1, parent_constraints.max.0)
     };
+    let explicit_main = explicit_size.map(|s| if horizontal { s.0 } else { s.1 });
+    let explicit_cross = explicit_size.map(|s| if horizontal { s.1 } else { s.0 });
+
+    // Decide the cross extent the children should target. `Stretch`
+    // tightens children's cross axis to it; other modes leave the cross
+    // axis loose and use the child's natural cross size for placement.
+    let stretch_cross = match cross_align {
+        CrossAlign::Stretch => Some(
+            explicit_cross
+                .or_else(|| parent_cross_max.is_finite().then_some(parent_cross_max))
+                .unwrap_or(0.0),
+        ),
+        _ => None,
+    };
+
+    let base_child_constraints = Constraints::loose(parent_constraints.max);
+    let child_constraints = match stretch_cross {
+        Some(t) => base_child_constraints.tighten_cross(axis, t),
+        None => base_child_constraints,
+    };
+
+    let n = child_count;
+    let child_sizes: Vec<Vec2> = (0..n).map(|i| layout_child(i, child_constraints)).collect();
+    let (mains, crosses): (Vec<f32>, Vec<f32>) = if horizontal {
+        child_sizes.iter().map(|s| (s.0, s.1)).unzip()
+    } else {
+        child_sizes.iter().map(|s| (s.1, s.0)).unzip()
+    };
+
     let total_main_children: f32 = mains.iter().sum();
     let max_cross_children: f32 = crosses.iter().cloned().fold(0.0_f32, f32::max);
-
     let gap_count = n.saturating_sub(1) as f32;
     let intrinsic_main = total_main_children + spacing * gap_count;
-    let intrinsic_cross = max_cross_children;
 
-    let (own_main, own_cross) = match explicit_size {
-        Some(s) => match axis {
-            Axis::Horizontal => (s.0, s.1),
-            Axis::Vertical => (s.1, s.0),
-        },
-        None => (intrinsic_main, intrinsic_cross),
+    let own_main = explicit_main.unwrap_or_else(|| {
+        if parent_main_max.is_finite() {
+            parent_main_max
+        } else {
+            intrinsic_main
+        }
+    });
+    let own_cross = match cross_align {
+        CrossAlign::Stretch => stretch_cross.unwrap_or(max_cross_children),
+        _ => explicit_cross.unwrap_or(max_cross_children),
     };
 
     let (start_offset, gap) = if n == 0 {
@@ -136,148 +373,75 @@ pub(crate) fn compute_stack_layout(
     for (i, &main_size) in mains.iter().enumerate() {
         let cross_size = crosses[i];
         let cross_pos = match cross_align {
-            CrossAlign::Start => 0.0,
+            CrossAlign::Start | CrossAlign::Stretch => 0.0,
             CrossAlign::Center => (own_cross - cross_size) * 0.5,
             CrossAlign::End => own_cross - cross_size,
         };
-        let pos = match axis {
-            Axis::Horizontal => Vec2(cursor, cross_pos),
-            Axis::Vertical => Vec2(cross_pos, cursor),
+        let pos = if horizontal {
+            Vec2(cursor, cross_pos)
+        } else {
+            Vec2(cross_pos, cursor)
         };
-        placements.push(pos);
+        placements.push((pos, child_sizes[i]));
         cursor += main_size + gap;
     }
 
-    let own_size = match axis {
-        Axis::Horizontal => Vec2(own_main, own_cross),
-        Axis::Vertical => Vec2(own_cross, own_main),
+    let own_size = if horizontal {
+        Vec2(own_main, own_cross)
+    } else {
+        Vec2(own_cross, own_main)
     };
 
-    StackLayout {
+    StackPass {
         own_size,
-        placements,
+        children: placements,
     }
-}
-
-// ─── vector containers ───────────────────────────────────────────────────
-
-/// Wraps a child with empty space on each side.
-pub struct Padding {
-    pub insets: EdgeInsets,
-    pub child: Box<dyn VectorComponent>,
-}
-
-impl VectorComponent for Padding {
-    fn view_box(&self) -> Vec2 {
-        let c = self.child.view_box();
-        Vec2(c.0 + self.insets.horizontal(), c.1 + self.insets.vertical())
-    }
-
-    fn render(&self) -> VectorGraphic {
-        let inner = self.child.render();
-        let view_box = Vec2(
-            inner.view_box.0 + self.insets.horizontal(),
-            inner.view_box.1 + self.insets.vertical(),
-        );
-        VectorGraphic {
-            view_box,
-            root: Node::Group(Group {
-                transform: Transform::translate(self.insets.top_left()),
-                opacity: 1.0,
-                children: vec![inner.root],
-            }),
-        }
-    }
-}
-
-/// Places a child inside a fixed-size box, snapping the child's `anchor`
-/// onto the same anchor point of the parent box. For example,
-/// `anchor: Anchor::CENTER` produces center-in-box; `Anchor::BOTTOM_RIGHT`
-/// pins to the bottom-right corner.
-pub struct Align {
-    pub size: Vec2,
-    pub anchor: Anchor,
-    pub child: Box<dyn VectorComponent>,
-}
-
-impl VectorComponent for Align {
-    fn view_box(&self) -> Vec2 {
-        self.size
-    }
-
-    fn render(&self) -> VectorGraphic {
-        let inner = self.child.render();
-        let pos = inner
-            .view_box
-            .anchored(self.anchor)
-            .snap_to(self.anchor.point(self.size));
-        VectorGraphic {
-            view_box: self.size,
-            root: Node::Group(Group {
-                transform: Transform::translate(pos),
-                opacity: 1.0,
-                children: vec![inner.root],
-            }),
-        }
-    }
-}
-
-/// Arranges children along [`axis`](Self::axis) with [`spacing`](Self::spacing)
-/// between them.
-///
-/// When [`size`](Self::size) is `None`, the stack reports its intrinsic
-/// extent and `main_align` / `cross_align` only have an observable effect
-/// for the cross axis (no free space on the main axis). Set `size` to
-/// `Some(...)` to expand into a fixed box and let `main_align` distribute
-/// the leftover main-axis space.
-pub struct Stack {
-    pub axis: Axis,
-    pub size: Option<Vec2>,
-    pub spacing: f32,
-    pub main_align: MainAlign,
-    pub cross_align: CrossAlign,
-    pub children: Vec<Box<dyn VectorComponent>>,
 }
 
 impl VectorComponent for Stack {
-    fn view_box(&self) -> Vec2 {
-        let sizes: Vec<Vec2> = self.children.iter().map(|c| c.view_box()).collect();
-        compute_stack_layout(
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        compute_stack_pass(
             self.axis,
             self.size,
             self.spacing,
             self.main_align,
             self.cross_align,
-            &sizes,
+            constraints,
+            self.children.len(),
+            |i, c| self.children[i].layout(c),
         )
         .own_size
     }
 
-    fn render(&self) -> VectorGraphic {
-        let sizes: Vec<Vec2> = self.children.iter().map(|c| c.view_box()).collect();
-        let layout = compute_stack_layout(
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let pass = compute_stack_pass(
             self.axis,
             self.size,
             self.spacing,
             self.main_align,
             self.cross_align,
-            &sizes,
+            Constraints::tight(size),
+            self.children.len(),
+            |i, c| self.children[i].layout(c),
         );
         let nodes: Vec<Node> = self
             .children
             .iter()
-            .zip(layout.placements.iter())
-            .map(|(child, pos)| {
-                let inner = child.render();
+            .zip(pass.children.iter())
+            .map(|(child, &(pos, child_size))| {
+                let inner = child.render(child_size);
                 Node::Group(Group {
-                    transform: Transform::translate(*pos),
+                    transform: Transform::translate(pos),
                     opacity: 1.0,
                     children: vec![inner.root],
                 })
             })
             .collect();
         VectorGraphic {
-            view_box: layout.own_size,
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: pass.own_size,
+            },
             root: Node::Group(Group {
                 transform: Transform::IDENTITY,
                 opacity: 1.0,
@@ -288,7 +452,7 @@ impl VectorComponent for Stack {
 }
 
 /// Paints a background fill and/or stroke behind a child, sized to the
-/// child's own view_box. Combine with [`Padding`] for the typical
+/// child's layout size. Combine with [`Padding`] for the typical
 /// CSS-style "padded box with a background".
 pub struct DecoratedBox {
     pub child: Box<dyn VectorComponent>,
@@ -297,13 +461,12 @@ pub struct DecoratedBox {
 }
 
 impl VectorComponent for DecoratedBox {
-    fn view_box(&self) -> Vec2 {
-        self.child.view_box()
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.child.layout(constraints)
     }
 
-    fn render(&self) -> VectorGraphic {
-        let inner = self.child.render();
-        let size = inner.view_box;
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let inner = self.child.render(size);
         let mut children: Vec<Node> = Vec::new();
         if self.background.is_some() || self.border.is_some() {
             children.push(Node::Path(Path {
@@ -321,7 +484,10 @@ impl VectorComponent for DecoratedBox {
         }
         children.push(inner.root);
         VectorGraphic {
-            view_box: size,
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
             root: Node::Group(Group {
                 transform: Transform::IDENTITY,
                 opacity: 1.0,
@@ -338,13 +504,16 @@ pub struct SizedBox {
 }
 
 impl VectorComponent for SizedBox {
-    fn view_box(&self) -> Vec2 {
-        self.size
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        constraints.constrain(self.size)
     }
 
-    fn render(&self) -> VectorGraphic {
+    fn render(&self, size: Vec2) -> VectorGraphic {
         VectorGraphic {
-            view_box: self.size,
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
             root: Node::Group(Group {
                 transform: Transform::IDENTITY,
                 opacity: 1.0,
@@ -355,8 +524,9 @@ impl VectorComponent for SizedBox {
 }
 
 /// Fluent extension adding `.padding(...)`, `.background(...)`,
-/// `.border(...)`, `.align(...)` to every [`VectorComponent`].
-pub trait VectorLayoutExt: VectorComponent + Sized + 'static {
+/// `.border(...)` to every [`VectorComponent`]. For `Sized` / `Place` /
+/// `Frame` use the struct literal form directly.
+pub trait VectorLayoutExt: VectorComponent + ::core::marker::Sized + 'static {
     fn padding(self, insets: EdgeInsets) -> Padding {
         Padding {
             insets,
@@ -379,14 +549,6 @@ pub trait VectorLayoutExt: VectorComponent + Sized + 'static {
             border: Some(stroke),
         }
     }
-
-    fn align(self, size: Vec2, anchor: Anchor) -> Align {
-        Align {
-            size,
-            anchor,
-            child: Box::new(self),
-        }
-    }
 }
 
 impl<T: VectorComponent + 'static> VectorLayoutExt for T {}
@@ -394,14 +556,17 @@ impl<T: VectorComponent + 'static> VectorLayoutExt for T {}
 // ─── raster containers ───────────────────────────────────────────────────
 
 pub mod raster {
-    //! Raster equivalents of the vector layout containers. Same shape and
-    //! semantics; operate on `Box<dyn RasterComponent>`.
+    //! Raster equivalents of the vector layout containers. Same shape
+    //! and semantics; operate on `Box<dyn RasterComponent>`.
 
     use bytes::Bytes;
 
-    use super::{compute_stack_layout, Axis, Color, CrossAlign, EdgeInsets, MainAlign, Vec2};
-    use crate::geometry::Anchor;
-    use crate::layer::composite_children;
+    use super::{
+        compute_stack_pass, resolve_size_mode, Axis, Color, CrossAlign, EdgeInsets, MainAlign,
+        SizeMode, Vec2,
+    };
+    use crate::geometry::{Anchor, Constraints, Rect};
+    use crate::layer::{composite_children, translate_rect, union_rect};
     use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 
     pub struct Padding {
@@ -409,39 +574,170 @@ pub mod raster {
         pub child: Box<dyn RasterComponent>,
     }
 
+    impl Padding {
+        fn inset_size(&self) -> Vec2 {
+            Vec2(self.insets.horizontal(), self.insets.vertical())
+        }
+    }
+
     impl RasterComponent for Padding {
-        fn view_box(&self) -> Vec2 {
-            let c = self.child.view_box();
-            Vec2(c.0 + self.insets.horizontal(), c.1 + self.insets.vertical())
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            let inset = self.inset_size();
+            let child_size = self.child.layout(constraints.shrink(inset));
+            Vec2(child_size.0 + inset.0, child_size.1 + inset.1)
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
-            let outer = self.view_box();
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let inset = self.inset_size();
+            let inner_size = Vec2((size.0 - inset.0).max(0.0), (size.1 - inset.1).max(0.0));
+            let child_paint = self.child.paint_bounds(inner_size);
+            union_rect(
+                Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                translate_rect(child_paint, self.insets.top_left()),
+            )
+        }
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let inset = self.inset_size();
+            let inner_size = Vec2((size.0 - inset.0).max(0.0), (size.1 - inset.1).max(0.0));
+            let paint_rect = self.paint_bounds(size);
             composite_children(
-                outer,
+                paint_rect,
                 target,
-                &[(self.insets.top_left(), self.child.as_ref())],
+                &[(self.insets.top_left(), inner_size, self.child.as_ref())],
             )
         }
     }
 
-    pub struct Align {
-        pub size: Vec2,
-        pub anchor: Anchor,
+    /// Sizes the outer box on each axis (`Fill` / `Hug` / `Fixed`) and
+    /// places the child at the outer box's top-left.
+    pub struct Sized {
+        pub width: SizeMode,
+        pub height: SizeMode,
         pub child: Box<dyn RasterComponent>,
     }
 
-    impl RasterComponent for Align {
-        fn view_box(&self) -> Vec2 {
-            self.size
+    impl RasterComponent for Sized {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            resolve_size_mode(self.width, self.height, constraints, |c| {
+                self.child.layout(c)
+            })
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
-            let child_size = self.child.view_box();
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let child_size = self.child.layout(Constraints::loose(size));
+            let child_paint = self.child.paint_bounds(child_size);
+            union_rect(
+                Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                child_paint,
+            )
+        }
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let child_size = self.child.layout(Constraints::loose(size));
+            let paint_rect = self.paint_bounds(size);
+            composite_children(
+                paint_rect,
+                target,
+                &[(Vec2::ZERO, child_size, self.child.as_ref())],
+            )
+        }
+    }
+
+    /// Fills the parent's max constraint and places the child via
+    /// anchor snapping.
+    pub struct Place {
+        pub child_anchor: Anchor,
+        pub at: Anchor,
+        pub child: Box<dyn RasterComponent>,
+    }
+
+    impl RasterComponent for Place {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            let max = Vec2(
+                super::finite_axis(constraints.max.0),
+                super::finite_axis(constraints.max.1),
+            );
+            constraints.constrain(max)
+        }
+
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let child_size = self.child.layout(Constraints::loose(size));
             let pos = child_size
-                .anchored(self.anchor)
-                .snap_to(self.anchor.point(self.size));
-            composite_children(self.size, target, &[(pos, self.child.as_ref())])
+                .anchored(self.child_anchor)
+                .snap_to(self.at.point(size));
+            let child_paint = self.child.paint_bounds(child_size);
+            union_rect(
+                Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                translate_rect(child_paint, pos),
+            )
+        }
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let child_size = self.child.layout(Constraints::loose(size));
+            let pos = child_size
+                .anchored(self.child_anchor)
+                .snap_to(self.at.point(size));
+            let paint_rect = self.paint_bounds(size);
+            composite_children(
+                paint_rect,
+                target,
+                &[(pos, child_size, self.child.as_ref())],
+            )
+        }
+    }
+
+    /// Shorthand for `Sized` + `Place` combined.
+    pub struct Frame {
+        pub width: SizeMode,
+        pub height: SizeMode,
+        pub child_anchor: Anchor,
+        pub at: Anchor,
+        pub child: Box<dyn RasterComponent>,
+    }
+
+    impl RasterComponent for Frame {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            resolve_size_mode(self.width, self.height, constraints, |c| {
+                self.child.layout(c)
+            })
+        }
+
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let child_size = self.child.layout(Constraints::loose(size));
+            let pos = child_size
+                .anchored(self.child_anchor)
+                .snap_to(self.at.point(size));
+            let child_paint = self.child.paint_bounds(child_size);
+            union_rect(
+                Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                translate_rect(child_paint, pos),
+            )
+        }
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let child_size = self.child.layout(Constraints::loose(size));
+            let pos = child_size
+                .anchored(self.child_anchor)
+                .snap_to(self.at.point(size));
+            let paint_rect = self.paint_bounds(size);
+            composite_children(
+                paint_rect,
+                target,
+                &[(pos, child_size, self.child.as_ref())],
+            )
         }
     }
 
@@ -455,36 +751,61 @@ pub mod raster {
     }
 
     impl RasterComponent for Stack {
-        fn view_box(&self) -> Vec2 {
-            let sizes: Vec<Vec2> = self.children.iter().map(|c| c.view_box()).collect();
-            compute_stack_layout(
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            compute_stack_pass(
                 self.axis,
                 self.size,
                 self.spacing,
                 self.main_align,
                 self.cross_align,
-                &sizes,
+                constraints,
+                self.children.len(),
+                |i, c| self.children[i].layout(c),
             )
             .own_size
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
-            let sizes: Vec<Vec2> = self.children.iter().map(|c| c.view_box()).collect();
-            let layout = compute_stack_layout(
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let pass = compute_stack_pass(
                 self.axis,
                 self.size,
                 self.spacing,
                 self.main_align,
                 self.cross_align,
-                &sizes,
+                Constraints::tight(size),
+                self.children.len(),
+                |i, c| self.children[i].layout(c),
             );
-            let placed: Vec<(Vec2, &dyn RasterComponent)> = self
+            let mut bounds = Rect {
+                origin: Vec2::ZERO,
+                size,
+            };
+            for (child, &(pos, child_size)) in self.children.iter().zip(pass.children.iter()) {
+                let child_paint = child.paint_bounds(child_size);
+                bounds = union_rect(bounds, translate_rect(child_paint, pos));
+            }
+            bounds
+        }
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let pass = compute_stack_pass(
+                self.axis,
+                self.size,
+                self.spacing,
+                self.main_align,
+                self.cross_align,
+                Constraints::tight(size),
+                self.children.len(),
+                |i, c| self.children[i].layout(c),
+            );
+            let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = self
                 .children
                 .iter()
-                .zip(layout.placements.iter())
-                .map(|(c, p)| (*p, c.as_ref()))
+                .zip(pass.children.iter())
+                .map(|(child, &(pos, child_size))| (pos, child_size, child.as_ref()))
                 .collect();
-            composite_children(layout.own_size, target, &placed)
+            let paint_rect = self.paint_bounds(size);
+            composite_children(paint_rect, target, &placed)
         }
     }
 
@@ -497,20 +818,34 @@ pub mod raster {
     }
 
     impl RasterComponent for DecoratedBox {
-        fn view_box(&self) -> Vec2 {
-            self.child.view_box()
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            self.child.layout(constraints)
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
-            let size = self.view_box();
+        // paint_bounds intentionally falls back to the default
+        // `Rect { origin: 0, size }`, so a `.background()` acts as a
+        // clip rectangle for children whose paint bounds spill outward
+        // (e.g. drop shadows on outer children).
+
+        fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+            let paint_rect = Rect {
+                origin: Vec2::ZERO,
+                size,
+            };
             match self.background {
                 Some(color) => {
-                    let bg = SolidRect { size, color };
-                    let placed: Vec<(Vec2, &dyn RasterComponent)> =
-                        vec![(Vec2::ZERO, &bg), (Vec2::ZERO, self.child.as_ref())];
-                    composite_children(size, target, &placed)
+                    let bg = SolidRect { color };
+                    let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = vec![
+                        (Vec2::ZERO, size, &bg as &dyn RasterComponent),
+                        (Vec2::ZERO, size, self.child.as_ref()),
+                    ];
+                    composite_children(paint_rect, target, &placed)
                 }
-                None => composite_children(size, target, &[(Vec2::ZERO, self.child.as_ref())]),
+                None => composite_children(
+                    paint_rect,
+                    target,
+                    &[(Vec2::ZERO, size, self.child.as_ref())],
+                ),
             }
         }
     }
@@ -520,11 +855,11 @@ pub mod raster {
     }
 
     impl RasterComponent for SizedBox {
-        fn view_box(&self) -> Vec2 {
-            self.size
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(self.size)
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
+        fn render(&self, _size: Vec2, target: Resolution) -> RasterImage {
             let bytes = (target.width as usize) * (target.height as usize) * 4;
             RasterImage {
                 width: target.width,
@@ -535,19 +870,18 @@ pub mod raster {
         }
     }
 
-    /// Internal helper: a solid-color rectangle of the given logical size,
-    /// rasterized by directly filling the pixel buffer.
+    /// Internal helper: a solid-color rectangle that fills any layout
+    /// size the parent assigns, rasterized by buffer-filling.
     struct SolidRect {
-        size: Vec2,
         color: Color,
     }
 
     impl RasterComponent for SolidRect {
-        fn view_box(&self) -> Vec2 {
-            self.size
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(constraints.max)
         }
 
-        fn render(&self, target: Resolution) -> RasterImage {
+        fn render(&self, _size: Vec2, target: Resolution) -> RasterImage {
             let pixels = (target.width as usize) * (target.height as usize);
             let mut buf = Vec::with_capacity(pixels * 4);
             let r = (self.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -570,7 +904,7 @@ pub mod raster {
     }
 
     /// Fluent extension mirroring [`super::VectorLayoutExt`] for raster.
-    pub trait RasterLayoutExt: RasterComponent + Sized + 'static {
+    pub trait RasterLayoutExt: RasterComponent + ::core::marker::Sized + 'static {
         fn padding(self, insets: EdgeInsets) -> Padding {
             Padding {
                 insets,
@@ -582,14 +916,6 @@ pub mod raster {
             DecoratedBox {
                 child: Box::new(self),
                 background: Some(color),
-            }
-        }
-
-        fn align(self, size: Vec2, anchor: Anchor) -> Align {
-            Align {
-                size,
-                anchor,
-                child: Box::new(self),
             }
         }
     }

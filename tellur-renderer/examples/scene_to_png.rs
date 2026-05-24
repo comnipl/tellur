@@ -39,7 +39,9 @@ fn main() {
         ],
     };
 
-    let image = scene.rasterize().render(Resolution::new(1280, 720));
+    let image = scene
+        .rasterize()
+        .render(scene_size, Resolution::new(1280, 720));
 
     let path = "/tmp/scene.png";
     let file = File::create(path).expect("create output file");
