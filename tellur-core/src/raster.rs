@@ -42,12 +42,57 @@ impl Resolution {
 /// own children so that the final image is produced with the minimum work
 /// needed to fill `target`.
 ///
+/// Two roles share this trait, mirroring `VectorComponent`. **Element
+/// components** are leaves that own a concrete `render()` implementation
+/// (e.g. `Layer`, `Rasterize<V>`); they keep the default `body()` returning
+/// `RasterBody::Element` and override `render()` themselves. **Composite
+/// components** delegate to another component by overriding `body()` to
+/// return `RasterBody::Of(...)`; the default `render()` then forwards
+/// `target` through the chain until it reaches an element.
+///
 /// Implementors must keep `view_box()` consistent with the logical size
 /// they occupy in a parent's coordinate space, so layers can lay them out
 /// without forcing a render.
 pub trait RasterComponent {
     fn view_box(&self) -> Vec2;
-    fn render(&self, target: Resolution) -> RasterImage;
+
+    /// Identifies whether this component is a render-owning element or a
+    /// delegate to another component. Default is `Element` so that leaf types
+    /// only need to override `render()`.
+    fn body(&self) -> RasterBody {
+        RasterBody::Element
+    }
+
+    /// Produces the rasterized output. The default walks `body()` until it
+    /// reaches an `Element`, threading `target` through unchanged; elements
+    /// must override this with their own implementation.
+    fn render(&self, target: Resolution) -> RasterImage {
+        match self.body() {
+            RasterBody::Element => unimplemented!(
+                "RasterComponent with body() == RasterBody::Element must override render()"
+            ),
+            RasterBody::Of(c) => c.render(target),
+        }
+    }
+
+    /// Type-erases `self` into a heap-allocated trait object. Useful for
+    /// constructing heterogeneous containers like `Layer.children` in
+    /// struct-literal form.
+    fn boxed(self) -> Box<dyn RasterComponent>
+    where
+        Self: Sized + 'static,
+    {
+        Box::new(self)
+    }
+}
+
+/// Discriminates element components (own their `render`) from composite
+/// components (delegate to another component).
+pub enum RasterBody {
+    /// This component owns a concrete `render()` implementation.
+    Element,
+    /// Delegate to another component — `render()` forwards `target` through it.
+    Of(Box<dyn RasterComponent>),
 }
 
 // Compile-time guarantee that `RasterComponent` is dyn-safe.

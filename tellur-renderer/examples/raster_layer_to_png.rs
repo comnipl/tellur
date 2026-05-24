@@ -11,28 +11,18 @@ use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::Layer;
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::{Circle, Rectangle};
-use tellur_core::vector::{Paint, VectorComponent, VectorGraphic};
+use tellur_core::vector::Paint;
+use tellur_core::vector_component;
 use tellur_renderer::Rasterizable;
 
 /// A translucent colored circle. The whole shape is parameterised by hue
 /// and radius; saturation, lightness and alpha are baked in.
-struct Blob {
-    radius: f32,
-    hue: f32,
-}
-
-impl VectorComponent for Blob {
-    fn view_box(&self) -> Vec2 {
-        Vec2(self.radius * 2.0, self.radius * 2.0)
-    }
-
-    fn render(&self) -> VectorGraphic {
-        Circle {
-            radius: self.radius,
-            fill: Paint::Solid(Color::hsla(self.hue, 0.7, 0.55, 0.65)).into(),
-            stroke: None,
-        }
-        .render()
+#[vector_component]
+fn blob(radius: f32, hue: f32) -> impl VectorComponent {
+    Circle {
+        radius,
+        fill: Paint::Solid(Color::hsla(hue, 0.7, 0.55, 0.65)).into(),
+        stroke: None,
     }
 }
 
