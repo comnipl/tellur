@@ -102,31 +102,51 @@ impl RasterComponent for Layer {
     }
 
     fn render(&self, target: Resolution) -> RasterImage {
-        let pixel_count = (target.width as usize) * (target.height as usize);
-        let mut accum = vec![0u8; pixel_count * 4];
+        let placed: Vec<(Vec2, &dyn RasterComponent)> = self
+            .children
+            .iter()
+            .map(|p| (p.position, p.child.as_ref()))
+            .collect();
+        composite_children(self.size, target, &placed)
+    }
+}
 
-        // Pixels per logical unit on each axis. SVG's `preserveAspectRatio="none"`
-        // — independent scaling on each axis.
-        let scale_x = target.width as f32 / self.size.0;
-        let scale_y = target.height as f32 / self.size.1;
+/// Rasterizes a set of placed raster components into a `container_size`
+/// logical coordinate space and returns the composited image at `target`
+/// pixel resolution.
+///
+/// Shared between `Layer::render` and the raster layout containers, which
+/// all need the same "place children at logical offsets, then source-over
+/// composite" pipeline.
+pub(crate) fn composite_children(
+    container_size: Vec2,
+    target: Resolution,
+    placed: &[(Vec2, &dyn RasterComponent)],
+) -> RasterImage {
+    let pixel_count = (target.width as usize) * (target.height as usize);
+    let mut accum = vec![0u8; pixel_count * 4];
 
-        for placed in &self.children {
-            let child_size = placed.child.view_box();
-            let child_px_w = (child_size.0 * scale_x).round().max(1.0) as u32;
-            let child_px_h = (child_size.1 * scale_y).round().max(1.0) as u32;
-            let offset_x = (placed.position.0 * scale_x).round() as i32;
-            let offset_y = (placed.position.1 * scale_y).round() as i32;
+    // Pixels per logical unit on each axis. SVG's `preserveAspectRatio="none"`
+    // — independent scaling on each axis.
+    let scale_x = target.width as f32 / container_size.0;
+    let scale_y = target.height as f32 / container_size.1;
 
-            let image = placed.child.render(Resolution::new(child_px_w, child_px_h));
-            composite_at(&mut accum, target, &image, offset_x, offset_y);
-        }
+    for (position, child) in placed {
+        let child_size = child.view_box();
+        let child_px_w = (child_size.0 * scale_x).round().max(1.0) as u32;
+        let child_px_h = (child_size.1 * scale_y).round().max(1.0) as u32;
+        let offset_x = (position.0 * scale_x).round() as i32;
+        let offset_y = (position.1 * scale_y).round() as i32;
 
-        RasterImage {
-            width: target.width,
-            height: target.height,
-            format: PixelFormat::Rgba8,
-            pixels: Bytes::from(accum),
-        }
+        let image = child.render(Resolution::new(child_px_w, child_px_h));
+        composite_at(&mut accum, target, &image, offset_x, offset_y);
+    }
+
+    RasterImage {
+        width: target.width,
+        height: target.height,
+        format: PixelFormat::Rgba8,
+        pixels: Bytes::from(accum),
     }
 }
 

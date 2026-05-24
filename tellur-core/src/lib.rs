@@ -2,6 +2,7 @@ pub mod color;
 pub mod geometry;
 pub mod interpolate;
 pub mod layer;
+pub mod layout;
 pub mod phase;
 pub mod placement;
 pub mod raster;

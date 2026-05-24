@@ -1,23 +1,24 @@
-//! Compare 60 / 30 / 15 / 10 fps quantization on a back-and-forth dot.
+//! Compare 60 / 30 / 24 / 16 fps quantization on a back-and-forth dot.
 //!
 //! Renders a 5-second timeline where four blue dots bounce horizontally.
 //! Each dot is a `BouncingDot` whose motion is driven by the time fed to
 //! it; the four instances receive the same `t` quantized to different
-//! framerates via `Time::fps`. The instances are stacked vertically with
-//! `Anchor` so the stutter at lower fps is directly comparable against the
-//! smooth top track.
+//! framerates via `Time::fps`. A vertical `Stack` distributes the four
+//! tracks evenly inside the scene, with a `DecoratedBox` painting the
+//! dark background.
 
 use std::path::Path;
 
 use tellur_core::color::Color;
-use tellur_core::geometry::{Anchor, Vec2};
+use tellur_core::geometry::{EdgeInsets, Vec2};
 use tellur_core::layer::VectorLayer;
+use tellur_core::layout::{Axis, CrossAlign, MainAlign, Stack, VectorLayoutExt};
 use tellur_core::placement::VectorPlacement;
 use tellur_core::raster::{RasterComponent, Resolution};
-use tellur_core::shapes::{Circle, Rectangle};
+use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time};
 use tellur_core::timeline::timeline;
-use tellur_core::vector::Paint;
+use tellur_core::vector::{Paint, VectorComponent};
 use tellur_core::vector_component;
 use tellur_renderer::{FfmpegEncoder, Rasterizable};
 
@@ -30,6 +31,7 @@ use tellur_renderer::{FfmpegEncoder, Rasterizable};
 fn BouncingDot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
     let (phase, _) = t.bounce(2.5);
     let size = Vec2(scene_width - 200.0, 60.0);
+    let x = phase.interpolate(0.0, 1.0) * size.0;
 
     VectorLayer {
         size,
@@ -38,49 +40,32 @@ fn BouncingDot(t: LocalTime, scene_width: f32) -> impl VectorComponent {
             fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
             stroke: None,
         }
-        .anchored(Anchor::CENTER)
-        .snap_to(Anchor::new(phase.interpolate(0.0, 1.0), 0.5).point(size))],
+        .anchored(tellur_core::geometry::Anchor::CENTER)
+        .snap_to(Vec2(x, size.1 * 0.5))],
     }
 }
 
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let tl = timeline(5.0, move |t, target| {
-        let scene = VectorLayer {
-            size: scene_size,
-            children: vec![
-                Rectangle {
-                    size: scene_size,
-                    fill: Paint::Solid(Color::rgb_u8(20, 20, 30)).into(),
-                    stroke: None,
-                }
-                .at(Vec2::ZERO),
-                BouncingDot {
-                    t: t.fps(60).into(),
-                    scene_width: scene_size.0,
-                }
-                .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.5, 0.125).point(scene_size)),
-                BouncingDot {
-                    t: t.fps(30).into(),
-                    scene_width: scene_size.0,
-                }
-                .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.5, 0.375).point(scene_size)),
-                BouncingDot {
-                    t: t.fps(24).into(),
-                    scene_width: scene_size.0,
-                }
-                .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.5, 0.625).point(scene_size)),
-                BouncingDot {
-                    t: t.fps(16).into(),
-                    scene_width: scene_size.0,
-                }
-                .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.5, 0.875).point(scene_size)),
-            ],
+        let track = |fps: u32| {
+            BouncingDot {
+                t: t.fps(fps).into(),
+                scene_width: scene_size.0,
+            }
+            .boxed()
         };
+
+        let scene = Stack {
+            axis: Axis::Vertical,
+            size: Some(scene_size),
+            spacing: 0.0,
+            main_align: MainAlign::SpaceEvenly,
+            cross_align: CrossAlign::Center,
+            children: vec![track(60), track(30), track(24), track(16)],
+        }
+        .padding(EdgeInsets::all(100.0))
+        .background(Paint::Solid(Color::rgb_u8(20, 20, 30)));
 
         scene.rasterize().render(target)
     });
