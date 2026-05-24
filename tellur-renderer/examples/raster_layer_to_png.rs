@@ -9,6 +9,7 @@ use std::fs::File;
 use tellur_core::color::Color;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::Layer;
+use tellur_core::placement::RasterPlacement;
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::{Circle, Rectangle};
 use tellur_core::vector::Paint;
@@ -27,52 +28,40 @@ fn blob(radius: f32, hue: f32) -> impl VectorComponent {
 }
 
 fn main() {
-    let mut scene = Layer::new(Vec2(1280.0, 720.0));
-
-    let background = Rectangle {
-        size: scene.size,
-        fill: Paint::Solid(Color::rgb_u8(245, 240, 230)).into(),
-        stroke: None,
-    }
-    .rasterize();
-    scene.add(Vec2::ZERO, background);
-
-    let red = Blob {
-        radius: 200.0,
-        hue: 0.0,
-    }
-    .rasterize();
-    scene.add(
-        red.view_box()
-            .anchor(Anchor::CENTER)
-            .snap_to_anchor(scene.size, Anchor::new(0.4, 0.4)),
-        red,
-    );
-
-    let green = Blob {
-        radius: 200.0,
-        hue: 120.0,
-    }
-    .rasterize();
-    scene.add(
-        green
-            .view_box()
-            .anchor(Anchor::CENTER)
-            .snap_to_anchor(scene.size, Anchor::new(0.6, 0.4)),
-        green,
-    );
-
-    let blue = Blob {
-        radius: 200.0,
-        hue: 240.0,
-    }
-    .rasterize();
-    scene.add(
-        blue.view_box()
-            .anchor(Anchor::CENTER)
-            .snap_to_anchor(scene.size, Anchor::new(0.5, 0.65)),
-        blue,
-    );
+    let scene_size = Vec2(1280.0, 720.0);
+    let scene = Layer {
+        size: scene_size,
+        children: vec![
+            Rectangle {
+                size: scene_size,
+                fill: Paint::Solid(Color::rgb_u8(245, 240, 230)).into(),
+                stroke: None,
+            }
+            .rasterize()
+            .at(Vec2::ZERO),
+            Blob {
+                radius: 200.0,
+                hue: 0.0,
+            }
+            .rasterize()
+            .anchored(Anchor::CENTER)
+            .snap_to(Anchor::new(0.4, 0.4).point(scene_size)),
+            Blob {
+                radius: 200.0,
+                hue: 120.0,
+            }
+            .rasterize()
+            .anchored(Anchor::CENTER)
+            .snap_to(Anchor::new(0.6, 0.4).point(scene_size)),
+            Blob {
+                radius: 200.0,
+                hue: 240.0,
+            }
+            .rasterize()
+            .anchored(Anchor::CENTER)
+            .snap_to(Anchor::new(0.5, 0.65).point(scene_size)),
+        ],
+    };
 
     let image = scene.render(Resolution::new(1280, 720));
 

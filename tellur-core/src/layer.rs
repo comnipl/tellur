@@ -4,6 +4,14 @@
 //! logical `size` defining its coordinate space (top-left at `(0, 0)`),
 //! and children are placed at logical positions within it.
 //!
+//! Children are stored as [`Placed<dyn _>`](Placed) — the position lives on
+//! a wrapper around the component rather than as a field of the component
+//! itself, keeping the component types focused on intrinsic shape. Use the
+//! placement extension traits in [`crate::placement`]
+//! ([`VectorPlacement`](crate::placement::VectorPlacement) /
+//! [`RasterPlacement`](crate::placement::RasterPlacement)) to construct
+//! placed children with `at`, `anchor(...).snap_to(...)`, etc.
+//!
 //! `VectorLayer` composes `VectorComponent` children into a single
 //! `VectorGraphic`. Each child is placed by wrapping it in a translating
 //! `Group` so the composed result remains pure vector data.
@@ -17,12 +25,13 @@
 use bytes::Bytes;
 
 use crate::geometry::{Transform, Vec2};
+use crate::placement::Placed;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
 pub struct VectorLayer {
     pub size: Vec2,
-    pub children: Vec<(Vec2, Box<dyn VectorComponent>)>,
+    pub children: Vec<Placed<dyn VectorComponent>>,
 }
 
 impl VectorLayer {
@@ -33,8 +42,8 @@ impl VectorLayer {
         }
     }
 
-    pub fn add<C: VectorComponent + 'static>(&mut self, position: Vec2, child: C) -> &mut Self {
-        self.children.push((position, Box::new(child)));
+    pub fn add(&mut self, child: Placed<dyn VectorComponent>) -> &mut Self {
+        self.children.push(child);
         self
     }
 }
@@ -48,10 +57,10 @@ impl VectorComponent for VectorLayer {
         let children = self
             .children
             .iter()
-            .map(|(pos, c)| {
-                let child = c.render();
+            .map(|placed| {
+                let child = placed.child.render();
                 Node::Group(Group {
-                    transform: Transform::translate(*pos),
+                    transform: Transform::translate(placed.position),
                     opacity: 1.0,
                     children: vec![child.root],
                 })
@@ -70,7 +79,7 @@ impl VectorComponent for VectorLayer {
 
 pub struct Layer {
     pub size: Vec2,
-    pub children: Vec<(Vec2, Box<dyn RasterComponent>)>,
+    pub children: Vec<Placed<dyn RasterComponent>>,
 }
 
 impl Layer {
@@ -81,8 +90,8 @@ impl Layer {
         }
     }
 
-    pub fn add<C: RasterComponent + 'static>(&mut self, position: Vec2, child: C) -> &mut Self {
-        self.children.push((position, Box::new(child)));
+    pub fn add(&mut self, child: Placed<dyn RasterComponent>) -> &mut Self {
+        self.children.push(child);
         self
     }
 }
@@ -101,14 +110,14 @@ impl RasterComponent for Layer {
         let scale_x = target.width as f32 / self.size.0;
         let scale_y = target.height as f32 / self.size.1;
 
-        for (pos, child) in &self.children {
-            let child_size = child.view_box();
+        for placed in &self.children {
+            let child_size = placed.child.view_box();
             let child_px_w = (child_size.0 * scale_x).round().max(1.0) as u32;
             let child_px_h = (child_size.1 * scale_y).round().max(1.0) as u32;
-            let offset_x = (pos.0 * scale_x).round() as i32;
-            let offset_y = (pos.1 * scale_y).round() as i32;
+            let offset_x = (placed.position.0 * scale_x).round() as i32;
+            let offset_y = (placed.position.1 * scale_y).round() as i32;
 
-            let image = child.render(Resolution::new(child_px_w, child_px_h));
+            let image = placed.child.render(Resolution::new(child_px_w, child_px_h));
             composite_at(&mut accum, target, &image, offset_x, offset_y);
         }
 
