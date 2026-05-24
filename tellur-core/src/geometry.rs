@@ -12,8 +12,8 @@ impl Vec2 {
     pub const ZERO: Self = Self(0.0, 0.0);
 
     /// Treats `self` as a size and pairs it with an anchor point on that box,
-    /// ready to be snapped to another anchored size via [`AnchoredSize::snap_to`].
-    pub fn anchor(self, anchor: Anchor) -> AnchoredSize {
+    /// ready to be snapped onto a target point via [`AnchoredSize::snap_to`].
+    pub fn anchored(self, anchor: Anchor) -> AnchoredSize {
         AnchoredSize { size: self, anchor }
     }
 }
@@ -114,7 +114,7 @@ impl Anchor {
     }
 }
 
-/// A size paired with an anchor on that size, produced by [`Vec2::anchor`].
+/// A size paired with an anchor on that size, produced by [`Vec2::anchored`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnchoredSize {
     pub size: Vec2,
@@ -128,13 +128,5 @@ impl AnchoredSize {
     /// box in that coordinate space.
     pub fn snap_to(self, target_point: Vec2) -> Vec2 {
         target_point - self.anchor.point(self.size)
-    }
-
-    /// Snaps so that `self.anchor` lands on `target_anchor` of a parent box
-    /// of `target_size`. Convenience for the common case where the target
-    /// point is expressed as a fractional anchor on a known parent size:
-    /// equivalent to `self.snap_to(target_anchor.point(target_size))`.
-    pub fn snap_to_anchor(self, target_size: Vec2, target_anchor: Anchor) -> Vec2 {
-        self.snap_to(target_anchor.point(target_size))
     }
 }

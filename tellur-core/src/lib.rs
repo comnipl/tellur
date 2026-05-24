@@ -3,6 +3,7 @@ pub mod geometry;
 pub mod interpolate;
 pub mod layer;
 pub mod phase;
+pub mod placement;
 pub mod raster;
 pub mod shapes;
 pub mod time;
