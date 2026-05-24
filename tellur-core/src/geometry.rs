@@ -130,3 +130,71 @@ impl AnchoredSize {
         target_point - self.anchor.point(self.size)
     }
 }
+
+/// Per-edge offsets, mirroring CSS's `padding` / `margin` shorthand.
+///
+/// All values are in the same logical units as [`Vec2`]. Negative values
+/// are permitted and produce overhangs (the inner box becomes larger than
+/// the outer one), which can be useful for outset effects.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeInsets {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl EdgeInsets {
+    pub const ZERO: Self = Self {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
+
+    /// Same inset on every side.
+    pub const fn all(value: f32) -> Self {
+        Self {
+            left: value,
+            top: value,
+            right: value,
+            bottom: value,
+        }
+    }
+
+    /// Independent horizontal (left/right) and vertical (top/bottom) insets.
+    pub const fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        Self {
+            left: horizontal,
+            top: vertical,
+            right: horizontal,
+            bottom: vertical,
+        }
+    }
+
+    /// Explicit per-side construction, in CSS order (left, top, right, bottom).
+    pub const fn only(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// Total horizontal inset (`left + right`).
+    pub fn horizontal(&self) -> f32 {
+        self.left + self.right
+    }
+
+    /// Total vertical inset (`top + bottom`).
+    pub fn vertical(&self) -> f32 {
+        self.top + self.bottom
+    }
+
+    /// The top-left corner offset, i.e. where the inset content begins
+    /// relative to the outer box's origin.
+    pub fn top_left(&self) -> Vec2 {
+        Vec2(self.left, self.top)
+    }
+}
