@@ -198,3 +198,97 @@ impl EdgeInsets {
         Vec2(self.left, self.top)
     }
 }
+
+/// Layout constraints handed from a parent to a child during the
+/// `layout` pass. The child must return a size in the closed interval
+/// `[min, max]` on each axis. `max` may be `f32::INFINITY` to express
+/// "no upper bound" (the parent does not constrain this axis); `min` is
+/// usually `0.0` for "no lower bound" and equals `max` for fully tight
+/// constraints.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Constraints {
+    pub min: Vec2,
+    pub max: Vec2,
+}
+
+impl Constraints {
+    /// No upper bound on either axis. Children fall back to their
+    /// intrinsic size.
+    pub const UNBOUNDED: Self = Self {
+        min: Vec2::ZERO,
+        max: Vec2(f32::INFINITY, f32::INFINITY),
+    };
+
+    /// Tight constraints: the child must use exactly `size`.
+    pub const fn tight(size: Vec2) -> Self {
+        Self {
+            min: size,
+            max: size,
+        }
+    }
+
+    /// Loose constraints: the child may use anywhere from zero up to
+    /// `max` on each axis.
+    pub const fn loose(max: Vec2) -> Self {
+        Self {
+            min: Vec2::ZERO,
+            max,
+        }
+    }
+
+    /// Clamps `size` into `[min, max]` on each axis. Children pass their
+    /// preferred intrinsic size through this to obtain a legal result.
+    pub fn constrain(&self, size: Vec2) -> Vec2 {
+        Vec2(
+            size.0.clamp(self.min.0, self.max.0),
+            size.1.clamp(self.min.1, self.max.1),
+        )
+    }
+
+    /// Tightens the constraints' max to the provided size on each axis
+    /// (capped at the existing max), and clamps min not to exceed the
+    /// new max.
+    pub fn with_max(&self, max: Vec2) -> Self {
+        let new_max = Vec2(max.0.min(self.max.0), max.1.min(self.max.1));
+        Self {
+            min: Vec2(self.min.0.min(new_max.0), self.min.1.min(new_max.1)),
+            max: new_max,
+        }
+    }
+
+    /// Shrinks `max` by `by` on each axis (clamped to zero from below).
+    /// Used by `Padding` to subtract its insets before laying out the
+    /// child.
+    pub fn shrink(&self, by: Vec2) -> Self {
+        let new_max = Vec2((self.max.0 - by.0).max(0.0), (self.max.1 - by.1).max(0.0));
+        Self {
+            min: Vec2((self.min.0 - by.0).max(0.0), (self.min.1 - by.1).max(0.0)),
+            max: new_max,
+        }
+    }
+
+    /// Replaces the cross-axis bound with a tight `value` while leaving
+    /// the main axis unchanged. Used by `Stack`'s `CrossAlign::Stretch`.
+    pub fn tighten_cross(&self, axis: Axis, value: f32) -> Self {
+        match axis {
+            Axis::Horizontal => Self {
+                min: Vec2(self.min.0, value),
+                max: Vec2(self.max.0, value),
+            },
+            Axis::Vertical => Self {
+                min: Vec2(value, self.min.1),
+                max: Vec2(value, self.max.1),
+            },
+        }
+    }
+}
+
+/// One of the two axes of a 2D coordinate system. Re-exported by the
+/// layout module for stack-axis selection, but kept in `geometry` so
+/// helpers like [`Constraints::tighten_cross`] can refer to it without a
+/// dependency cycle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Axis {
+    Horizontal,
+    Vertical,
+}

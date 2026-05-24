@@ -1,52 +1,60 @@
 use crate::color::Color;
-use crate::geometry::{Transform, Vec2};
+use crate::geometry::{Constraints, Rect, Transform, Vec2};
 
-/// A piece of vector content with an intrinsic size.
+/// A piece of vector content with a paint-bounds rectangle.
 ///
-/// The graphic's coordinate space spans `(0, 0)..view_box` (top-left origin).
-/// Anything outside that box may still be present in the path commands but
-/// will be clipped when rasterized into the box-sized output region. Place
-/// the graphic in a parent coordinate space by composing it through a
-/// `Group` transform or a `VectorLayer`.
+/// `view_box` is the rectangle (in the graphic's local coordinate space)
+/// that should be rasterized to capture everything the graphic paints.
+/// It may have a negative `origin` (e.g. an offset drop shadow that
+/// spills to the upper-left) or a `size` larger than the layout size.
+/// Place the graphic in a parent coordinate space by composing it
+/// through a `Group` transform or a `VectorLayer`.
 #[derive(Debug, Clone)]
 pub struct VectorGraphic {
-    pub view_box: Vec2,
+    pub view_box: Rect,
     pub root: Node,
 }
 
-/// A component that can produce a `VectorGraphic`.
+/// A component that can produce a `VectorGraphic` through a two-pass
+/// constraint-based layout protocol:
 ///
-/// Two roles share this trait. **Element components** are leaves that own a
-/// concrete `render()` implementation (e.g. `Rectangle`, `VectorLayer`); they
-/// keep the default `body()` returning `VectorBody::Element` and override
-/// `render()` themselves. **Composite components** are usually user-defined
-/// and delegate to another component by overriding `body()` to return
-/// `VectorBody::Of(...)`; the default `render()` then walks the chain until
-/// it reaches an element.
+/// 1. The parent calls [`layout`](VectorComponent::layout) with a
+///    [`Constraints`] block. The child returns the size it wants within
+///    those constraints.
+/// 2. The parent calls [`render`](VectorComponent::render) with the
+///    chosen size to obtain the graphic.
 ///
-/// Implementors must keep `view_box()` consistent with `render().view_box`,
-/// so callers can query the intrinsic size without paying for a full render.
+/// Optionally the parent calls [`paint_bounds`](VectorComponent::paint_bounds)
+/// with the chosen size to know how far the component paints outside the
+/// layout box (useful for `Layer::render` sub-resolution sizing and for
+/// rasterize buffer allocation).
+///
+/// Element components implement `layout` and `render` directly. Composite
+/// components (produced by `#[vector_component]`) usually do the same,
+/// internally building a child component and forwarding the protocol.
 pub trait VectorComponent {
-    fn view_box(&self) -> Vec2;
+    /// Decide the layout size for this component given the parent's
+    /// constraints. The returned `Vec2` must satisfy `min <= size <= max`
+    /// on each axis.
+    fn layout(&self, constraints: Constraints) -> Vec2;
 
-    /// Identifies whether this component is a render-owning element or a
-    /// delegate to another component. Default is `Element` so that leaf types
-    /// only need to override `render()`.
-    fn body(&self) -> VectorBody {
-        VectorBody::Element
-    }
-
-    /// Produces the flattened graphic. The default walks `body()` until it
-    /// reaches an `Element`; elements must override this with their own
-    /// implementation.
-    fn render(&self) -> VectorGraphic {
-        match self.body() {
-            VectorBody::Element => unimplemented!(
-                "VectorComponent with body() == VectorBody::Element must override render()"
-            ),
-            VectorBody::Of(c) => c.render(),
+    /// Paint bounds for the component once `size` has been chosen. The
+    /// default returns a rectangle whose `origin` is `(0, 0)` and whose
+    /// `size` equals the layout size. Effects that paint outside the
+    /// layout box (drop shadows, blurs) override this to widen the
+    /// rectangle.
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        Rect {
+            origin: Vec2::ZERO,
+            size,
         }
     }
+
+    /// Produce the flattened graphic at `size`. `size` is always the
+    /// value previously returned by `layout` for the same constraints,
+    /// so children may rely on it without re-checking against the
+    /// constraints.
+    fn render(&self, size: Vec2) -> VectorGraphic;
 
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `VectorLayer.children`
@@ -57,15 +65,6 @@ pub trait VectorComponent {
     {
         Box::new(self)
     }
-}
-
-/// Discriminates element components (own their `render`) from composite
-/// components (delegate to another component).
-pub enum VectorBody {
-    /// This component owns a concrete `render()` implementation.
-    Element,
-    /// Delegate to another component — `render()` walks through it.
-    Of(Box<dyn VectorComponent>),
 }
 
 // Compile-time guarantee that `VectorComponent` is dyn-safe.

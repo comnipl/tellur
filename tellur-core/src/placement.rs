@@ -21,7 +21,7 @@
 //! [`AnchoredSize::snap_to`](crate::geometry::AnchoredSize::snap_to) so the
 //! geometry vocabulary carries over directly to component placement.
 
-use crate::geometry::{Anchor, Vec2};
+use crate::geometry::{Anchor, Constraints, Vec2};
 use crate::raster::RasterComponent;
 use crate::vector::VectorComponent;
 
@@ -74,14 +74,12 @@ pub struct AnchoredVectorComponent<C: VectorComponent> {
 }
 
 impl<C: VectorComponent + 'static> AnchoredVectorComponent<C> {
-    /// Places the component so the chosen anchor on its `view_box` lands on
+    /// Places the component so the chosen anchor on its intrinsic layout
+    /// size (obtained via `layout(Constraints::UNBOUNDED)`) lands on
     /// `target_point` in the parent's coordinate space.
     pub fn snap_to(self, target_point: Vec2) -> Placed<dyn VectorComponent> {
-        let position = self
-            .component
-            .view_box()
-            .anchored(self.anchor)
-            .snap_to(target_point);
+        let intrinsic = self.component.layout(Constraints::UNBOUNDED);
+        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
         Placed {
             position,
             child: Box::new(self.component),
@@ -123,14 +121,12 @@ pub struct AnchoredRasterComponent<C: RasterComponent> {
 }
 
 impl<C: RasterComponent + 'static> AnchoredRasterComponent<C> {
-    /// Places the component so the chosen anchor on its `view_box` lands on
+    /// Places the component so the chosen anchor on its intrinsic layout
+    /// size (obtained via `layout(Constraints::UNBOUNDED)`) lands on
     /// `target_point` in the parent's coordinate space.
     pub fn snap_to(self, target_point: Vec2) -> Placed<dyn RasterComponent> {
-        let position = self
-            .component
-            .view_box()
-            .anchored(self.anchor)
-            .snap_to(target_point);
+        let intrinsic = self.component.layout(Constraints::UNBOUNDED);
+        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
         Placed {
             position,
             child: Box::new(self.component),
