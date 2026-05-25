@@ -7,6 +7,8 @@ edition = "2021"
 bytes = "1.11.1"
 console = "0.16.3"
 indicatif = "0.18.4"
+lru = "0.12"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 tellur-core = { path = "../tellur-core" }
 thiserror = "2.0.18"
 tiny-skia = "0.12.0"

@@ -1,18 +1,22 @@
+use std::hash::Hash;
+
 use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::render_context::RenderContext;
 use tellur_core::vector::{Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic};
 
 /// A `RasterComponent` that rasterizes a `VectorComponent`. The layout
 /// protocol forwards to the wrapped vector: layout / paint_bounds /
 /// render(size) all delegate, and `render(size, target)` rasterizes the
 /// vector's `render(size)` output into a `target`-sized pixel buffer.
+#[derive(PartialEq, Hash)]
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
 }
 
-impl<V: VectorComponent> RasterComponent for Rasterize<V> {
+impl<V: VectorComponent + PartialEq + Hash + 'static> RasterComponent for Rasterize<V> {
     fn layout(&self, constraints: Constraints) -> Vec2 {
         self.vector.layout(constraints)
     }
@@ -21,7 +25,7 @@ impl<V: VectorComponent> RasterComponent for Rasterize<V> {
         self.vector.paint_bounds(size)
     }
 
-    fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+    fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
         let graphic = self.vector.render(size);
         rasterize(&graphic, target.width, target.height)
     }

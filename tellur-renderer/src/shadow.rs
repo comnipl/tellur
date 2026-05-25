@@ -6,10 +6,14 @@
 //! enough pixels; its `layout_box` is left unchanged so shadows do not
 //! disturb layout.
 
+use std::hash::{Hash, Hasher};
+
 use bytes::Bytes;
 use tellur_core::color::Color;
+use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::render_context::RenderContext;
 
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
@@ -19,6 +23,24 @@ pub struct DropShadow {
     /// Shadow color (the alpha channel is multiplied with the child's).
     pub color: Color,
     pub child: Box<dyn RasterComponent>,
+}
+
+impl PartialEq for DropShadow {
+    fn eq(&self, other: &Self) -> bool {
+        self.offset == other.offset
+            && self.blur.to_bits() == other.blur.to_bits()
+            && self.color == other.color
+            && *self.child == *other.child
+    }
+}
+
+impl Hash for DropShadow {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.offset.hash(state);
+        hash_f32(self.blur, state);
+        self.color.hash(state);
+        self.child.hash(state);
+    }
 }
 
 /// 3-pass box blur with kernel radius `r` has a total convolution
@@ -55,7 +77,7 @@ impl RasterComponent for DropShadow {
         }
     }
 
-    fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
         let paint = self.paint_bounds(size);
         let child_paint = self.child.paint_bounds(size);
         if paint.size.0 <= 0.0 || paint.size.1 <= 0.0 {
@@ -64,12 +86,16 @@ impl RasterComponent for DropShadow {
         let sx = target.width as f32 / paint.size.0;
         let sy = target.height as f32 / paint.size.1;
 
-        // Render the child at its own paint-bounds pixel size.
+        // Render the child through the context so its output is memoized
+        // independently of the shadow — that's the key win for static
+        // subtrees where the heavy work is the child render itself.
         let child_px_w = (child_paint.size.0 * sx).round().max(1.0) as u32;
         let child_px_h = (child_paint.size.1 * sy).round().max(1.0) as u32;
-        let child_image = self
-            .child
-            .render(size, Resolution::new(child_px_w, child_px_h));
+        let child_image = ctx.render(
+            self.child.as_ref(),
+            size,
+            Resolution::new(child_px_w, child_px_h),
+        );
 
         // Build a padded shadow image whose alpha is a blurred copy of
         // the child's alpha, tinted with `color`. Padding equals the

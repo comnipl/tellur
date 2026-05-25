@@ -24,8 +24,10 @@ use bytes::Bytes;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::Placed;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use crate::render_context::RenderContext;
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
+#[derive(PartialEq, Hash)]
 pub struct VectorLayer {
     pub size: Vec2,
     pub children: Vec<Placed<dyn VectorComponent>>,
@@ -79,6 +81,7 @@ impl VectorComponent for VectorLayer {
     }
 }
 
+#[derive(PartialEq, Hash)]
 pub struct Layer {
     pub size: Vec2,
     pub children: Vec<Placed<dyn RasterComponent>>,
@@ -117,7 +120,7 @@ impl RasterComponent for Layer {
         bounds
     }
 
-    fn render(&self, size: Vec2, target: Resolution) -> RasterImage {
+    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
         let paint_rect = self.paint_bounds(size);
         let child_constraints = Constraints::loose(size);
         let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = self
@@ -128,7 +131,7 @@ impl RasterComponent for Layer {
                 (p.position, child_size, p.child.as_ref())
             })
             .collect();
-        composite_children(paint_rect, target, &placed)
+        composite_children(paint_rect, target, &placed, ctx)
     }
 }
 
@@ -160,6 +163,7 @@ pub(crate) fn composite_children(
     paint_rect: Rect,
     target: Resolution,
     placed: &[(Vec2, Vec2, &dyn RasterComponent)],
+    ctx: &mut dyn RenderContext,
 ) -> RasterImage {
     let pixel_count = (target.width as usize) * (target.height as usize);
     let mut accum = vec![0u8; pixel_count * 4];
@@ -176,7 +180,9 @@ pub(crate) fn composite_children(
         let offset_x = (paint_x * scale_x).round() as i32;
         let offset_y = (paint_y * scale_y).round() as i32;
 
-        let image = child.render(*child_size, Resolution::new(child_px_w, child_px_h));
+        // Route the child render through the context so cache lookups
+        // can intercept it before the underlying `render` runs.
+        let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
         composite_at(&mut accum, target, &image, offset_x, offset_y);
     }
 

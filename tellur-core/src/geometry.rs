@@ -3,10 +3,20 @@
 //! The project uses a coordinate system with **origin at the top-left and Y axis
 //! pointing down**.
 
+use std::hash::{Hash, Hasher};
 use std::ops::{Add, Sub};
+
+use crate::dyn_compare::hash_f32;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vec2(pub f32, pub f32);
+
+impl Hash for Vec2 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_f32(self.0, state);
+        hash_f32(self.1, state);
+    }
+}
 
 impl Vec2 {
     pub const ZERO: Self = Self(0.0, 0.0);
@@ -36,7 +46,7 @@ impl Sub for Vec2 {
 ///
 /// `origin` is the top-left corner (the smaller-coordinate side); `origin + size`
 /// is the bottom-right corner.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub struct Rect {
     pub origin: Vec2,
     pub size: Vec2,
@@ -57,6 +67,17 @@ pub struct Transform {
     pub d: f32,
     pub tx: f32,
     pub ty: f32,
+}
+
+impl Hash for Transform {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_f32(self.a, state);
+        hash_f32(self.b, state);
+        hash_f32(self.c, state);
+        hash_f32(self.d, state);
+        hash_f32(self.tx, state);
+        hash_f32(self.ty, state);
+    }
 }
 
 impl Transform {
@@ -92,6 +113,13 @@ pub struct Anchor {
     pub ry: f32,
 }
 
+impl Hash for Anchor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_f32(self.rx, state);
+        hash_f32(self.ry, state);
+    }
+}
+
 impl Anchor {
     pub const TOP_LEFT: Self = Self::new(0.0, 0.0);
     pub const TOP_CENTER: Self = Self::new(0.5, 0.0);
@@ -115,7 +143,7 @@ impl Anchor {
 }
 
 /// A size paired with an anchor on that size, produced by [`Vec2::anchored`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub struct AnchoredSize {
     pub size: Vec2,
     pub anchor: Anchor,
@@ -142,6 +170,15 @@ pub struct EdgeInsets {
     pub top: f32,
     pub right: f32,
     pub bottom: f32,
+}
+
+impl Hash for EdgeInsets {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_f32(self.left, state);
+        hash_f32(self.top, state);
+        hash_f32(self.right, state);
+        hash_f32(self.bottom, state);
+    }
 }
 
 impl EdgeInsets {
@@ -205,7 +242,7 @@ impl EdgeInsets {
 /// "no upper bound" (the parent does not constrain this axis); `min` is
 /// usually `0.0` for "no lower bound" and equals `max` for fully tight
 /// constraints.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub struct Constraints {
     pub min: Vec2,
     pub max: Vec2,
@@ -287,7 +324,7 @@ impl Constraints {
 /// layout module for stack-axis selection, but kept in `geometry` so
 /// helpers like [`Constraints::tighten_cross`] can refer to it without a
 /// dependency cycle.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Axis {
     Horizontal,
     Vertical,

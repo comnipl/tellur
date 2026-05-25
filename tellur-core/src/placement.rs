@@ -21,6 +21,8 @@
 //! [`AnchoredSize::snap_to`](crate::geometry::AnchoredSize::snap_to) so the
 //! geometry vocabulary carries over directly to component placement.
 
+use std::hash::{Hash, Hasher};
+
 use crate::geometry::{Anchor, Constraints, Vec2};
 use crate::raster::RasterComponent;
 use crate::vector::VectorComponent;
@@ -34,6 +36,19 @@ use crate::vector::VectorComponent;
 pub struct Placed<C: ?Sized> {
     pub position: Vec2,
     pub child: Box<C>,
+}
+
+impl<C: ?Sized + PartialEq> PartialEq for Placed<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position && *self.child == *other.child
+    }
+}
+
+impl<C: ?Sized + Hash> Hash for Placed<C> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.position.hash(state);
+        (*self.child).hash(state);
+    }
 }
 
 /// Extension trait that adds placement methods to every [`VectorComponent`].

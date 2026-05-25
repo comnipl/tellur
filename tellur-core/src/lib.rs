@@ -1,4 +1,5 @@
 pub mod color;
+pub mod dyn_compare;
 pub mod geometry;
 pub mod interpolate;
 pub mod layer;
@@ -6,6 +7,7 @@ pub mod layout;
 pub mod phase;
 pub mod placement;
 pub mod raster;
+pub mod render_context;
 pub mod shapes;
 pub mod time;
 pub mod timeline;

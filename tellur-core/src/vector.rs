@@ -1,4 +1,8 @@
+use std::any::Any;
+use std::hash::{Hash, Hasher};
+
 use crate::color::Color;
+use crate::dyn_compare::{hash_f32, DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 
 /// A piece of vector content with a paint-bounds rectangle.
@@ -9,7 +13,7 @@ use crate::geometry::{Constraints, Rect, Transform, Vec2};
 /// spills to the upper-left) or a `size` larger than the layout size.
 /// Place the graphic in a parent coordinate space by composing it
 /// through a `Group` transform or a `VectorLayer`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct VectorGraphic {
     pub view_box: Rect,
     pub root: Node,
@@ -32,7 +36,7 @@ pub struct VectorGraphic {
 /// Element components implement `layout` and `render` directly. Composite
 /// components (produced by `#[vector_component]`) usually do the same,
 /// internally building a child component and forwarding the protocol.
-pub trait VectorComponent {
+pub trait VectorComponent: DynEq + DynHash {
     /// Decide the layout size for this component given the parent's
     /// constraints. The returned `Vec2` must satisfy `min <= size <= max`
     /// on each axis.
@@ -70,20 +74,41 @@ pub trait VectorComponent {
 // Compile-time guarantee that `VectorComponent` is dyn-safe.
 const _: Option<&dyn VectorComponent> = None;
 
-#[derive(Debug, Clone)]
+impl PartialEq for dyn VectorComponent {
+    fn eq(&self, other: &Self) -> bool {
+        DynEq::dyn_eq(self, other.as_any())
+    }
+}
+
+impl Hash for dyn VectorComponent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Any::type_id(self.as_any()).hash(state);
+        DynHash::dyn_hash(self, state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum Node {
     Group(Group),
     Path(Path),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Group {
     pub transform: Transform,
     pub opacity: f32,
     pub children: Vec<Node>,
 }
 
-#[derive(Debug, Clone)]
+impl Hash for Group {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.transform.hash(state);
+        hash_f32(self.opacity, state);
+        self.children.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Path {
     pub commands: Vec<PathCommand>,
     pub fill: Option<Fill>,
@@ -91,7 +116,7 @@ pub struct Path {
     pub transform: Transform,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
 pub enum PathCommand {
     MoveTo(Vec2),
     LineTo(Vec2),
@@ -100,18 +125,25 @@ pub enum PathCommand {
     Close,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Fill {
     pub paint: Paint,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
     pub paint: Paint,
     pub width: f32,
 }
 
-#[derive(Debug, Clone)]
+impl Hash for Stroke {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.paint.hash(state);
+        hash_f32(self.width, state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Hash)]
 pub enum Paint {
     Solid(Color),
 }

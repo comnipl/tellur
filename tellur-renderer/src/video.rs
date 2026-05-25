@@ -30,12 +30,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{ChildStdout, Command, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use tellur_core::raster::{PixelFormat, Resolution};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use thiserror::Error;
+
+use crate::render_context::CachingRenderContext;
 
 /// Builder that spawns `ffmpeg` and drives a [`Timeline`] through it.
 ///
@@ -200,10 +203,25 @@ impl FfmpegEncoder {
             (None, None, None, None, None)
         };
 
+        // One context for the whole encode so memoization survives across
+        // frames — that's what makes static subtrees (e.g. a DropShadow
+        // wrapping a time-invariant child) only re-render once.
+        let mut ctx = CachingRenderContext::new();
+
+        // Per-phase timing so we can tell whether wall-clock time is
+        // being spent inside `tl.build` (= our rendering pipeline) or
+        // blocked on `stdin.write_all` (= ffmpeg's encoder backpressure).
+        let mut build_time = Duration::ZERO;
+        let mut write_time = Duration::ZERO;
+        let loop_start = Instant::now();
+
         let write_result = (|| -> Result<(), FfmpegError> {
             for frame_idx in 0..total_frames {
                 let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
-                let image = tl.build(t, self.resolution);
+
+                let build_start = Instant::now();
+                let image = tl.build(t, self.resolution, &mut ctx);
+                build_time += build_start.elapsed();
 
                 if image.format != PixelFormat::Rgba8 {
                     return Err(FfmpegError::UnsupportedFormat {
@@ -221,12 +239,14 @@ impl FfmpegEncoder {
                     });
                 }
 
+                let write_start = Instant::now();
                 stdin
                     .write_all(&image.pixels)
                     .map_err(|source| FfmpegError::Write {
                         frame: frame_idx,
                         source,
                     })?;
+                write_time += write_start.elapsed();
 
                 if let Some(bar) = &render_bar {
                     bar.inc(1);
@@ -234,6 +254,7 @@ impl FfmpegEncoder {
             }
             Ok(())
         })();
+        let loop_elapsed = loop_start.elapsed();
 
         // Close stdin so ffmpeg can finalize the file, even if frame
         // production errored partway through — that lets ffmpeg shut down
@@ -270,6 +291,25 @@ impl FfmpegEncoder {
         }
         if let Some(bar) = &info_bar {
             bar.finish();
+        }
+
+        // Dump cache metrics so users can confirm memoization is firing
+        // (and diagnose why it isn't when hit_rate stays low). The
+        // breakdown-by-type rows are particularly useful for spotting
+        // which component types are not benefiting from the cache.
+        // The loop-phase timings sit above the cache summary so it's
+        // immediately visible whether our render path or ffmpeg's
+        // encoder is the wall-clock bottleneck.
+        if self.progress {
+            let other = loop_elapsed.saturating_sub(build_time + write_time);
+            eprintln!(
+                "Loop  {} total = {} build + {} ffmpeg-write + {} other",
+                format_duration_short(loop_elapsed),
+                format_duration_short(build_time),
+                format_duration_short(write_time),
+                format_duration_short(other),
+            );
+            eprint!("{}", ctx.metrics());
         }
 
         write_result?;
@@ -323,6 +363,17 @@ fn drive_encode_progress(stdout: ChildStdout, encode_bar: ProgressBar, info_bar:
             }
             _ => {}
         }
+    }
+}
+
+fn format_duration_short(d: Duration) -> String {
+    let micros = d.as_micros();
+    if micros >= 1_000_000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else if micros >= 1_000 {
+        format!("{:.2}ms", micros as f64 / 1_000.0)
+    } else {
+        format!("{micros}µs")
     }
 }
 

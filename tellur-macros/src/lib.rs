@@ -127,9 +127,10 @@ fn expand(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             quote!(::tellur_core::raster::RasterImage),
             quote!(
                 size: ::tellur_core::geometry::Vec2,
-                target: ::tellur_core::raster::Resolution
+                target: ::tellur_core::raster::Resolution,
+                ctx: &mut dyn ::tellur_core::render_context::RenderContext
             ),
-            quote!(size, target),
+            quote!(size, target, ctx),
         ),
     };
 
@@ -190,10 +191,43 @@ fn expand(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             )
         };
 
+    // Hash for the struct is built field-by-field so that bare `f32` /
+    // `f64` fields can be routed through the bit-pattern hashers
+    // (`f32` and `f64` don't implement `Hash` directly, so `#[derive(Hash)]`
+    // wouldn't compile on a component that takes a raw float argument).
+    let hash_field_calls: Vec<TokenStream2> = field_idents
+        .iter()
+        .zip(field_types.iter())
+        .map(|(ident, ty)| {
+            let ty_str = quote!(#ty).to_string();
+            // Strip whitespace introduced by token stream stringification to
+            // make the comparison robust against `& 'static str`-style spacing.
+            let normalized: String = ty_str.split_whitespace().collect();
+            match normalized.as_str() {
+                "f32" => quote! {
+                    ::tellur_core::dyn_compare::hash_f32(self.#ident, state);
+                },
+                "f64" => quote! {
+                    self.#ident.to_bits().hash(state);
+                },
+                _ => quote! {
+                    ::core::hash::Hash::hash(&self.#ident, state);
+                },
+            }
+        })
+        .collect();
+
     let output = quote! {
-        #[derive(::core::clone::Clone)]
+        #[derive(::core::clone::Clone, ::core::cmp::PartialEq)]
         #vis struct #struct_ident {
             #( pub #field_idents: #field_types, )*
+        }
+
+        impl ::core::hash::Hash for #struct_ident {
+            fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) {
+                use ::core::hash::Hash as _;
+                #( #hash_field_calls )*
+            }
         }
 
         impl #struct_ident {
