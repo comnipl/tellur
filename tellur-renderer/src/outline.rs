@@ -95,7 +95,13 @@ impl RasterComponent for Outline {
         let outline_local_y = (child_paint.origin.1 - pad_lu_y) - paint.origin.1;
         let outline_px_x = (outline_local_x * sx).round() as i32;
         let outline_px_y = (outline_local_y * sy).round() as i32;
-        composite_at(&mut accum, target, &outline_image, outline_px_x, outline_px_y);
+        composite_at(
+            &mut accum,
+            target,
+            &outline_image,
+            outline_px_x,
+            outline_px_y,
+        );
 
         let child_local_x = child_paint.origin.0 - paint.origin.0;
         let child_local_y = child_paint.origin.1 - paint.origin.1;
@@ -122,7 +128,12 @@ fn blank_image(target: Resolution) -> RasterImage {
     }
 }
 
-fn make_outline(image: &RasterImage, width_px_x: u32, width_px_y: u32, color: Color) -> RasterImage {
+fn make_outline(
+    image: &RasterImage,
+    width_px_x: u32,
+    width_px_y: u32,
+    color: Color,
+) -> RasterImage {
     assert_eq!(image.format, PixelFormat::Rgba8);
     let pad_x = width_px_x as usize;
     let pad_y = width_px_y as usize;
