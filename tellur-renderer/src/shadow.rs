@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
 use tellur_core::color::Color;
+use tellur_core::composite::composite_at;
 use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
@@ -253,63 +254,6 @@ fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
                 sum -= src[(y - radius) * w + x] as u32;
                 count -= 1;
             }
-        }
-    }
-}
-
-// Source-over compositing of `src` onto `dst` at pixel offset
-// `(offset_x, offset_y)`. Both buffers hold 8-bit straight-alpha RGBA.
-fn composite_at(
-    dst: &mut [u8],
-    dst_size: Resolution,
-    src: &RasterImage,
-    offset_x: i32,
-    offset_y: i32,
-) {
-    assert_eq!(src.format, PixelFormat::Rgba8);
-    let src_pixels = src.pixels.as_ref();
-    let dst_w = dst_size.width as i32;
-    let dst_h = dst_size.height as i32;
-    let src_w = src.width as i32;
-    let src_h = src.height as i32;
-
-    let x_start = offset_x.max(0);
-    let y_start = offset_y.max(0);
-    let x_end = (offset_x + src_w).min(dst_w);
-    let y_end = (offset_y + src_h).min(dst_h);
-
-    for dy in y_start..y_end {
-        for dx in x_start..x_end {
-            let sx = dx - offset_x;
-            let sy = dy - offset_y;
-            let src_idx = ((sy * src_w + sx) * 4) as usize;
-            let dst_idx = ((dy * dst_w + dx) * 4) as usize;
-
-            let sr = src_pixels[src_idx] as f32 / 255.0;
-            let sg = src_pixels[src_idx + 1] as f32 / 255.0;
-            let sb = src_pixels[src_idx + 2] as f32 / 255.0;
-            let sa = src_pixels[src_idx + 3] as f32 / 255.0;
-            let dr = dst[dst_idx] as f32 / 255.0;
-            let dg = dst[dst_idx + 1] as f32 / 255.0;
-            let db = dst[dst_idx + 2] as f32 / 255.0;
-            let da = dst[dst_idx + 3] as f32 / 255.0;
-
-            let inv_sa = 1.0 - sa;
-            let out_a = sa + da * inv_sa;
-            let (out_r, out_g, out_b) = if out_a > 0.0 {
-                (
-                    (sr * sa + dr * da * inv_sa) / out_a,
-                    (sg * sa + dg * da * inv_sa) / out_a,
-                    (sb * sa + db * da * inv_sa) / out_a,
-                )
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-
-            dst[dst_idx] = (out_r * 255.0).round().clamp(0.0, 255.0) as u8;
-            dst[dst_idx + 1] = (out_g * 255.0).round().clamp(0.0, 255.0) as u8;
-            dst[dst_idx + 2] = (out_b * 255.0).round().clamp(0.0, 255.0) as u8;
-            dst[dst_idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
         }
     }
 }
