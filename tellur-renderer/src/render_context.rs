@@ -26,9 +26,9 @@ use tellur_core::geometry::Vec2;
 use tellur_core::raster::{RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::RenderContext;
 
-/// Default cache size in bytes (8 GiB) when constructed with
+/// Default cache size in bytes (1 GiB) when constructed with
 /// [`CachingRenderContext::new`].
-pub const DEFAULT_CAPACITY_BYTES: usize = 8 * 1024 * 1024 * 1024;
+pub const DEFAULT_CAPACITY_BYTES: usize = 1024 * 1024 * 1024;
 
 /// System-memory utilization fraction above which the cache stops
 /// admitting new entries and starts shedding existing ones.
