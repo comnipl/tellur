@@ -1,9 +1,13 @@
+use std::any::Any;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 
 use bytes::Bytes;
 use thiserror::Error;
 
+use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Vec2};
+use crate::render_context::RenderContext;
 
 #[derive(Debug, Clone)]
 pub struct RasterImage {
@@ -13,7 +17,7 @@ pub struct RasterImage {
     pub pixels: Bytes,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     /// 8-bit per channel sRGB with straight (non-premultiplied) alpha.
     Rgba8,
@@ -22,7 +26,7 @@ pub enum PixelFormat {
 }
 
 /// Target output resolution for a `RasterComponent::render` call, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Resolution {
     pub width: u32,
     pub height: u32,
@@ -47,7 +51,7 @@ impl Resolution {
 /// 3. Optionally [`paint_bounds`](RasterComponent::paint_bounds) tells
 ///    the parent how far the component paints outside the layout box,
 ///    so `Layer` can grow the sub-resolution accordingly.
-pub trait RasterComponent {
+pub trait RasterComponent: DynEq + DynHash {
     /// Decide the layout size given the parent's constraints.
     fn layout(&self, constraints: Constraints) -> Vec2;
 
@@ -65,7 +69,12 @@ pub trait RasterComponent {
     /// pixel buffer. The pixel buffer covers exactly the `paint_bounds`
     /// rectangle for `size` — for default `paint_bounds`, that's the
     /// `(0, 0)..size` region.
-    fn render(&self, size: Vec2, target: Resolution) -> RasterImage;
+    ///
+    /// The `ctx` argument lets the component delegate child renders back
+    /// through the driver (typically via `ctx.render(&*child, size,
+    /// target)`) so cross-cutting policies such as memoization can be
+    /// applied uniformly across the tree.
+    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage;
 
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `Layer.children` in
@@ -80,6 +89,21 @@ pub trait RasterComponent {
 
 // Compile-time guarantee that `RasterComponent` is dyn-safe.
 const _: Option<&dyn RasterComponent> = None;
+
+impl PartialEq for dyn RasterComponent {
+    fn eq(&self, other: &Self) -> bool {
+        DynEq::dyn_eq(self, other.as_any())
+    }
+}
+
+impl Hash for dyn RasterComponent {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Include the concrete TypeId so two components with coincidentally
+        // identical internal hashes but different types remain distinct.
+        Any::type_id(self.as_any()).hash(state);
+        DynHash::dyn_hash(self, state);
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PngExportError {

@@ -137,6 +137,12 @@ pub struct TimelineTime {
     seconds: f32,
 }
 
+impl std::hash::Hash for TimelineTime {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::dyn_compare::hash_f32(self.seconds, state);
+    }
+}
+
 impl TimelineTime {
     pub const fn new(seconds: f32) -> Self {
         Self { seconds }
@@ -157,6 +163,12 @@ impl Time for TimelineTime {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LocalTime {
     seconds: f32,
+}
+
+impl std::hash::Hash for LocalTime {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        crate::dyn_compare::hash_f32(self.seconds, state);
+    }
 }
 
 impl LocalTime {
