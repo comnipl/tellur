@@ -7,9 +7,10 @@
 //! distributes the four tracks evenly inside a padded scene with
 //! `CrossAlign::Stretch`. The dot itself is purely a tree of layout
 //! containers — `Frame` declares its outer shape and anchors the
-//! shadowed circle inside it; `.padding(...)` keeps the dot off the
-//! track edges. The `DropShadow` is wrapped directly around the
-//! circle, where the shadow conceptually belongs.
+//! decorated circle inside it; `.padding(...)` keeps the dot off the
+//! track edges. The circle is wrapped in an `Outline` (white stroke)
+//! and then a `DropShadow`, so the shadow falls behind the combined
+//! stroked shape.
 
 use std::path::Path;
 
@@ -23,15 +24,16 @@ use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time};
 use tellur_core::timeline::timeline;
 use tellur_core::vector::Paint;
-use tellur_renderer::{DropShadow, FfmpegEncoder, Rasterizable};
+use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, Rasterizable};
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across the
 /// track's width. `Frame` declares the track's outer shape (fill the
 /// parent width, fix the height at 60) and anchors the circle so it
 /// stays fully inside: both `child_anchor` and `at` use the same
 /// bounce-driven ratio, so the dot's left edge touches the frame's
-/// left at `rx = 0` and its right edge touches at `rx = 1`. The whole
-/// track is wrapped in a `DropShadow`.
+/// left at `rx = 0` and its right edge touches at `rx = 1`. The circle
+/// itself is decorated with a white `Outline` and a `DropShadow` —
+/// `Outline` runs first so the shadow falls behind the stroked shape.
 #[raster_component]
 fn BouncingDot(t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
@@ -44,14 +46,19 @@ fn BouncingDot(t: LocalTime) -> impl RasterComponent {
         at: Anchor::new(rx, 0.5),
         child: DropShadow {
             offset: Vec2(0.0, 8.0),
-            blur: 4.0,
-            color: Color::rgba_u8(255, 255, 255, 100),
-            child: Circle {
-                radius,
-                fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
-                stroke: None,
+            blur: 10.0,
+            color: Color::rgba_u8(0, 0, 0, 200),
+            child: Outline {
+                width: 4.0,
+                color: Color::rgb_u8(255, 255, 255),
+                child: Circle {
+                    radius,
+                    fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
+                    stroke: None,
+                }
+                .rasterize()
+                .boxed(),
             }
-            .rasterize()
             .boxed(),
         }
         .boxed(),
@@ -68,6 +75,7 @@ fn main() {
             main_align: MainAlign::SpaceEvenly,
             cross_align: CrossAlign::Stretch,
             children: vec![
+                BouncingDot { t: t.into() }.boxed(),
                 BouncingDot {
                     t: t.fps(60).into(),
                 }
