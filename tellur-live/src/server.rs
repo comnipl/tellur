@@ -1139,12 +1139,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let startedAt = 0;
     let baseSeconds = 0;
     let displayToken = 0;
-    let rgbaToken = 0;
     let pngToken = 0;
     let preloadToken = 0;
-    let pendingRgba = false;
     let pendingPng = false;
-    let settleTimer = null;
+    let queuedPng = false;
     let preloadTimer = null;
     let preloadedVideoKey = "";
     let controlsInitialized = false;
@@ -1259,7 +1257,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function stopVideo() {
+      clearVideoPreload();
+    }
+
+    function clearVideoPreload() {
       clearTimeout(preloadTimer);
+      if (!video.src && !preloadedVideoKey) return;
       video.pause();
       video.removeAttribute("src");
       video.load();
@@ -1267,56 +1270,41 @@ const INDEX_HTML: &str = r#"<!doctype html>
       preloadToken += 1;
     }
 
-    function drawRgbaBuffer(buffer, target) {
-      const expected = target.width * target.height * 4;
-      if (buffer.byteLength !== expected) {
-        throw new Error(`rgba size mismatch: got ${buffer.byteLength}, expected ${expected}`);
-      }
-      if (canvas.width !== target.width || canvas.height !== target.height) {
-        canvas.width = target.width;
-        canvas.height = target.height;
-      }
-      const image = new ImageData(new Uint8ClampedArray(buffer), target.width, target.height);
-      canvasCtx.putImageData(image, 0, 0);
-    }
-
-    async function requestRgbaFrame(force = false) {
-      if (!timeline || (pendingRgba && !force)) return;
-      pendingRgba = true;
-      const id = ++displayToken;
-      const rgbaId = ++rgbaToken;
-      const params = frameParams("rgba", id);
-      const target = applyRenderParams(params);
-      try {
-        const response = await fetch(`/api/frame?${params}`, { cache: "no-store" });
-        if (!response.ok) throw new Error(`frame request failed: ${response.status}`);
-        const buffer = await response.arrayBuffer();
-        if (id !== displayToken) return;
-        drawRgbaBuffer(buffer, target);
-        showCanvas();
-      } catch (e) {
-        if (id === displayToken) showError(String(e));
-      } finally {
-        if (rgbaId === rgbaToken) pendingRgba = false;
-      }
-    }
-
     function requestPngFrame(force = false) {
-      if (!timeline || (pendingPng && !force)) return;
+      if (!timeline) return;
+      if (pendingPng) {
+        queuedPng = true;
+        if (force) displayToken += 1;
+        clearTimeout(preloadTimer);
+        return;
+      }
       pendingPng = true;
+      queuedPng = false;
+      clearTimeout(preloadTimer);
       const id = ++displayToken;
       const pngId = ++pngToken;
       const params = frameParams("png", id);
       applyRenderParams(params);
-      img.onload = () => {
+
+      const finish = () => {
         if (pngId === pngToken) pendingPng = false;
+        if (queuedPng && !playing) {
+          queuedPng = false;
+          requestPngFrame(true);
+        } else if (!playing) {
+          scheduleVideoPreload();
+        }
+      };
+
+      img.onload = () => {
         if (id === displayToken) {
           showImage();
         }
+        finish();
       };
       img.onerror = () => {
-        if (pngId === pngToken) pendingPng = false;
-        showError("frame request failed");
+        if (id === displayToken) showError("frame request failed");
+        finish();
       };
       img.src = `/api/frame?${params}`;
     }
@@ -1341,19 +1329,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       video.load();
     }
 
-    function settleToPng(delay = 180) {
-      clearTimeout(settleTimer);
-      settleTimer = setTimeout(() => {
-        if (!playing) {
-          requestPngFrame(true);
-          scheduleVideoPreload();
-        }
-      }, delay);
-    }
-
     function startVideoPlayback() {
       if (!timeline || !info) return;
-      clearTimeout(settleTimer);
       const token = ++displayToken;
       const startSeconds = seconds;
       baseSeconds = startSeconds;
@@ -1372,7 +1349,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
         seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
         updateReadout();
         requestPngFrame(true);
-        scheduleVideoPreload();
       };
       if (key !== preloadedVideoKey || !video.src || video.error) {
         preloadedVideoKey = key;
@@ -1405,37 +1381,33 @@ const INDEX_HTML: &str = r#"<!doctype html>
         seconds = Math.min(baseSeconds + video.currentTime, timeline ? timeline.duration : seconds);
         stopVideo();
         requestPngFrame(true);
-        scheduleVideoPreload();
       }
     });
 
     seek.addEventListener("input", () => {
-      clearTimeout(preloadTimer);
+      clearVideoPreload();
       if (playing) {
         playing = false;
         play.textContent = ">";
-        stopVideo();
       }
       seconds = Number(seek.value);
       baseSeconds = seconds;
       startedAt = performance.now();
       updateReadout();
-      requestRgbaFrame(true);
-      settleToPng();
+      requestPngFrame(true);
     });
 
     function applyPreviewSettings() {
       if (!info) return;
       seek.step = String(1 / selectedFps());
       updateReadout();
-      clearTimeout(settleTimer);
       clearTimeout(preloadTimer);
       if (playing) {
         stopVideo();
         startVideoPlayback();
       } else {
-        requestRgbaFrame(true);
-        settleToPng(80);
+        clearVideoPreload();
+        requestPngFrame(true);
       }
     }
 
@@ -1446,7 +1418,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .then(() => {
         updateReadout();
         requestPngFrame(true);
-        scheduleVideoPreload();
         setInterval(() => { if (!playing) loadInfo(); }, 1000);
       })
       .catch((e) => showError(String(e)));

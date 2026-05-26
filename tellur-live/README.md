@@ -50,12 +50,12 @@ Use `--host 0.0.0.0` when the preview server should be reachable from other
 devices on the network.
 Pass `--verbose` to print per-frame timing and cache statistics to stdout.
 
-The browser UI is intentionally a thin validation client. It requests still
-PNG frames for still previews, raw RGBA frames while seeking, and fragmented
-MP4/H.264 for playback. The Size and FPS controls lower the request resolution
-and frame rate when full-resolution playback is too expensive. While idle, the
-client preloads the beginning of the MP4 stream for the current position so the
-play button can reuse already-buffered video data.
+The browser UI is intentionally a thin validation client. It requests
+coalesced PNG frames for still previews and seeking, and fragmented MP4/H.264
+for playback. The Size and FPS controls lower the request resolution and frame
+rate when full-resolution playback is too expensive. While idle, the client
+preloads the beginning of the MP4 stream for the current position so the play
+button can reuse already-buffered video data.
 
 ## HTTP Endpoints
 
@@ -64,8 +64,7 @@ play button can reuse already-buffered video data.
 - `GET /api/frame?time=1.25&timeline=main` returns one PNG frame.
 - `GET /api/frame?frame=42&timeline=main` returns one PNG frame by frame index.
 - `GET /api/frame?time=1.25&timeline=main&format=rgba` returns raw RGBA8 bytes
-  with `X-Tellur-Width` / `X-Tellur-Height` headers. The browser client uses
-  this path while dragging the seek bar, then swaps back to PNG when idle.
+  with `X-Tellur-Width` / `X-Tellur-Height` headers.
 - `GET /api/video.mp4?time=1.25&timeline=main&fps=60&gop=12&crf=23`
   streams fragmented MP4/H.264 through `ffmpeg`. The browser client uses this
   path for playback so `<video>` handles decode and presentation timing.
