@@ -442,10 +442,7 @@ impl Text {
     fn shape_and_layout(&self) -> (Vec<(Vec<PathCommand>, Paint)>, Vec2) {
         let (_, line_height) = self.line_metrics();
         let spans = self.shape_per_span();
-        let total_width = spans
-            .last()
-            .map(|s| s.start_x + s.width)
-            .unwrap_or(0.0);
+        let total_width = spans.last().map(|s| s.start_x + s.width).unwrap_or(0.0);
 
         let mut all_paths: Vec<(Vec<PathCommand>, Paint)> = Vec::new();
         for span in spans {
@@ -552,7 +549,9 @@ impl VectorComponent for TextSpanGraphic {
             .map(|(commands, fill)| {
                 Node::Path(VPath {
                     commands: commands.clone(),
-                    fill: Some(Fill { paint: fill.clone() }),
+                    fill: Some(Fill {
+                        paint: fill.clone(),
+                    }),
                     stroke: None,
                     transform: Transform::IDENTITY,
                 })
