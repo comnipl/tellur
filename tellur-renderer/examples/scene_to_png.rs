@@ -15,7 +15,7 @@ use tellur_renderer::Rasterizable;
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let scene = VectorLayer {
-        size: scene_size,
+        size: Some(scene_size),
         children: vec![
             Rectangle {
                 size: scene_size,

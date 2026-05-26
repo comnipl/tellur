@@ -31,7 +31,7 @@ fn blob(radius: f32, hue: f32) -> impl VectorComponent {
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let scene = Layer {
-        size: scene_size,
+        size: Some(scene_size),
         children: vec![
             Rectangle {
                 size: scene_size,

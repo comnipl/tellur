@@ -51,6 +51,31 @@ impl<C: ?Sized + Hash> Hash for Placed<C> {
     }
 }
 
+// Type-erasure conversions for handing a `Placed<ConcreteType>` to
+// containers typed against `Placed<dyn ...>` (e.g. `VectorLayer.children`).
+// The `Box<C>` → `Box<dyn ...>` unsizing is implicit via the explicit
+// `let` binding.
+
+impl<C: VectorComponent + 'static> From<Placed<C>> for Placed<dyn VectorComponent> {
+    fn from(placed: Placed<C>) -> Self {
+        let child: Box<dyn VectorComponent> = placed.child;
+        Placed {
+            position: placed.position,
+            child,
+        }
+    }
+}
+
+impl<C: RasterComponent + 'static> From<Placed<C>> for Placed<dyn RasterComponent> {
+    fn from(placed: Placed<C>) -> Self {
+        let child: Box<dyn RasterComponent> = placed.child;
+        Placed {
+            position: placed.position,
+            child,
+        }
+    }
+}
+
 /// Extension trait that adds placement methods to every [`VectorComponent`].
 ///
 /// Brought into scope alongside `use tellur_core::vector::VectorComponent`,
