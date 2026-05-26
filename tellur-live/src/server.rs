@@ -540,9 +540,16 @@ fn handle_video_stream(
         .args(["-sc_threshold", "0"])
         .args(["-bf", "0"])
         .args(["-refs", "1"])
+        .args(["-flags", "low_delay"])
         .args(["-crf", &setup.crf.to_string()])
+        .args(["-muxdelay", "0"])
+        .args(["-muxpreload", "0"])
+        .args(["-flush_packets", "1"])
         .args(["-f", "mp4"])
-        .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
+        .args([
+            "-movflags",
+            "frag_keyframe+frag_every_frame+empty_moov+default_base_moof",
+        ])
         .arg("pipe:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1086,7 +1093,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </head>
 <body>
   <main>
-    <div class="display" id="display"><video id="video" muted playsinline></video><canvas id="canvas"></canvas><img id="frame" alt=""></div>
+    <div class="display" id="display"><video id="video" muted playsinline preload="auto"></video><canvas id="canvas"></canvas><img id="frame" alt=""></div>
   </main>
   <footer>
     <button id="play" type="button" aria-label="Play">></button>
@@ -1134,9 +1141,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let displayToken = 0;
     let rgbaToken = 0;
     let pngToken = 0;
+    let preloadToken = 0;
     let pendingRgba = false;
     let pendingPng = false;
     let settleTimer = null;
+    let preloadTimer = null;
+    let preloadedVideoKey = "";
     let controlsInitialized = false;
 
     async function loadInfo() {
@@ -1190,10 +1200,41 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return target;
     }
 
-    function frameParams(format, token) {
+    function videoGop() {
+      return Math.max(1, Math.floor(selectedFps() / 4));
+    }
+
+    function videoKey(frameSeconds = seconds) {
+      if (!timeline || !info) return "";
+      const target = selectedResolution();
+      return [
+        timeline.id,
+        frameSeconds.toFixed(4),
+        `${target.width}x${target.height}`,
+        String(selectedFps()),
+        String(videoGop()),
+        "23"
+      ].join("|");
+    }
+
+    function videoUrl(frameSeconds, token) {
+      const fps = selectedFps();
+      const params = new URLSearchParams({
+        timeline: timeline.id,
+        time: frameSeconds.toFixed(4),
+        fps: String(fps),
+        gop: String(videoGop()),
+        crf: "23",
+        _: String(token)
+      });
+      applyRenderParams(params);
+      return `/api/video.mp4?${params}`;
+    }
+
+    function frameParams(format, token, frameSeconds = seconds) {
       return new URLSearchParams({
         timeline: timeline.id,
-        time: seconds.toFixed(4),
+        time: frameSeconds.toFixed(4),
         format,
         _: String(token)
       });
@@ -1218,9 +1259,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function stopVideo() {
+      clearTimeout(preloadTimer);
       video.pause();
       video.removeAttribute("src");
       video.load();
+      preloadedVideoKey = "";
+      preloadToken += 1;
+    }
+
+    function drawRgbaBuffer(buffer, target) {
+      const expected = target.width * target.height * 4;
+      if (buffer.byteLength !== expected) {
+        throw new Error(`rgba size mismatch: got ${buffer.byteLength}, expected ${expected}`);
+      }
+      if (canvas.width !== target.width || canvas.height !== target.height) {
+        canvas.width = target.width;
+        canvas.height = target.height;
+      }
+      const image = new ImageData(new Uint8ClampedArray(buffer), target.width, target.height);
+      canvasCtx.putImageData(image, 0, 0);
     }
 
     async function requestRgbaFrame(force = false) {
@@ -1235,16 +1292,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         if (!response.ok) throw new Error(`frame request failed: ${response.status}`);
         const buffer = await response.arrayBuffer();
         if (id !== displayToken) return;
-        const expected = target.width * target.height * 4;
-        if (buffer.byteLength !== expected) {
-          throw new Error(`rgba size mismatch: got ${buffer.byteLength}, expected ${expected}`);
-        }
-        if (canvas.width !== target.width || canvas.height !== target.height) {
-          canvas.width = target.width;
-          canvas.height = target.height;
-        }
-        const image = new ImageData(new Uint8ClampedArray(buffer), target.width, target.height);
-        canvasCtx.putImageData(image, 0, 0);
+        drawRgbaBuffer(buffer, target);
         showCanvas();
       } catch (e) {
         if (id === displayToken) showError(String(e));
@@ -1273,10 +1321,33 @@ const INDEX_HTML: &str = r#"<!doctype html>
       img.src = `/api/frame?${params}`;
     }
 
+    function scheduleVideoPreload(delay = 260) {
+      clearTimeout(preloadTimer);
+      if (!timeline || !info || playing) return;
+      preloadTimer = setTimeout(preloadVideo, delay);
+    }
+
+    function preloadVideo() {
+      if (!timeline || !info || playing) return;
+      const key = videoKey(seconds);
+      if (key && key === preloadedVideoKey && video.src) return;
+      const token = ++preloadToken;
+      preloadedVideoKey = key;
+      video.pause();
+      video.onloadeddata = null;
+      video.onerror = null;
+      video.onended = null;
+      video.src = videoUrl(seconds, `preload-${token}`);
+      video.load();
+    }
+
     function settleToPng(delay = 180) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
-        if (!playing) requestPngFrame(true);
+        if (!playing) {
+          requestPngFrame(true);
+          scheduleVideoPreload();
+        }
       }, delay);
     }
 
@@ -1287,16 +1358,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const startSeconds = seconds;
       baseSeconds = startSeconds;
       startedAt = performance.now();
-      const fps = selectedFps();
-      const params = new URLSearchParams({
-        timeline: timeline.id,
-        time: startSeconds.toFixed(4),
-        fps: String(fps),
-        gop: String(Math.max(1, Math.floor(fps / 4))),
-        crf: "23",
-        _: String(token)
-      });
-      applyRenderParams(params);
+      clearTimeout(preloadTimer);
+      const key = videoKey(startSeconds);
 
       video.onloadeddata = () => { if (token === displayToken) showVideo(); };
       video.onerror = () => {
@@ -1309,8 +1372,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
         seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
         updateReadout();
         requestPngFrame(true);
+        scheduleVideoPreload();
       };
-      video.src = `/api/video.mp4?${params}`;
+      if (key !== preloadedVideoKey || !video.src || video.error) {
+        preloadedVideoKey = key;
+        video.src = videoUrl(startSeconds, token);
+      }
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        showVideo();
+      }
       video.play().catch((e) => {
         if (token === displayToken) showError(String(e));
       });
@@ -1335,10 +1405,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
         seconds = Math.min(baseSeconds + video.currentTime, timeline ? timeline.duration : seconds);
         stopVideo();
         requestPngFrame(true);
+        scheduleVideoPreload();
       }
     });
 
     seek.addEventListener("input", () => {
+      clearTimeout(preloadTimer);
       if (playing) {
         playing = false;
         play.textContent = ">";
@@ -1357,6 +1429,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       seek.step = String(1 / selectedFps());
       updateReadout();
       clearTimeout(settleTimer);
+      clearTimeout(preloadTimer);
       if (playing) {
         stopVideo();
         startVideoPlayback();
@@ -1373,6 +1446,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       .then(() => {
         updateReadout();
         requestPngFrame(true);
+        scheduleVideoPreload();
         setInterval(() => { if (!playing) loadInfo(); }, 1000);
       })
       .catch((e) => showError(String(e)));
