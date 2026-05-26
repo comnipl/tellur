@@ -63,8 +63,10 @@ streaming endpoint or a native client that can avoid PNG-per-frame overhead.
 - `GET /api/frame?frame=42&timeline=main` returns one PNG frame by frame index.
 - `GET /api/frame?time=1.25&timeline=main&format=rgba` returns raw RGBA8 bytes
   with `X-Tellur-Width` / `X-Tellur-Height` headers. The browser client uses
-  this path while playing or dragging the seek bar, then swaps back to PNG when
-  idle.
+  this path while dragging the seek bar, then swaps back to PNG when idle.
+- `GET /api/video.mp4?time=1.25&timeline=main&fps=60&gop=12&crf=23`
+  streams fragmented MP4/H.264 through `ffmpeg`. The browser client uses this
+  path for playback so `<video>` handles decode and presentation timing.
 - `GET /api/stream?time=0&timeline=main&fps=30` returns a simple multipart PNG
   stream. This endpoint is useful for experiments, but the single-threaded host
   treats it as a long-running request.

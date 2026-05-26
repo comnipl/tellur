@@ -3,6 +3,11 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -100,6 +105,7 @@ impl PreviewApp {
             "/api/info" => self.handle_info(stream),
             "/api/frame" => self.handle_frame(stream, &request.query),
             "/api/stream" => self.handle_stream(stream, &request.query),
+            "/api/video.mp4" | "/api/video" => self.handle_video_stream(stream, &request.query),
             _ => write_response(
                 &mut stream,
                 404,
@@ -271,6 +277,177 @@ impl PreviewApp {
             seconds += frame_step;
             sleep_remainder(frame_duration, frame_start.elapsed());
         }
+    }
+
+    fn handle_video_stream(
+        &mut self,
+        mut stream: TcpStream,
+        query: &HashMap<String, String>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.plugin.reload_if_changed()?;
+        let timelines = self.plugin.collection()?.timelines();
+        let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
+            return Err("timeline not found".into());
+        };
+
+        let fps = query
+            .get("fps")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|fps| *fps > 0)
+            .unwrap_or(self.fps.max(1));
+        let gop = query
+            .get("gop")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|gop| *gop > 0)
+            .unwrap_or((fps / 4).max(1));
+        let crf = query
+            .get("crf")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(23);
+        let start_seconds = query
+            .get("time")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, info.duration.max(0.0));
+
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: video/mp4\r\n\
+             X-Tellur-Width: {}\r\n\
+             X-Tellur-Height: {}\r\n\
+             X-Tellur-Fps: {}\r\n\
+             X-Tellur-Gop: {}\r\n\
+             Cache-Control: no-store\r\n\
+             Connection: close\r\n\r\n",
+            self.resolution.width, self.resolution.height, fps, gop,
+        )?;
+
+        let mut child = Command::new("ffmpeg")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .args(["-f", "rawvideo"])
+            .args(["-pix_fmt", "rgba"])
+            .args([
+                "-s",
+                &format!("{}x{}", self.resolution.width, self.resolution.height),
+            ])
+            .args(["-r", &fps.to_string()])
+            .args(["-i", "-"])
+            .arg("-an")
+            .args(["-c:v", "libx264"])
+            .args(["-preset", "ultrafast"])
+            .args(["-tune", "zerolatency"])
+            .args(["-pix_fmt", "yuv420p"])
+            .args(["-g", &gop.to_string()])
+            .args(["-keyint_min", &gop.to_string()])
+            .args(["-sc_threshold", "0"])
+            .args(["-bf", "0"])
+            .args(["-refs", "1"])
+            .args(["-crf", &crf.to_string()])
+            .args(["-f", "mp4"])
+            .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
+            .arg("pipe:1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
+        let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
+        let mut stderr = child.stderr.take().ok_or("ffmpeg stderr was not piped")?;
+        let mut stream_out = stream.try_clone()?;
+        let client_alive = Arc::new(AtomicBool::new(true));
+        let client_alive_for_stdout = Arc::clone(&client_alive);
+
+        let stdout_thread = thread::spawn(move || {
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = match stdout.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => {
+                        client_alive_for_stdout.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                };
+                if stream_out.write_all(&buf[..n]).is_err() {
+                    client_alive_for_stdout.store(false, Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+
+        let stderr_thread = thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+
+        let frame_step = 1.0 / fps as f32;
+        let frame_duration = Duration::from_secs_f32(frame_step);
+        let remaining = (info.duration - start_seconds).max(0.0);
+        let total_frames = (remaining * fps as f32).ceil() as u64;
+
+        for frame in 0..total_frames {
+            if !client_alive.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let frame_start = Instant::now();
+            let seconds = start_seconds + frame as f32 * frame_step;
+            let before = self.ctx.metrics();
+            let render_start = Instant::now();
+            let image = self
+                .plugin
+                .collection()?
+                .build(
+                    &info.id,
+                    TimelineTime::new(seconds),
+                    self.resolution,
+                    &mut self.ctx,
+                )
+                .ok_or("timeline did not produce a frame")?;
+            let render_time = render_start.elapsed();
+            if image.format != PixelFormat::Rgba8 {
+                return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
+            }
+            let after = self.ctx.metrics();
+            println!(
+                "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={}",
+                info.id,
+                seconds,
+                self.resolution.width,
+                self.resolution.height,
+                fps,
+                gop,
+                ms(render_time),
+                image.pixels.len(),
+                after.hits.saturating_sub(before.hits),
+                after.misses.saturating_sub(before.misses),
+                format_bytes(after.bytes_cached as u64),
+            );
+
+            if stdin.write_all(&image.pixels).is_err() {
+                client_alive.store(false, Ordering::Relaxed);
+                break;
+            }
+            sleep_remainder(frame_duration, frame_start.elapsed());
+        }
+
+        drop(stdin);
+        if !client_alive.load(Ordering::Relaxed) {
+            let _ = child.kill();
+        }
+        let _ = stdout_thread.join();
+        let stderr_text = stderr_thread.join().unwrap_or_default();
+        let status = child.wait()?;
+        if !status.success() && client_alive.load(Ordering::Relaxed) {
+            return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
+        }
+
+        Ok(())
     }
 
     fn render_png(
@@ -698,10 +875,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     #frame {
       display: block;
     }
-    #canvas {
+    #canvas, #video {
       display: none;
     }
-    #frame, #canvas {
+    #frame, #canvas, #video {
       width: 100%;
       height: 100%;
       object-fit: contain;
@@ -755,7 +932,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </head>
 <body>
   <main>
-    <div class="display" id="display"><canvas id="canvas"></canvas><img id="frame" alt=""></div>
+    <div class="display" id="display"><video id="video" muted playsinline></video><canvas id="canvas"></canvas><img id="frame" alt=""></div>
   </main>
   <footer>
     <button id="play" type="button" aria-label="Play">></button>
@@ -765,6 +942,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <div class="error" id="error"></div>
   <script>
     const img = document.getElementById("frame");
+    const video = document.getElementById("video");
     const canvas = document.getElementById("canvas");
     const canvasCtx = canvas.getContext("2d");
     const display = document.getElementById("display");
@@ -785,7 +963,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let pngToken = 0;
     let pendingRgba = false;
     let pendingPng = false;
-    let streamAbort = null;
     let settleTimer = null;
 
     async function loadInfo() {
@@ -827,18 +1004,25 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function showCanvas() {
       canvas.style.display = "block";
       img.style.display = "none";
+      video.style.display = "none";
     }
 
     function showImage() {
       img.style.display = "block";
       canvas.style.display = "none";
+      video.style.display = "none";
     }
 
-    function stopStream() {
-      if (streamAbort) {
-        streamAbort.abort();
-        streamAbort = null;
-      }
+    function showVideo() {
+      video.style.display = "block";
+      img.style.display = "none";
+      canvas.style.display = "none";
+    }
+
+    function stopVideo() {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
     }
 
     async function requestRgbaFrame(force = false) {
@@ -892,81 +1076,45 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }, delay);
     }
 
-    async function startStreamPlayback() {
+    function startVideoPlayback() {
       if (!timeline || !info) return;
-      stopStream();
       clearTimeout(settleTimer);
       const token = ++displayToken;
       const startSeconds = seconds;
       const fps = Math.max(info.fps, 1);
-      const frameBytes = info.width * info.height * 4;
-      const controller = new AbortController();
-      streamAbort = controller;
       const params = new URLSearchParams({
         timeline: timeline.id,
         time: startSeconds.toFixed(4),
-        format: "rgba",
         fps: String(fps),
+        gop: String(Math.max(1, Math.floor(fps / 4))),
+        crf: "23",
         _: String(token)
       });
 
-      try {
-        const response = await fetch(`/api/stream?${params}`, {
-          cache: "no-store",
-          signal: controller.signal
-        });
-        if (!response.ok || !response.body) {
-          throw new Error(`stream request failed: ${response.status}`);
-        }
+      video.onloadeddata = () => { if (token === displayToken) showVideo(); };
+      video.onerror = () => {
+        if (token === displayToken) showError("video stream failed");
+      };
+      video.onended = () => {
+        if (token !== displayToken) return;
+        playing = false;
+        play.textContent = ">";
+        seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
+        updateReadout();
+        requestPngFrame(true);
+      };
+      video.src = `/api/video.mp4?${params}`;
+      video.play().catch((e) => {
+        if (token === displayToken) showError(String(e));
+      });
 
-        const reader = response.body.getReader();
-        const chunks = [];
-        let buffered = 0;
-        let frameIndex = 0;
-
-        while (playing && token === displayToken) {
-          while (buffered < frameBytes) {
-            const { value, done } = await reader.read();
-            if (done) return;
-            chunks.push(value);
-            buffered += value.byteLength;
-          }
-
-          const frame = new Uint8ClampedArray(frameBytes);
-          let offset = 0;
-          while (offset < frameBytes) {
-            const chunk = chunks[0];
-            const take = Math.min(chunk.byteLength, frameBytes - offset);
-            frame.set(chunk.subarray(0, take), offset);
-            offset += take;
-            if (take === chunk.byteLength) {
-              chunks.shift();
-            } else {
-              chunks[0] = chunk.subarray(take);
-            }
-            buffered -= take;
-          }
-
-          if (token !== displayToken) return;
-          canvasCtx.putImageData(new ImageData(frame, info.width, info.height), 0, 0);
-          showCanvas();
-          seconds = Math.min(startSeconds + frameIndex / fps, timeline.duration);
-          frameIndex += 1;
-          updateReadout();
-
-          if (seconds >= timeline.duration) {
-            playing = false;
-            play.textContent = ">";
-            stopStream();
-            requestPngFrame(true);
-            return;
-          }
-        }
-      } catch (e) {
-        if (e.name !== "AbortError" && token === displayToken) showError(String(e));
-      } finally {
-        if (streamAbort === controller) streamAbort = null;
+      function syncReadout() {
+        if (!playing || token !== displayToken) return;
+        seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
+        updateReadout();
+        requestAnimationFrame(syncReadout);
       }
+      requestAnimationFrame(syncReadout);
     }
 
     play.addEventListener("click", () => {
@@ -975,9 +1123,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (playing) {
         baseSeconds = seconds;
         startedAt = performance.now();
-        startStreamPlayback();
+        startVideoPlayback();
       } else {
-        stopStream();
+        seconds = Math.min(baseSeconds + video.currentTime, timeline ? timeline.duration : seconds);
+        stopVideo();
         requestPngFrame(true);
       }
     });
@@ -986,7 +1135,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       if (playing) {
         playing = false;
         play.textContent = ">";
-        stopStream();
+        stopVideo();
       }
       seconds = Number(seek.value);
       baseSeconds = seconds;
