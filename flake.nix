@@ -34,6 +34,7 @@
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.pkg-config
             pkgs.mold
+            pkgs.fontconfig
           ];
         };
       }

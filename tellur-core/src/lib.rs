@@ -10,6 +10,7 @@ pub mod placement;
 pub mod raster;
 pub mod render_context;
 pub mod shapes;
+pub mod text;
 pub mod time;
 pub mod timeline;
 pub mod vector;
