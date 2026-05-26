@@ -1,0 +1,12 @@
+[package]
+name = "tellur-live"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tellur-core = { path = "../tellur-core" }
+tellur-renderer = { path = "../tellur-renderer" }
+
+[[example]]
+name = "demo_timeline_plugin"
+crate-type = ["cdylib"]
