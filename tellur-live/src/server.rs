@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ pub struct ServerOptions {
     pub bind: String,
     pub resolution: Resolution,
     pub fps: u32,
+    pub verbose: bool,
 }
 
 pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
@@ -31,27 +32,81 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     eprintln!("tellur live listening on http://{local_addr}");
     eprintln!("plugin: {}", options.plugin_path.display());
 
-    let mut app = PreviewApp {
+    let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
         ctx: CachingRenderContext::new(),
         resolution: options.resolution,
         fps: options.fps,
-    };
-    app.plugin.reload_if_changed()?;
+        verbose: options.verbose,
+    }));
+    {
+        let mut app = app
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        app.plugin.reload_if_changed()?;
+    }
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = app.handle(stream) {
-                    if !is_client_disconnect(e.as_ref()) {
-                        eprintln!("request failed: {e}");
+                let app = Arc::clone(&app);
+                thread::spawn(move || {
+                    if let Err(e) = handle_connection(app, stream) {
+                        if !is_client_disconnect(e.as_ref()) {
+                            eprintln!("request failed: {e}");
+                        }
                     }
-                }
+                });
             }
             Err(e) => eprintln!("accept failed: {e}"),
         }
     }
     Ok(())
+}
+
+fn handle_connection(
+    app: Arc<Mutex<PreviewApp>>,
+    mut stream: TcpStream,
+) -> Result<(), Box<dyn Error>> {
+    let request = match read_request(&mut stream)? {
+        Some(request) => request,
+        None => return Ok(()),
+    };
+
+    if request.method != "GET" {
+        return write_response(
+            &mut stream,
+            405,
+            "Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"method not allowed",
+        );
+    }
+
+    let path = request.path.clone();
+    match path.as_str() {
+        "/" | "/index.html" => write_response(
+            &mut stream,
+            200,
+            "OK",
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+        ),
+        "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
+        "/api/info" | "/api/frame" | "/api/stream" => {
+            let mut app = app
+                .lock()
+                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            app.handle_api(stream, request)
+        }
+        _ => write_response(
+            &mut stream,
+            404,
+            "Not Found",
+            "text/plain; charset=utf-8",
+            b"not found",
+        ),
+    }
 }
 
 fn is_client_disconnect(error: &(dyn Error + 'static)) -> bool {
@@ -75,44 +130,16 @@ struct PreviewApp {
     ctx: CachingRenderContext,
     resolution: Resolution,
     fps: u32,
+    verbose: bool,
 }
 
 impl PreviewApp {
-    fn handle(&mut self, mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-        let request = match read_request(&mut stream)? {
-            Some(request) => request,
-            None => return Ok(()),
-        };
-
-        if request.method != "GET" {
-            return write_response(
-                &mut stream,
-                405,
-                "Method Not Allowed",
-                "text/plain; charset=utf-8",
-                b"method not allowed",
-            );
-        }
-
+    fn handle_api(&mut self, stream: TcpStream, request: Request) -> Result<(), Box<dyn Error>> {
         match request.path.as_str() {
-            "/" | "/index.html" => write_response(
-                &mut stream,
-                200,
-                "OK",
-                "text/html; charset=utf-8",
-                INDEX_HTML.as_bytes(),
-            ),
             "/api/info" => self.handle_info(stream),
             "/api/frame" => self.handle_frame(stream, &request.query),
             "/api/stream" => self.handle_stream(stream, &request.query),
-            "/api/video.mp4" | "/api/video" => self.handle_video_stream(stream, &request.query),
-            _ => write_response(
-                &mut stream,
-                404,
-                "Not Found",
-                "text/plain; charset=utf-8",
-                b"not found",
-            ),
+            _ => unreachable!("non-api routes are handled before acquiring the preview lock"),
         }
     }
 
@@ -142,7 +169,9 @@ impl PreviewApp {
         match FrameFormat::from_query(query) {
             FrameFormat::Png => {
                 let rendered = self.render_png(query)?;
-                log_frame_stats(&rendered.stats);
+                if self.verbose {
+                    log_frame_stats(&rendered.stats);
+                }
                 let headers = rendered.stats.headers();
                 write_response_with_headers(
                     &mut stream,
@@ -155,7 +184,9 @@ impl PreviewApp {
             }
             FrameFormat::Rgba => {
                 let rendered = self.render_rgba(query)?;
-                log_frame_stats(&rendered.stats);
+                if self.verbose {
+                    log_frame_stats(&rendered.stats);
+                }
                 let headers = rendered.stats.headers();
                 write_response_with_headers(
                     &mut stream,
@@ -185,11 +216,8 @@ impl PreviewApp {
         mut stream: TcpStream,
         query: &HashMap<String, String>,
     ) -> Result<(), Box<dyn Error>> {
-        let fps = query
-            .get("fps")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|fps| *fps > 0)
-            .unwrap_or(self.fps.max(1));
+        let fps = request_fps(query, self.fps.max(1));
+        let resolution = request_resolution(query, self.resolution);
         let timeline_id = query.get("timeline").cloned();
         let mut seconds = query
             .get("time")
@@ -210,11 +238,15 @@ impl PreviewApp {
             let frame_start = Instant::now();
             let mut q = HashMap::new();
             q.insert("time".to_owned(), seconds.to_string());
+            q.insert("width".to_owned(), resolution.width.to_string());
+            q.insert("height".to_owned(), resolution.height.to_string());
             if let Some(id) = &timeline_id {
                 q.insert("timeline".to_owned(), id.clone());
             }
             let rendered = self.render_png(&q)?;
-            log_frame_stats(&rendered.stats);
+            if self.verbose {
+                log_frame_stats(&rendered.stats);
+            }
             write!(
                 stream,
                 "--tellur-frame\r\n\
@@ -235,17 +267,14 @@ impl PreviewApp {
         mut stream: TcpStream,
         query: &HashMap<String, String>,
     ) -> Result<(), Box<dyn Error>> {
-        let fps = query
-            .get("fps")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|fps| *fps > 0)
-            .unwrap_or(self.fps.max(1));
+        let fps = request_fps(query, self.fps.max(1));
+        let resolution = request_resolution(query, self.resolution);
         let timeline_id = query.get("timeline").cloned();
         let mut seconds = query
             .get("time")
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0);
-        let frame_bytes = (self.resolution.width as usize) * (self.resolution.height as usize) * 4;
+        let frame_bytes = (resolution.width as usize) * (resolution.height as usize) * 4;
 
         write!(
             stream,
@@ -257,7 +286,7 @@ impl PreviewApp {
              X-Tellur-Frame-Bytes: {}\r\n\
              Cache-Control: no-store\r\n\
              Connection: close\r\n\r\n",
-            self.resolution.width, self.resolution.height, fps, frame_bytes,
+            resolution.width, resolution.height, fps, frame_bytes,
         )?;
 
         let frame_step = 1.0 / fps as f32;
@@ -267,11 +296,15 @@ impl PreviewApp {
             let mut q = HashMap::new();
             q.insert("time".to_owned(), seconds.to_string());
             q.insert("format".to_owned(), "rgba".to_owned());
+            q.insert("width".to_owned(), resolution.width.to_string());
+            q.insert("height".to_owned(), resolution.height.to_string());
             if let Some(id) = &timeline_id {
                 q.insert("timeline".to_owned(), id.clone());
             }
             let rendered = self.render_rgba(&q)?;
-            log_frame_stats(&rendered.stats);
+            if self.verbose {
+                log_frame_stats(&rendered.stats);
+            }
             stream.write_all(&rendered.body)?;
             stream.flush()?;
             seconds += frame_step;
@@ -279,175 +312,37 @@ impl PreviewApp {
         }
     }
 
-    fn handle_video_stream(
+    fn render_video_rgba(
         &mut self,
-        mut stream: TcpStream,
-        query: &HashMap<String, String>,
-    ) -> Result<(), Box<dyn Error>> {
-        self.plugin.reload_if_changed()?;
-        let timelines = self.plugin.collection()?.timelines();
-        let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
-            return Err("timeline not found".into());
-        };
-
-        let fps = query
-            .get("fps")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|fps| *fps > 0)
-            .unwrap_or(self.fps.max(1));
-        let gop = query
-            .get("gop")
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|gop| *gop > 0)
-            .unwrap_or((fps / 4).max(1));
-        let crf = query
-            .get("crf")
-            .and_then(|v| v.parse::<u8>().ok())
-            .unwrap_or(23);
-        let start_seconds = query
-            .get("time")
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.0)
-            .clamp(0.0, info.duration.max(0.0));
-
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: video/mp4\r\n\
-             X-Tellur-Width: {}\r\n\
-             X-Tellur-Height: {}\r\n\
-             X-Tellur-Fps: {}\r\n\
-             X-Tellur-Gop: {}\r\n\
-             Cache-Control: no-store\r\n\
-             Connection: close\r\n\r\n",
-            self.resolution.width, self.resolution.height, fps, gop,
-        )?;
-
-        let mut child = Command::new("ffmpeg")
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .args(["-f", "rawvideo"])
-            .args(["-pix_fmt", "rgba"])
-            .args([
-                "-s",
-                &format!("{}x{}", self.resolution.width, self.resolution.height),
-            ])
-            .args(["-r", &fps.to_string()])
-            .args(["-i", "-"])
-            .arg("-an")
-            .args(["-c:v", "libx264"])
-            .args(["-preset", "ultrafast"])
-            .args(["-tune", "zerolatency"])
-            .args(["-pix_fmt", "yuv420p"])
-            .args(["-g", &gop.to_string()])
-            .args(["-keyint_min", &gop.to_string()])
-            .args(["-sc_threshold", "0"])
-            .args(["-bf", "0"])
-            .args(["-refs", "1"])
-            .args(["-crf", &crf.to_string()])
-            .args(["-f", "mp4"])
-            .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
-            .arg("pipe:1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
-        let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
-        let mut stderr = child.stderr.take().ok_or("ffmpeg stderr was not piped")?;
-        let mut stream_out = stream.try_clone()?;
-        let client_alive = Arc::new(AtomicBool::new(true));
-        let client_alive_for_stdout = Arc::clone(&client_alive);
-
-        let stdout_thread = thread::spawn(move || {
-            let mut buf = [0u8; 64 * 1024];
-            loop {
-                let n = match stdout.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => n,
-                    Err(_) => {
-                        client_alive_for_stdout.store(false, Ordering::Relaxed);
-                        break;
-                    }
-                };
-                if stream_out.write_all(&buf[..n]).is_err() {
-                    client_alive_for_stdout.store(false, Ordering::Relaxed);
-                    break;
-                }
-            }
-        });
-
-        let stderr_thread = thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.read_to_string(&mut text);
-            text
-        });
-
-        let frame_step = 1.0 / fps as f32;
-        let frame_duration = Duration::from_secs_f32(frame_step);
-        let remaining = (info.duration - start_seconds).max(0.0);
-        let total_frames = (remaining * fps as f32).ceil() as u64;
-
-        for frame in 0..total_frames {
-            if !client_alive.load(Ordering::Relaxed) {
-                break;
-            }
-
-            let frame_start = Instant::now();
-            let seconds = start_seconds + frame as f32 * frame_step;
-            let before = self.ctx.metrics();
-            let render_start = Instant::now();
-            let image = self
-                .plugin
-                .collection()?
-                .build(
-                    &info.id,
-                    TimelineTime::new(seconds),
-                    self.resolution,
-                    &mut self.ctx,
-                )
-                .ok_or("timeline did not produce a frame")?;
-            let render_time = render_start.elapsed();
-            if image.format != PixelFormat::Rgba8 {
-                return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
-            }
-            let after = self.ctx.metrics();
-            println!(
-                "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={}",
-                info.id,
-                seconds,
-                self.resolution.width,
-                self.resolution.height,
-                fps,
-                gop,
-                ms(render_time),
-                image.pixels.len(),
-                after.hits.saturating_sub(before.hits),
-                after.misses.saturating_sub(before.misses),
-                format_bytes(after.bytes_cached as u64),
-            );
-
-            if stdin.write_all(&image.pixels).is_err() {
-                client_alive.store(false, Ordering::Relaxed);
-                break;
-            }
-            sleep_remainder(frame_duration, frame_start.elapsed());
+        timeline_id: &str,
+        seconds: f32,
+        resolution: Resolution,
+    ) -> Result<VideoFrame, Box<dyn Error>> {
+        let before = self.ctx.metrics();
+        let render_start = Instant::now();
+        let image = self
+            .plugin
+            .collection()?
+            .build(
+                timeline_id,
+                TimelineTime::new(seconds),
+                resolution,
+                &mut self.ctx,
+            )
+            .ok_or("timeline did not produce a frame")?;
+        let render_time = render_start.elapsed();
+        if image.format != PixelFormat::Rgba8 {
+            return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
         }
+        let after = self.ctx.metrics();
 
-        drop(stdin);
-        if !client_alive.load(Ordering::Relaxed) {
-            let _ = child.kill();
-        }
-        let _ = stdout_thread.join();
-        let stderr_text = stderr_thread.join().unwrap_or_default();
-        let status = child.wait()?;
-        if !status.success() && client_alive.load(Ordering::Relaxed) {
-            return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
-        }
-
-        Ok(())
+        Ok(VideoFrame {
+            image,
+            render_time,
+            cache_hits: after.hits.saturating_sub(before.hits),
+            cache_misses: after.misses.saturating_sub(before.misses),
+            bytes_cached: after.bytes_cached,
+        })
     }
 
     fn render_png(
@@ -508,10 +403,11 @@ impl PreviewApp {
         let seconds = query
             .get("frame")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|frame| frame as f32 / self.fps.max(1) as f32)
+            .map(|frame| frame as f32 / request_fps(query, self.fps.max(1)) as f32)
             .or_else(|| query.get("time").and_then(|v| v.parse::<f32>().ok()))
             .unwrap_or(0.0)
             .clamp(0.0, info.duration.max(0.0));
+        let resolution = request_resolution(query, self.resolution);
 
         let before = self.ctx.metrics();
         let render_start = Instant::now();
@@ -521,7 +417,7 @@ impl PreviewApp {
             .build(
                 &info.id,
                 TimelineTime::new(seconds),
-                self.resolution,
+                resolution,
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
@@ -533,7 +429,7 @@ impl PreviewApp {
             stats: FrameRenderStats {
                 timeline_id: info.id.clone(),
                 seconds,
-                resolution: self.resolution,
+                resolution,
                 render_time,
                 encode_time: Duration::ZERO,
                 total_time: render_time,
@@ -546,6 +442,199 @@ impl PreviewApp {
             total_start,
         })
     }
+}
+
+struct VideoStreamSetup {
+    timeline_id: String,
+    duration: f32,
+    fps: u32,
+    resolution: Resolution,
+    gop: u32,
+    crf: u8,
+    start_seconds: f32,
+}
+
+struct VideoFrame {
+    image: RasterImage,
+    render_time: Duration,
+    cache_hits: u64,
+    cache_misses: u64,
+    bytes_cached: usize,
+}
+
+fn handle_video_stream(
+    app: Arc<Mutex<PreviewApp>>,
+    mut stream: TcpStream,
+    query: HashMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    let setup = {
+        let mut app = app
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        app.plugin.reload_if_changed()?;
+        let timelines = app.plugin.collection()?.timelines();
+        let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
+            return Err("timeline not found".into());
+        };
+
+        let fps = request_fps(&query, app.fps.max(1));
+        let resolution = request_resolution(&query, app.resolution);
+        let gop = query
+            .get("gop")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|gop| *gop > 0)
+            .unwrap_or((fps / 4).max(1));
+        let crf = query
+            .get("crf")
+            .and_then(|v| v.parse::<u8>().ok())
+            .unwrap_or(23);
+        let start_seconds = query
+            .get("time")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, info.duration.max(0.0));
+
+        VideoStreamSetup {
+            timeline_id: info.id.clone(),
+            duration: info.duration,
+            fps,
+            resolution,
+            gop,
+            crf,
+            start_seconds,
+        }
+    };
+
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: video/mp4\r\n\
+         X-Tellur-Width: {}\r\n\
+         X-Tellur-Height: {}\r\n\
+         X-Tellur-Fps: {}\r\n\
+         X-Tellur-Gop: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n",
+        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop,
+    )?;
+
+    let mut child = Command::new("ffmpeg")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .args(["-f", "rawvideo"])
+        .args(["-pix_fmt", "rgba"])
+        .args([
+            "-s",
+            &format!("{}x{}", setup.resolution.width, setup.resolution.height),
+        ])
+        .args(["-r", &setup.fps.to_string()])
+        .args(["-i", "-"])
+        .arg("-an")
+        .args(["-c:v", "libx264"])
+        .args(["-preset", "ultrafast"])
+        .args(["-tune", "zerolatency"])
+        .args(["-pix_fmt", "yuv420p"])
+        .args(["-g", &setup.gop.to_string()])
+        .args(["-keyint_min", &setup.gop.to_string()])
+        .args(["-sc_threshold", "0"])
+        .args(["-bf", "0"])
+        .args(["-refs", "1"])
+        .args(["-crf", &setup.crf.to_string()])
+        .args(["-f", "mp4"])
+        .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
+        .arg("pipe:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
+    let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
+    let mut stderr = child.stderr.take().ok_or("ffmpeg stderr was not piped")?;
+    let mut stream_out = stream.try_clone()?;
+    let client_alive = Arc::new(AtomicBool::new(true));
+    let client_alive_for_stdout = Arc::clone(&client_alive);
+
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => {
+                    client_alive_for_stdout.store(false, Ordering::Relaxed);
+                    break;
+                }
+            };
+            if stream_out.write_all(&buf[..n]).is_err() {
+                client_alive_for_stdout.store(false, Ordering::Relaxed);
+                break;
+            }
+        }
+    });
+
+    let stderr_thread = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+
+    let frame_step = 1.0 / setup.fps as f32;
+    let frame_duration = Duration::from_secs_f32(frame_step);
+    let remaining = (setup.duration - setup.start_seconds).max(0.0);
+    let total_frames = (remaining * setup.fps as f32).ceil() as u64;
+
+    for frame in 0..total_frames {
+        if !client_alive.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let frame_start = Instant::now();
+        let seconds = setup.start_seconds + frame as f32 * frame_step;
+        let image = {
+            let mut app = app
+                .lock()
+                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let frame = app.render_video_rgba(&setup.timeline_id, seconds, setup.resolution)?;
+            if app.verbose {
+                println!(
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={}",
+                    setup.timeline_id,
+                    seconds,
+                    setup.resolution.width,
+                    setup.resolution.height,
+                    setup.fps,
+                    setup.gop,
+                    ms(frame.render_time),
+                    frame.image.pixels.len(),
+                    frame.cache_hits,
+                    frame.cache_misses,
+                    format_bytes(frame.bytes_cached as u64),
+                );
+            }
+            frame.image
+        };
+
+        if stdin.write_all(&image.pixels).is_err() {
+            client_alive.store(false, Ordering::Relaxed);
+            break;
+        }
+        sleep_remainder(frame_duration, frame_start.elapsed());
+    }
+
+    drop(stdin);
+    if !client_alive.load(Ordering::Relaxed) {
+        let _ = child.kill();
+    }
+    let _ = stdout_thread.join();
+    let stderr_text = stderr_thread.join().unwrap_or_default();
+    let status = child.wait()?;
+    if !status.success() && client_alive.load(Ordering::Relaxed) {
+        return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
+    }
+
+    Ok(())
 }
 
 struct RenderedFrame {
@@ -649,6 +738,46 @@ fn select_timeline<'a>(
     requested
         .and_then(|id| timelines.iter().find(|info| &info.id == id))
         .or_else(|| timelines.first())
+}
+
+fn request_fps(query: &HashMap<String, String>, default_fps: u32) -> u32 {
+    query
+        .get("fps")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|fps| *fps > 0)
+        .unwrap_or(default_fps.max(1))
+}
+
+fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> Resolution {
+    if let (Some(width), Some(height)) = (
+        query
+            .get("width")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0),
+        query
+            .get("height")
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0),
+    ) {
+        return Resolution::new(width, height);
+    }
+
+    let Some(scale) = query
+        .get("scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+    else {
+        return default;
+    };
+
+    Resolution::new(
+        scaled_dimension(default.width, scale),
+        scaled_dimension(default.height, scale),
+    )
+}
+
+fn scaled_dimension(value: u32, scale: f32) -> u32 {
+    ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
 }
 
 struct Request {
@@ -890,7 +1019,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       background: var(--panel);
       padding: 12px 14px;
       display: grid;
-      grid-template-columns: auto minmax(120px, 1fr) auto;
+      grid-template-columns: auto minmax(120px, 1fr) auto auto auto;
       gap: 12px;
       align-items: center;
     }
@@ -908,6 +1037,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
     input[type="range"] {
       width: 100%;
       accent-color: var(--accent);
+    }
+    select {
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #242a35;
+      color: var(--text);
+      padding: 0 8px;
+      font: 13px/1 system-ui, sans-serif;
+    }
+    .control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
     }
     .readout {
       min-width: 190px;
@@ -928,6 +1074,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
       color: #ffd6d6;
       display: none;
     }
+    @media (max-width: 720px) {
+      footer {
+        grid-template-columns: auto minmax(120px, 1fr) auto;
+      }
+      .control {
+        justify-self: start;
+      }
+    }
   </style>
 </head>
 <body>
@@ -938,6 +1092,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <button id="play" type="button" aria-label="Play">></button>
     <input id="seek" type="range" min="0" value="0" step="0.001">
     <div class="readout"><strong id="seconds">0.000s</strong> / <span id="frameNo">0</span>f</div>
+    <label class="control">Size
+      <select id="scale">
+        <option value="1">100%</option>
+        <option value="0.75">75%</option>
+        <option value="0.5">50%</option>
+        <option value="0.25">25%</option>
+      </select>
+    </label>
+    <label class="control">FPS
+      <select id="fps">
+        <option value="60">60</option>
+        <option value="30" selected>30</option>
+        <option value="24">24</option>
+        <option value="15">15</option>
+        <option value="12">12</option>
+      </select>
+    </label>
   </footer>
   <div class="error" id="error"></div>
   <script>
@@ -948,6 +1119,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const display = document.getElementById("display");
     const play = document.getElementById("play");
     const seek = document.getElementById("seek");
+    const scaleSelect = document.getElementById("scale");
+    const fpsSelect = document.getElementById("fps");
     const secondsOut = document.getElementById("seconds");
     const frameOut = document.getElementById("frameNo");
     const error = document.getElementById("error");
@@ -964,19 +1137,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let pendingRgba = false;
     let pendingPng = false;
     let settleTimer = null;
+    let controlsInitialized = false;
 
     async function loadInfo() {
       const response = await fetch("/api/info", { cache: "no-store" });
       info = await response.json();
       timeline = info.timelines[0];
+      if (!controlsInitialized) {
+        const fpsValue = String(Math.max(info.fps || 30, 1));
+        if ([...fpsSelect.options].some((option) => option.value === fpsValue)) {
+          fpsSelect.value = fpsValue;
+        }
+        controlsInitialized = true;
+      }
       const aspect = info.width / info.height;
       display.style.setProperty("--aspect", String(aspect));
       seek.max = timeline ? String(timeline.duration) : "0";
-      seek.step = String(1 / Math.max(info.fps, 1));
-      if (canvas.width !== info.width || canvas.height !== info.height) {
-        canvas.width = info.width;
-        canvas.height = info.height;
-      }
+      seek.step = String(1 / selectedFps());
       showError(info.lastError);
     }
 
@@ -986,10 +1163,31 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function updateReadout() {
-      const fps = info ? Math.max(info.fps, 1) : 1;
+      const fps = selectedFps();
       secondsOut.textContent = `${seconds.toFixed(3)}s`;
       frameOut.textContent = String(Math.round(seconds * fps));
       seek.value = String(seconds);
+    }
+
+    function selectedFps() {
+      return Math.max(Number(fpsSelect.value) || (info ? info.fps : 30) || 30, 1);
+    }
+
+    function selectedResolution() {
+      if (!info) return { width: 1, height: 1 };
+      const scale = Math.max(Number(scaleSelect.value) || 1, 0.01);
+      return {
+        width: Math.max(1, Math.round(info.width * scale)),
+        height: Math.max(1, Math.round(info.height * scale))
+      };
+    }
+
+    function applyRenderParams(params) {
+      const target = selectedResolution();
+      params.set("width", String(target.width));
+      params.set("height", String(target.height));
+      params.set("fps", String(selectedFps()));
+      return target;
     }
 
     function frameParams(format, token) {
@@ -1031,16 +1229,21 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const id = ++displayToken;
       const rgbaId = ++rgbaToken;
       const params = frameParams("rgba", id);
+      const target = applyRenderParams(params);
       try {
         const response = await fetch(`/api/frame?${params}`, { cache: "no-store" });
         if (!response.ok) throw new Error(`frame request failed: ${response.status}`);
         const buffer = await response.arrayBuffer();
         if (id !== displayToken) return;
-        const expected = info.width * info.height * 4;
+        const expected = target.width * target.height * 4;
         if (buffer.byteLength !== expected) {
           throw new Error(`rgba size mismatch: got ${buffer.byteLength}, expected ${expected}`);
         }
-        const image = new ImageData(new Uint8ClampedArray(buffer), info.width, info.height);
+        if (canvas.width !== target.width || canvas.height !== target.height) {
+          canvas.width = target.width;
+          canvas.height = target.height;
+        }
+        const image = new ImageData(new Uint8ClampedArray(buffer), target.width, target.height);
         canvasCtx.putImageData(image, 0, 0);
         showCanvas();
       } catch (e) {
@@ -1056,6 +1259,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const id = ++displayToken;
       const pngId = ++pngToken;
       const params = frameParams("png", id);
+      applyRenderParams(params);
       img.onload = () => {
         if (pngId === pngToken) pendingPng = false;
         if (id === displayToken) {
@@ -1081,7 +1285,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       clearTimeout(settleTimer);
       const token = ++displayToken;
       const startSeconds = seconds;
-      const fps = Math.max(info.fps, 1);
+      baseSeconds = startSeconds;
+      startedAt = performance.now();
+      const fps = selectedFps();
       const params = new URLSearchParams({
         timeline: timeline.id,
         time: startSeconds.toFixed(4),
@@ -1090,6 +1296,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         crf: "23",
         _: String(token)
       });
+      applyRenderParams(params);
 
       video.onloadeddata = () => { if (token === displayToken) showVideo(); };
       video.onerror = () => {
@@ -1144,6 +1351,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       requestRgbaFrame(true);
       settleToPng();
     });
+
+    function applyPreviewSettings() {
+      if (!info) return;
+      seek.step = String(1 / selectedFps());
+      updateReadout();
+      clearTimeout(settleTimer);
+      if (playing) {
+        stopVideo();
+        startVideoPlayback();
+      } else {
+        requestRgbaFrame(true);
+        settleToPng(80);
+      }
+    }
+
+    scaleSelect.addEventListener("change", applyPreviewSettings);
+    fpsSelect.addEventListener("change", applyPreviewSettings);
 
     loadInfo()
       .then(() => {

@@ -48,12 +48,12 @@ cargo run -p tellur-live -- serve \
 Open `http://127.0.0.1:4317/` for the minimal browser client.
 Use `--host 0.0.0.0` when the preview server should be reachable from other
 devices on the network.
+Pass `--verbose` to print per-frame timing and cache statistics to stdout.
 
 The browser UI is intentionally a thin validation client. It requests still
-PNG frames for seeking and light playback checks, which is useful for proving
-the plugin/reload/render loop but is not the final high-bandwidth editing
-transport. Smooth full-resolution playback should move to either a compressed
-streaming endpoint or a native client that can avoid PNG-per-frame overhead.
+PNG frames for still previews, raw RGBA frames while seeking, and fragmented
+MP4/H.264 for playback. The Size and FPS controls lower the request resolution
+and frame rate when full-resolution playback is too expensive.
 
 ## HTTP Endpoints
 
@@ -67,6 +67,7 @@ streaming endpoint or a native client that can avoid PNG-per-frame overhead.
 - `GET /api/video.mp4?time=1.25&timeline=main&fps=60&gop=12&crf=23`
   streams fragmented MP4/H.264 through `ffmpeg`. The browser client uses this
   path for playback so `<video>` handles decode and presentation timing.
+  Frame and stream endpoints also accept `width=<pixels>&height=<pixels>` or
+  `scale=<ratio>` to override the default preview resolution.
 - `GET /api/stream?time=0&timeline=main&fps=30` returns a simple multipart PNG
-  stream. This endpoint is useful for experiments, but the single-threaded host
-  treats it as a long-running request.
+  stream. This endpoint is useful for experiments.

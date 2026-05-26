@@ -30,7 +30,7 @@ pub struct TimelineInfo {
 }
 
 /// A collection of timelines exported by one dynamic library.
-pub trait TimelineCollection {
+pub trait TimelineCollection: Send {
     fn timelines(&self) -> Vec<TimelineInfo>;
 
     fn build(
@@ -43,13 +43,13 @@ pub trait TimelineCollection {
 }
 
 /// Wraps a single [`Timeline`] as a one-entry collection.
-pub struct SingleTimeline<T: Timeline> {
+pub struct SingleTimeline<T: Timeline + Send> {
     id: &'static str,
     title: &'static str,
     timeline: T,
 }
 
-pub fn single_timeline<T: Timeline>(
+pub fn single_timeline<T: Timeline + Send>(
     id: &'static str,
     title: &'static str,
     timeline: T,
@@ -61,7 +61,7 @@ pub fn single_timeline<T: Timeline>(
     }
 }
 
-impl<T: Timeline> TimelineCollection for SingleTimeline<T> {
+impl<T: Timeline + Send> TimelineCollection for SingleTimeline<T> {
     fn timelines(&self) -> Vec<TimelineInfo> {
         vec![TimelineInfo {
             id: self.id.to_owned(),
@@ -278,6 +278,8 @@ fn stage_library(path: &Path, stamp: SourceStamp) -> Result<PathBuf, PluginLoadE
 struct DynamicLibrary {
     handle: *mut c_void,
 }
+
+unsafe impl Send for DynamicLibrary {}
 
 impl DynamicLibrary {
     unsafe fn open(path: &Path) -> Result<Self, PluginLoadError> {

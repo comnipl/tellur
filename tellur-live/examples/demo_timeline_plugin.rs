@@ -40,7 +40,7 @@ fn bouncing_dot(t: LocalTime, hue: f32) -> impl RasterComponent {
     }
 }
 
-fn build_timeline() -> impl Timeline {
+fn build_timeline() -> impl Timeline + Send {
     let scene_size = Vec2(1280.0, 720.0);
     timeline(6.0, move |t, target: Resolution, ctx| {
         Stack {

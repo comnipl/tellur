@@ -29,6 +29,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
     let mut port = 4317u16;
     let mut resolution = Resolution::new(1280, 720);
     let mut fps = 30u32;
+    let mut verbose = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -63,6 +64,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
                     return Err("--fps must be greater than zero".into());
                 }
             }
+            "--verbose" => {
+                verbose = true;
+            }
             "-h" | "--help" => return Err(usage().into()),
             other if plugin_path.is_none() => plugin_path = Some(PathBuf::from(other)),
             other => return Err(format!("unknown argument: {other}\n\n{}", usage()).into()),
@@ -74,6 +78,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
         bind: bind.unwrap_or_else(|| format!("{host}:{port}")),
         resolution,
         fps,
+        verbose,
     })
 }
 
@@ -83,5 +88,5 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
 }
 
 fn usage() -> String {
-    "usage: tellur-live serve --plugin <path-to-cdylib> [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--size 1280x720] [--fps 30]".to_owned()
+    "usage: tellur-live serve --plugin <path-to-cdylib> [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--size 1280x720] [--fps 30] [--verbose]".to_owned()
 }
