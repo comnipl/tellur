@@ -6,7 +6,6 @@ import {
   getCachedVideoRangeBlob,
   getCachedVideoRange,
   getNextCachedVideoRange,
-  loadCachedMediaObjectUrl,
   loadCacheRanges,
   mergeCacheRange,
   putVideoRangeBlob,
@@ -353,75 +352,6 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     }
     return next;
   }, [cacheRanges, streamCacheRanges]);
-
-  const cachedMediaRange = useCallback(
-    (rawUrl: string): CacheRange | null => {
-      if (!timelineId || !pluginCacheKey || typeof window === "undefined") {
-        return null;
-      }
-      let url: URL;
-      try {
-        url = new URL(rawUrl, window.location.origin);
-      } catch {
-        return null;
-      }
-      if (url.origin !== window.location.origin) return null;
-      if (url.searchParams.get("v") !== pluginCacheKey) return null;
-      if (url.searchParams.get("timeline") !== timelineId) return null;
-
-      const start = Number(url.searchParams.get("time") ?? "0");
-      const requestFps = Number(url.searchParams.get("fps") ?? "0");
-      const requestWidth = Number(url.searchParams.get("width") ?? "0");
-      const requestHeight = Number(url.searchParams.get("height") ?? "0");
-      const resolution = resolvedResolution();
-      if (
-        !Number.isFinite(start) ||
-        requestFps !== fps ||
-        requestWidth !== resolution.width ||
-        requestHeight !== resolution.height
-      ) {
-        return null;
-      }
-
-      if (url.pathname === "/api/frame") {
-        return {
-          start,
-          end: start + 1 / Math.max(fps, 1),
-        };
-      }
-
-      if (url.pathname === "/api/video" || url.pathname === "/api/video.mp4") {
-        const requestGop = Number(url.searchParams.get("gop") ?? "0");
-        const requestCrf = Number(url.searchParams.get("crf") ?? "0");
-        if (requestGop !== videoGop() || requestCrf !== 23) return null;
-        const requestDuration = Number(url.searchParams.get("duration") ?? "0");
-        const end =
-          Number.isFinite(requestDuration) && requestDuration > 0
-            ? Math.min(start + requestDuration, timelineDuration)
-            : timelineDuration;
-        return { start, end };
-      }
-
-      return null;
-    },
-    [
-      timelineId,
-      pluginCacheKey,
-      resolvedResolution,
-      fps,
-      videoGop,
-      timelineDuration,
-    ],
-  );
-
-  const recordCachedMediaUrl = useCallback(
-    (url: string, persisted: boolean) => {
-      if (!persisted) return;
-      const range = cachedMediaRange(url);
-      if (range) recordCacheRange(range.start, range.end);
-    },
-    [cachedMediaRange, recordCacheRange],
-  );
 
   const setImageObjectUrl = useCallback((url: string) => {
     const previous = imageObjectUrlRef.current;
@@ -1057,30 +987,29 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         cacheKey: pluginCacheKey,
       });
 
-      loadCachedMediaObjectUrl(url, pluginCacheKey)
-        .then((media) => {
+      loadUncachedMediaObjectUrl(url)
+        .then((objectUrl) => {
           const img = new Image();
           img.onload = () => {
             if (id === displayTokenRef.current) {
-              setImageObjectUrl(media.objectUrl);
+              setImageObjectUrl(objectUrl);
               setImageVisible(true);
               setVideoVisible(false);
               releaseHeldVideoSlotSoon();
               setError(null);
-              recordCachedMediaUrl(url, media.persisted);
             } else {
-              URL.revokeObjectURL(media.objectUrl);
+              URL.revokeObjectURL(objectUrl);
             }
             finish();
           };
           img.onerror = () => {
-            URL.revokeObjectURL(media.objectUrl);
+            URL.revokeObjectURL(objectUrl);
             if (id === displayTokenRef.current) {
               setError("frame request failed");
             }
             finish();
           };
-          img.src = media.objectUrl;
+          img.src = objectUrl;
         })
         .catch((e) => {
           if (id === displayTokenRef.current) {
@@ -1109,7 +1038,6 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       seconds,
       fps,
       setImageObjectUrl,
-      recordCachedMediaUrl,
       schedulePreload,
       releaseHeldVideoSlotSoon,
     ],
@@ -1825,6 +1753,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     stepFrame,
     rewindToStart,
   };
+}
+
+async function loadUncachedMediaObjectUrl(url: string): Promise<string> {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`${url} failed: ${response.status}`);
+  }
+  return URL.createObjectURL(await response.blob());
 }
 
 function selectMp4MimeType(): string {

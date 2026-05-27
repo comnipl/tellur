@@ -36,7 +36,9 @@ export function Timeline(props: TimelineProps) {
   const duration = Math.max(timeline?.duration ?? 0.001, 0.001);
 
   const bodyRef = useRef<HTMLDivElement>(null);
+  const draggingSeekRef = useRef(false);
   const [bodyWidth, setBodyWidth] = useState(0);
+  const [draggingSeek, setDraggingSeek] = useState(false);
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -66,12 +68,12 @@ export function Timeline(props: TimelineProps) {
     Math.min(innerWidth, (seconds / duration) * innerWidth),
   );
 
-  const handleTrackClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
+  const seekFromClientX = useCallback(
+    (clientX: number) => {
       const body = bodyRef.current;
       if (!body || bodyWidth <= 0) return;
       const rect = body.getBoundingClientRect();
-      const x = e.clientX - rect.left;
+      const x = clientX - rect.left;
       onSeek(
         clamp(
           normalizedViewport.start + (x / bodyWidth) * visibleDuration,
@@ -88,6 +90,36 @@ export function Timeline(props: TimelineProps) {
       visibleDuration,
     ],
   );
+
+  const handleSeekPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      draggingSeekRef.current = true;
+      setDraggingSeek(true);
+      seekFromClientX(e.clientX);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    [seekFromClientX],
+  );
+
+  const handleSeekPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingSeekRef.current) return;
+      e.preventDefault();
+      seekFromClientX(e.clientX);
+    },
+    [seekFromClientX],
+  );
+
+  const endSeekDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingSeekRef.current) return;
+    draggingSeekRef.current = false;
+    setDraggingSeek(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  }, []);
 
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
@@ -172,9 +204,18 @@ export function Timeline(props: TimelineProps) {
         )}
       </aside>
       <div
-        className="timeline__body"
+        className={
+          draggingSeek
+            ? "timeline__body timeline__body--dragging"
+            : "timeline__body"
+        }
         ref={bodyRef}
         onWheel={handleWheel}
+        onPointerDown={handleSeekPointerDown}
+        onPointerMove={handleSeekPointerMove}
+        onPointerUp={endSeekDrag}
+        onPointerCancel={endSeekDrag}
+        onLostPointerCapture={endSeekDrag}
       >
         <div
           className="timeline__tracks"
@@ -191,7 +232,6 @@ export function Timeline(props: TimelineProps) {
                   ? "timeline__track timeline__track--alt"
                   : "timeline__track"
               }
-              onClick={handleTrackClick}
             >
               {timeline && track.id === "video-1" ? (
                 <div

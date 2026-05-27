@@ -6,10 +6,12 @@ import {
 } from "lucide-react";
 import type { ServerInfo } from "../types";
 
+type CompileStatus = ServerInfo["compileStatus"] | "disconnected";
+
 interface HeaderProps {
   projectName: string;
   url: string;
-  compileStatus: ServerInfo["compileStatus"];
+  compileStatus: CompileStatus;
   compileError: string | null;
 }
 
@@ -55,12 +57,14 @@ export function Header({
   );
 }
 
-function compileStatusView(status: ServerInfo["compileStatus"]) {
+function compileStatusView(status: CompileStatus) {
   switch (status) {
     case "compiling":
       return { label: "Compiling...", Icon: LoaderCircle };
     case "failed":
       return { label: "Failed", Icon: TriangleAlert };
+    case "disconnected":
+      return { label: "Disconnected", Icon: TriangleAlert };
     case "compiled":
       return { label: "Compiled", Icon: CircleCheck };
   }

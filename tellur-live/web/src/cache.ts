@@ -2,6 +2,7 @@ import type { CacheRange } from "./types";
 
 const EPSILON = 1e-4;
 const RANGE_PREFIX = "tellur-live:cache-ranges:";
+const RANGE_SCOPE_VERSION = "video-ranges-v1";
 const MEDIA_DB_NAME = "tellur-live-media";
 const MEDIA_DB_VERSION = 3;
 const MEDIA_STORE = "media";
@@ -90,7 +91,7 @@ export function cacheScopeKey(parts: {
 }): string {
   return [
     parts.cacheKey,
-    "idb-segments-v1",
+    RANGE_SCOPE_VERSION,
     parts.timelineId,
     `${parts.width}x${parts.height}`,
     String(parts.fps),
@@ -135,7 +136,7 @@ export function saveCacheRanges(scope: string, ranges: CacheRange[]): void {
 export function revokeStaleCacheRanges(currentCacheKey: string): void {
   if (!currentCacheKey || typeof window === "undefined") return;
   try {
-    const keepPrefix = `${RANGE_PREFIX}${currentCacheKey}|`;
+    const keepPrefix = `${RANGE_PREFIX}${currentCacheKey}|${RANGE_SCOPE_VERSION}|`;
     for (let i = window.localStorage.length - 1; i >= 0; i--) {
       const key = window.localStorage.key(i);
       if (key?.startsWith(RANGE_PREFIX) && !key.startsWith(keepPrefix)) {
@@ -598,7 +599,7 @@ async function deleteStaleMediaEntries(keepCacheKey: string): Promise<void> {
       const cursor = cursorRequest.result;
       if (!cursor) return;
       const entry = cursor.value as Partial<MediaCacheEntry>;
-      if (entry.cacheKey !== keepCacheKey) {
+      if (entry.cacheKey !== keepCacheKey || entry.kind !== "video-range") {
         cursor.delete();
       }
       cursor.continue();

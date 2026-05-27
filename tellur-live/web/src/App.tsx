@@ -116,6 +116,53 @@ export function App() {
   });
 
   useEffect(() => {
+    const isInteractiveTarget = (target: EventTarget | null) => {
+      if (!(target instanceof HTMLElement)) return false;
+      return Boolean(
+        target.closest(
+          'button, input, textarea, select, a[href], [contenteditable="true"], [role="textbox"]',
+        ),
+      );
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        isInteractiveTarget(event.target)
+      ) {
+        return;
+      }
+
+      if (
+        event.code === "Space" ||
+        event.key === " " ||
+        event.key === "Spacebar"
+      ) {
+        event.preventDefault();
+        if (!event.repeat) preview.togglePlay();
+        return;
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        preview.stepFrame(-1);
+        return;
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        preview.stepFrame(1);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [preview.stepFrame, preview.togglePlay]);
+
+  useEffect(() => {
     const counter = fpsCounterRef.current;
     if (!preview.state.playing) {
       counter.frames = 0;
@@ -162,8 +209,10 @@ export function App() {
       <Header
         projectName="Project Name"
         url={url}
-        compileStatus={info?.compileStatus ?? "compiled"}
-        compileError={info?.compileError ?? null}
+        compileStatus={
+          loadError ? "disconnected" : info?.compileStatus ?? "compiled"
+        }
+        compileError={loadError ?? info?.compileError ?? null}
       />
       <div className="workspace">
         <section className="viewer-panel">

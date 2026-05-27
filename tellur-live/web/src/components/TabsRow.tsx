@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CornerUpRight, SquareMenu } from "lucide-react";
 import { formatTimelineStart, formatTimecode } from "../formatTime";
 import {
@@ -37,7 +37,9 @@ export function TabsRow(props: TabsRowProps) {
   } = props;
 
   const cursorRef = useRef<HTMLDivElement>(null);
+  const draggingSeekRef = useRef(false);
   const [width, setWidth] = useState(0);
+  const [draggingSeek, setDraggingSeek] = useState(false);
 
   useEffect(() => {
     const el = cursorRef.current;
@@ -64,6 +66,59 @@ export function TabsRow(props: TabsRowProps) {
     Math.round(normalizedViewport.start * fps),
   );
 
+  const seekFromClientX = useCallback(
+    (clientX: number) => {
+      const cursor = cursorRef.current;
+      if (!cursor || !timeline) return;
+      const rect = cursor.getBoundingClientRect();
+      const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+      onSeek(
+        clamp(
+          normalizedViewport.start + ratio * visibleDuration,
+          0,
+          duration,
+        ),
+      );
+    },
+    [
+      duration,
+      normalizedViewport.start,
+      onSeek,
+      timeline,
+      visibleDuration,
+    ],
+  );
+
+  const handleSeekPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      draggingSeekRef.current = true;
+      setDraggingSeek(true);
+      seekFromClientX(e.clientX);
+      e.currentTarget.setPointerCapture(e.pointerId);
+    },
+    [seekFromClientX],
+  );
+
+  const handleSeekPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!draggingSeekRef.current) return;
+      e.preventDefault();
+      seekFromClientX(e.clientX);
+    },
+    [seekFromClientX],
+  );
+
+  const endSeekDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingSeekRef.current) return;
+    draggingSeekRef.current = false;
+    setDraggingSeek(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  }, []);
+
   return (
     <div className="tabsrow">
       <div className="tabsrow__left">
@@ -78,21 +133,17 @@ export function TabsRow(props: TabsRowProps) {
         ) : null}
       </div>
       <div
-        className="tabsrow__cursor"
+        className={
+          draggingSeek
+            ? "tabsrow__cursor tabsrow__cursor--dragging"
+            : "tabsrow__cursor"
+        }
         ref={cursorRef}
-        onClick={(e) => {
-          if (!timeline) return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          const ratio = clamp((e.clientX - rect.left) / rect.width, 0, 1);
-          onSeek(
-            clamp(
-              normalizedViewport.start + ratio * visibleDuration,
-              0,
-              duration,
-            ),
-          );
-        }}
-        style={{ cursor: "pointer" }}
+        onPointerDown={handleSeekPointerDown}
+        onPointerMove={handleSeekPointerMove}
+        onPointerUp={endSeekDrag}
+        onPointerCancel={endSeekDrag}
+        onLostPointerCapture={endSeekDrag}
       >
         <div className="tabsrow__cursor-inner">
           <span className="tabsrow__viewport-start">
