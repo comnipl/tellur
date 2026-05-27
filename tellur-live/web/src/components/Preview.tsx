@@ -4,18 +4,31 @@ interface PreviewProps {
   imageSrc: string | null;
   imageVisible: boolean;
   videoVisible: boolean;
+  activeVideoSlot: 0 | 1;
   aspect: number;
   error: string | null;
 }
 
 interface PreviewRefs {
-  videoRef: React.RefObject<HTMLVideoElement>;
+  videoRefs: [
+    React.RefObject<HTMLVideoElement>,
+    React.RefObject<HTMLVideoElement>,
+  ];
   imgRef: React.RefObject<HTMLImageElement>;
 }
 
 export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
   function Preview(
-    { imageSrc, imageVisible, videoVisible, aspect, error, videoRef, imgRef },
+    {
+      imageSrc,
+      imageVisible,
+      videoVisible,
+      activeVideoSlot,
+      aspect,
+      error,
+      videoRefs,
+      imgRef,
+    },
     ref,
   ) {
     const frameStyle: React.CSSProperties = {
@@ -25,13 +38,18 @@ export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
       <section className="preview" ref={ref}>
         <div className="preview__frame" style={frameStyle}>
           <div className="preview__media">
-            <video
-              ref={videoRef}
-              className={videoVisible ? "" : "hidden"}
-              muted
-              playsInline
-              preload="auto"
-            />
+            {videoRefs.map((videoRef, slot) => (
+              <video
+                key={slot}
+                ref={videoRef}
+                className={
+                  videoVisible && activeVideoSlot === slot ? "" : "hidden"
+                }
+                muted
+                playsInline
+                preload="auto"
+              />
+            ))}
             <img
               ref={imgRef}
               className={imageVisible ? "" : "hidden"}

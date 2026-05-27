@@ -112,6 +112,7 @@ fn handle_connection(
     let path = request.path.clone();
     match path.as_str() {
         "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
+        "/api/events" => handle_event_stream(app, stream),
         "/api/info" | "/api/frame" | "/api/stream" => {
             let mut app = app
                 .lock()
@@ -119,6 +120,35 @@ fn handle_connection(
             app.handle_api(stream, request)
         }
         other => serve_static(&mut stream, other),
+    }
+}
+
+fn handle_event_stream(
+    app: Arc<Mutex<PreviewApp>>,
+    mut stream: TcpStream,
+) -> Result<(), Box<dyn Error>> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream; charset=utf-8\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n"
+    )?;
+
+    let mut last_body = String::new();
+    loop {
+        let body = {
+            let mut app = app
+                .lock()
+                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            app.info_body()?
+        };
+        if body != last_body {
+            write!(stream, "event: info\ndata: {body}\n\n")?;
+            stream.flush()?;
+            last_body = body;
+        }
+        thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -194,11 +224,15 @@ impl PreviewApp {
         Ok(changed)
     }
 
-    fn media_cache_control(&self, query: &HashMap<String, String>) -> &'static str {
-        if matches!(
+    fn is_media_cacheable(&self, query: &HashMap<String, String>) -> bool {
+        matches!(
             (query.get("v").map(String::as_str), self.plugin.cache_key()),
             (Some(requested), Some(current)) if requested == current
-        ) {
+        )
+    }
+
+    fn media_cache_control(&self, query: &HashMap<String, String>) -> &'static str {
+        if self.is_media_cacheable(query) {
             "public, max-age=31536000, immutable"
         } else {
             "no-store"
@@ -215,17 +249,7 @@ impl PreviewApp {
     }
 
     fn handle_info(&mut self, mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-        self.reload_plugin_if_changed()?;
-        let timelines = self.plugin.collection()?.timelines();
-        let compile = self.compile_state.snapshot();
-        let body = info_json(
-            self.resolution,
-            self.fps,
-            &timelines,
-            self.plugin.last_error(),
-            self.plugin.cache_key().unwrap_or(""),
-            &compile,
-        );
+        let body = self.info_body()?;
         write_response(
             &mut stream,
             200,
@@ -233,6 +257,20 @@ impl PreviewApp {
             "application/json; charset=utf-8",
             body.as_bytes(),
         )
+    }
+
+    fn info_body(&mut self) -> Result<String, Box<dyn Error>> {
+        self.reload_plugin_if_changed()?;
+        let timelines = self.plugin.collection()?.timelines();
+        let compile = self.compile_state.snapshot();
+        Ok(info_json(
+            self.resolution,
+            self.fps,
+            &timelines,
+            self.plugin.last_error(),
+            self.plugin.cache_key().unwrap_or(""),
+            &compile,
+        ))
     }
 
     fn handle_frame(
@@ -529,6 +567,7 @@ struct VideoStreamSetup {
     crf: u8,
     start_seconds: f32,
     cache_control: &'static str,
+    realtime: bool,
 }
 
 struct VideoFrame {
@@ -570,16 +609,29 @@ fn handle_video_stream(
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, info.duration.max(0.0));
+        let remaining = (info.duration - start_seconds).max(0.0);
+        let duration = query
+            .get("duration")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|v| v.min(remaining))
+            .unwrap_or(remaining);
 
+        let cacheable = app.is_media_cacheable(&query);
         VideoStreamSetup {
             timeline_id: info.id.clone(),
-            duration: info.duration,
+            duration,
             fps,
             resolution,
             gop,
             crf,
             start_seconds,
-            cache_control: app.media_cache_control(&query),
+            cache_control: if cacheable {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-store"
+            },
+            realtime: !cacheable,
         }
     };
 
@@ -667,8 +719,7 @@ fn handle_video_stream(
 
     let frame_step = 1.0 / setup.fps as f32;
     let frame_duration = Duration::from_secs_f32(frame_step);
-    let remaining = (setup.duration - setup.start_seconds).max(0.0);
-    let total_frames = (remaining * setup.fps as f32).ceil() as u64;
+    let total_frames = (setup.duration * setup.fps as f32).ceil() as u64;
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {
@@ -705,7 +756,9 @@ fn handle_video_stream(
             client_alive.store(false, Ordering::Relaxed);
             break;
         }
-        sleep_remainder(frame_duration, frame_start.elapsed());
+        if setup.realtime {
+            sleep_remainder(frame_duration, frame_start.elapsed());
+        }
     }
 
     drop(stdin);

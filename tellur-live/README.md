@@ -69,10 +69,18 @@ to override those inferred values.
 
 When a release build succeeds and the cdylib contents change, `tellur-live`
 reloads the plugin, clears the server render cache, and publishes a new
-`cacheKey` to the browser. The browser uses that key in image/video URLs and in
-its saved green cache ranges, so old media cache state is revoked only after a
-successful cdylib update. Failed builds leave the previous plugin and cache key
-in place.
+`cacheKey` to the browser. The browser uses that key in image/video URLs,
+stores media responses as blobs in IndexedDB, and records the green cache
+ranges separately. Old IndexedDB media entries and green ranges are revoked
+only after a successful cdylib update. Failed builds leave the previous plugin
+and cache key in place. Video cache entries are variable-length ranges. Starting
+playback inside a cached range seeks within that blob instead of creating a
+duplicate cache entry. Missing video ranges fall back to direct streaming
+immediately; playback does not wait for IndexedDB cache fill. During playback
+the client scans the continuous cached range from the current position and
+starts one background stream from the next cache gap. When that stream finishes,
+its full range is saved to IndexedDB. When stopped, it fills only the next
+three seconds from the current position.
 
 The browser UI is intentionally a thin validation client. It requests
 coalesced PNG frames for still previews and seeking, and fragmented MP4/H.264
@@ -86,6 +94,8 @@ button can reuse already-buffered video data.
 - `GET /api/info` returns resolution, fps, the current media `cacheKey`,
   compile status (`compiled`, `compiling`, or `failed`), hot-reload errors, and
   timeline metadata.
+- `GET /api/events` streams the same info payload as Server-Sent Events. The
+  browser client uses this instead of polling `/api/info`.
 - `GET /api/frame?time=1.25&timeline=main` returns one PNG frame.
 - `GET /api/frame?frame=42&timeline=main` returns one PNG frame by frame index.
 - `GET /api/frame?time=1.25&timeline=main&format=rgba` returns raw RGBA8 bytes
@@ -93,6 +103,8 @@ button can reuse already-buffered video data.
 - `GET /api/video.mp4?time=1.25&timeline=main&fps=60&gop=12&crf=23`
   streams fragmented MP4/H.264 through `ffmpeg`. The browser client uses this
   path for playback so `<video>` handles decode and presentation timing.
+  `duration=<seconds>` limits the generated stream length and is used for
+  IndexedDB video cache segments.
   Frame and stream endpoints also accept `width=<pixels>&height=<pixels>` or
   `scale=<ratio>` to override the default preview resolution.
 - `GET /api/stream?time=0&timeline=main&fps=30` returns a simple multipart PNG

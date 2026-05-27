@@ -33,6 +33,7 @@ export function frameUrl(params: FrameRequestParams): string {
 export interface VideoRequestParams extends FrameRequestParams {
   gop: number;
   crf: number;
+  duration?: number;
 }
 
 export function videoUrl(params: VideoRequestParams): string {
@@ -46,5 +47,8 @@ export function videoUrl(params: VideoRequestParams): string {
     crf: String(params.crf),
     v: params.cacheKey,
   });
+  if (params.duration != null) {
+    query.set("duration", params.duration.toFixed(4));
+  }
   return `/api/video.mp4?${query}`;
 }

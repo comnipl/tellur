@@ -8,6 +8,7 @@ import { Timeline } from "./components/Timeline";
 import { TimelineViewportBar } from "./components/TimelineViewportBar";
 import { Transport } from "./components/Transport";
 import { usePreview } from "./preview/usePreview";
+import { cleanupLegacyMediaCaches } from "./cache";
 import {
   clampTimelineViewport,
   type TimelineViewport,
@@ -20,7 +21,8 @@ const FALLBACK_TIMELINE: TimelineInfo = {
   title: "Demo Timeline",
   duration: 150,
 };
-const INFO_POLL_MS = 200;
+const INFO_FALLBACK_POLL_MS = 2000;
+const LEGACY_CACHE_RELOAD_KEY = "tellur-live:legacy-cache-reloaded";
 
 export function App() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
@@ -35,30 +37,72 @@ export function App() {
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
 
   useEffect(() => {
+    cleanupLegacyMediaCaches()
+      .then((needsReload) => {
+        if (
+          !needsReload ||
+          typeof window === "undefined" ||
+          window.sessionStorage.getItem(LEGACY_CACHE_RELOAD_KEY)
+        ) {
+          return;
+        }
+        window.sessionStorage.setItem(LEGACY_CACHE_RELOAD_KEY, "1");
+        window.location.reload();
+      })
+      .catch((e) => {
+        console.warn("tellur-live legacy media cache cleanup failed", e);
+      });
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let source: EventSource | null = null;
+
+    const applyInfo = (next: ServerInfo) => {
+      if (cancelled) return;
+      setInfo((prev) => {
+        if (!prev) {
+          setFps((current) => Math.max(next.fps || current, 1));
+        }
+        return next;
+      });
+      setLoadError(null);
+    };
 
     const tick = async () => {
       try {
-        const next = await fetchInfo();
-        if (cancelled) return;
-        setInfo((prev) => {
-          if (!prev) {
-            setFps((current) => Math.max(next.fps || current, 1));
-          }
-          return next;
-        });
-        setLoadError(null);
+        applyInfo(await fetchInfo());
       } catch (e) {
         if (!cancelled) setLoadError(String(e));
       } finally {
-        if (!cancelled) timer = setTimeout(tick, INFO_POLL_MS);
+        if (!cancelled) timer = setTimeout(tick, INFO_FALLBACK_POLL_MS);
       }
     };
-    tick();
+
+    if ("EventSource" in window) {
+      source = new EventSource("/api/events");
+      source.addEventListener("info", (event: MessageEvent) => {
+        try {
+          applyInfo(JSON.parse(event.data) as ServerInfo);
+        } catch (e) {
+          if (!cancelled) setLoadError(String(e));
+        }
+      });
+      source.onerror = () => {
+        if (cancelled) return;
+        source?.close();
+        source = null;
+        tick();
+      };
+    } else {
+      tick();
+    }
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      source?.close();
     };
   }, []);
 
@@ -109,8 +153,8 @@ export function App() {
   }, [timelineDuration]);
 
   const url =
-    typeof window !== "undefined" && window.location.host
-      ? `https://${window.location.host}`
+    typeof window !== "undefined" && window.location.origin
+      ? window.location.origin
       : "";
 
   return (
@@ -127,9 +171,10 @@ export function App() {
             imageSrc={preview.state.imageSrc}
             imageVisible={preview.state.imageVisible}
             videoVisible={preview.state.videoVisible}
+            activeVideoSlot={preview.state.activeVideoSlot}
             aspect={aspect}
             error={loadError ?? info?.lastError ?? preview.state.error}
-            videoRef={preview.videoRef}
+            videoRefs={preview.videoRefs}
             imgRef={preview.imgRef}
           />
           <PreviewScrubber
