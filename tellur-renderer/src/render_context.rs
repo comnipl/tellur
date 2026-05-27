@@ -23,8 +23,8 @@ use lru::LruCache;
 use sysinfo::System;
 use tellur_core::dyn_compare::DynEq;
 use tellur_core::geometry::Vec2;
-use tellur_core::raster::{RasterComponent, RasterImage, Resolution};
-use tellur_core::render_context::RenderContext;
+use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::render_context::{GpuPreference, RenderContext};
 
 /// Default cache size in bytes (1 GiB) when constructed with
 /// [`CachingRenderContext::new`].
@@ -213,6 +213,13 @@ fn format_bytes(b: u64) -> String {
     }
 }
 
+fn pixel_stride(format: PixelFormat) -> usize {
+    match format {
+        PixelFormat::Rgba8 => 4,
+        PixelFormat::Rgba16Float => 8,
+    }
+}
+
 /// A render context that memoizes `RasterImage` outputs.
 ///
 /// Construct one per export / preview session and pass it into
@@ -232,6 +239,7 @@ pub struct CachingRenderContext {
     pressure_skips: u64,
     oversize_skips: u64,
     per_type: HashMap<TypeId, (TypeStats, &'static str)>,
+    gpu_preference: GpuPreference,
     // Running total of every `ctx.render` call's inclusive duration.
     // A `render` invocation snapshots this on entry and re-reads it on
     // exit to derive how much time was spent inside nested child
@@ -259,8 +267,18 @@ impl CachingRenderContext {
             pressure_skips: 0,
             oversize_skips: 0,
             per_type: HashMap::new(),
+            gpu_preference: GpuPreference::Disabled,
             total_render_time: Duration::ZERO,
         }
+    }
+
+    pub fn with_gpu_preference(mut self, gpu_preference: GpuPreference) -> Self {
+        self.gpu_preference = gpu_preference;
+        self
+    }
+
+    pub fn set_gpu_preference(&mut self, gpu_preference: GpuPreference) {
+        self.gpu_preference = gpu_preference;
     }
 
     /// Current memory footprint of cached images, in bytes.
@@ -325,7 +343,12 @@ impl CachingRenderContext {
     }
 
     fn image_bytes(image: &RasterImage) -> usize {
-        image.pixels.len()
+        match image {
+            RasterImage::Cpu(image) => image.pixels.len(),
+            RasterImage::Gpu(surface) => {
+                (surface.width as usize) * (surface.height as usize) * pixel_stride(surface.format)
+            }
+        }
     }
 
     /// Evict least-recently-used entries until `needed` more bytes fit
@@ -366,6 +389,14 @@ impl Default for CachingRenderContext {
 }
 
 impl RenderContext for CachingRenderContext {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn gpu_preference(&self) -> GpuPreference {
+        self.gpu_preference
+    }
+
     fn render(
         &mut self,
         component: &dyn RasterComponent,

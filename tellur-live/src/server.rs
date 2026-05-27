@@ -11,7 +11,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tellur_core::raster::{PixelFormat, RasterImage, Resolution};
+use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
+use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_renderer::CachingRenderContext;
 
@@ -444,6 +445,7 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
@@ -535,6 +537,7 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         let after = self.ctx.metrics();
 
@@ -571,7 +574,7 @@ struct VideoStreamSetup {
 }
 
 struct VideoFrame {
-    image: RasterImage,
+    image: CpuRasterImage,
     render_time: Duration,
     cache_hits: u64,
     cache_misses: u64,
@@ -781,7 +784,7 @@ struct RenderedFrame {
 }
 
 struct RenderedImage {
-    image: RasterImage,
+    image: CpuRasterImage,
     stats: FrameRenderStats,
     total_start: Instant,
 }

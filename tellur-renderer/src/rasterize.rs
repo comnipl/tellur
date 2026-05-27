@@ -1,6 +1,5 @@
 use std::hash::Hash;
 
-use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
@@ -57,12 +56,7 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
         straight.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
     }
 
-    RasterImage {
-        width,
-        height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(straight),
-    }
+    RasterImage::cpu(width, height, PixelFormat::Rgba8, straight)
 }
 
 /// Transform that maps the graphic's local coordinate space

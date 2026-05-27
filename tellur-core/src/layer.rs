@@ -19,8 +19,6 @@
 //! source-over compositing it onto the output at the corresponding pixel
 //! offset.
 
-use bytes::Bytes;
-
 use crate::composite::composite_at;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::Placed;
@@ -265,15 +263,11 @@ pub(crate) fn composite_children(
         // Route the child render through the context so cache lookups
         // can intercept it before the underlying `render` runs.
         let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
+        let image = ctx.readback(image);
         composite_at(&mut accum, target, &image, offset_x, offset_y);
     }
 
-    RasterImage {
-        width: target.width,
-        height: target.height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(accum),
-    }
+    RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
 }
 
 /// Smallest axis-aligned rectangle containing both `a` and `b`.

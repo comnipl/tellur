@@ -1,6 +1,8 @@
 use std::any::Any;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -10,11 +12,130 @@ use crate::geometry::{Constraints, Rect, Vec2};
 use crate::render_context::RenderContext;
 
 #[derive(Debug, Clone)]
-pub struct RasterImage {
+pub enum RasterImage {
+    Cpu(CpuRasterImage),
+    Gpu(GpuSurface),
+}
+
+impl RasterImage {
+    pub fn cpu(width: u32, height: u32, format: PixelFormat, pixels: impl Into<Bytes>) -> Self {
+        Self::Cpu(CpuRasterImage {
+            width,
+            height,
+            format,
+            pixels: pixels.into(),
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        match self {
+            Self::Cpu(image) => image.width,
+            Self::Gpu(surface) => surface.width,
+        }
+    }
+
+    pub fn height(&self) -> u32 {
+        match self {
+            Self::Cpu(image) => image.height,
+            Self::Gpu(surface) => surface.height,
+        }
+    }
+
+    pub fn format(&self) -> PixelFormat {
+        match self {
+            Self::Cpu(image) => image.format,
+            Self::Gpu(surface) => surface.format,
+        }
+    }
+
+    pub fn as_cpu(&self) -> Option<&CpuRasterImage> {
+        match self {
+            Self::Cpu(image) => Some(image),
+            Self::Gpu(_) => None,
+        }
+    }
+
+    pub fn into_cpu(self) -> Result<CpuRasterImage, Self> {
+        match self {
+            Self::Cpu(image) => Ok(image),
+            Self::Gpu(_) => Err(self),
+        }
+    }
+}
+
+impl From<CpuRasterImage> for RasterImage {
+    fn from(image: CpuRasterImage) -> Self {
+        Self::Cpu(image)
+    }
+}
+
+impl From<GpuSurface> for RasterImage {
+    fn from(surface: GpuSurface) -> Self {
+        Self::Gpu(surface)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CpuRasterImage {
     pub width: u32,
     pub height: u32,
     pub format: PixelFormat,
     pub pixels: Bytes,
+}
+
+/// Backend-owned GPU image handle.
+///
+/// `tellur-core` deliberately keeps this opaque: concrete backends can store a
+/// `wgpu::Texture`, texture view, command-graph node, or another device-local
+/// handle behind the `Arc<dyn Any>`, while core remains dependency-free.
+#[derive(Clone)]
+pub struct GpuSurface {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    backend: &'static str,
+    handle: Arc<dyn Any + Send + Sync>,
+}
+
+impl GpuSurface {
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: PixelFormat,
+        backend: &'static str,
+        handle: Arc<dyn Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            backend,
+            handle,
+        }
+    }
+
+    pub fn backend(&self) -> &'static str {
+        self.backend
+    }
+
+    pub fn handle(&self) -> &(dyn Any + Send + Sync) {
+        self.handle.as_ref()
+    }
+
+    pub fn downcast_handle<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.handle.as_ref().downcast_ref::<T>()
+    }
+}
+
+impl fmt::Debug for GpuSurface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GpuSurface")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("format", &self.format)
+            .field("backend", &self.backend)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -111,11 +232,22 @@ pub enum PngExportError {
     UnsupportedFormat(PixelFormat),
     #[error("pixel buffer size mismatch: expected {expected} bytes, got {actual}")]
     SizeMismatch { expected: usize, actual: usize },
+    #[error("PNG export requires a CPU image; got GPU surface from backend {backend}")]
+    GpuSurface { backend: &'static str },
     #[error("PNG encoding failed: {0}")]
     Encode(#[from] png::EncodingError),
 }
 
-impl RasterImage {
+impl CpuRasterImage {
+    pub fn new(width: u32, height: u32, format: PixelFormat, pixels: impl Into<Bytes>) -> Self {
+        Self {
+            width,
+            height,
+            format,
+            pixels: pixels.into(),
+        }
+    }
+
     /// Encodes the image as PNG and writes it to `writer`.
     ///
     /// Only `PixelFormat::Rgba8` is currently supported. HDR formats require
@@ -139,5 +271,19 @@ impl RasterImage {
         let mut png_writer = encoder.write_header()?;
         png_writer.write_image_data(&self.pixels)?;
         Ok(())
+    }
+}
+
+impl RasterImage {
+    /// Encodes a CPU image as PNG and writes it to `writer`.
+    ///
+    /// GPU images must be read back through the active render context first.
+    pub fn export_png<W: Write>(&self, writer: W) -> Result<(), PngExportError> {
+        match self {
+            Self::Cpu(image) => image.export_png(writer),
+            Self::Gpu(surface) => Err(PngExportError::GpuSurface {
+                backend: surface.backend(),
+            }),
+        }
     }
 }

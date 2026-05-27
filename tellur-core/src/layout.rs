@@ -663,8 +663,6 @@ pub mod raster {
     //! Raster equivalents of the vector layout containers. Same shape
     //! and semantics; operate on `Box<dyn RasterComponent>`.
 
-    use bytes::Bytes;
-
     use std::hash::{Hash, Hasher};
 
     use super::{
@@ -1097,12 +1095,12 @@ pub mod raster {
             _ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let bytes = (target.width as usize) * (target.height as usize) * 4;
-            RasterImage {
-                width: target.width,
-                height: target.height,
-                format: PixelFormat::Rgba8,
-                pixels: Bytes::from(vec![0u8; bytes]),
-            }
+            RasterImage::cpu(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                vec![0u8; bytes],
+            )
         }
     }
 
@@ -1136,12 +1134,7 @@ pub mod raster {
                 buf.push(b);
                 buf.push(a);
             }
-            RasterImage {
-                width: target.width,
-                height: target.height,
-                format: PixelFormat::Rgba8,
-                pixels: Bytes::from(buf),
-            }
+            RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
         }
     }
 

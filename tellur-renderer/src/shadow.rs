@@ -8,12 +8,11 @@
 
 use std::hash::{Hash, Hasher};
 
-use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
 use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
-use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::RenderContext;
 
 pub struct DropShadow {
@@ -97,6 +96,7 @@ impl RasterComponent for DropShadow {
             size,
             Resolution::new(child_px_w, child_px_h),
         );
+        let child_image = ctx.readback(child_image);
 
         // Build a padded shadow image whose alpha is a blurred copy of
         // the child's alpha, tinted with `color`. Padding equals the
@@ -128,26 +128,21 @@ impl RasterComponent for DropShadow {
         let child_px_y = (child_local_y * sy).round() as i32;
         composite_at(&mut accum, target, &child_image, child_px_x, child_px_y);
 
-        RasterImage {
-            width: target.width,
-            height: target.height,
-            format: PixelFormat::Rgba8,
-            pixels: Bytes::from(accum),
-        }
+        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
     }
 }
 
 fn blank_image(target: Resolution) -> RasterImage {
     let bytes = (target.width as usize) * (target.height as usize) * 4;
-    RasterImage {
-        width: target.width,
-        height: target.height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(vec![0u8; bytes]),
-    }
+    RasterImage::cpu(
+        target.width,
+        target.height,
+        PixelFormat::Rgba8,
+        vec![0u8; bytes],
+    )
 }
 
-fn make_shadow(image: &RasterImage, blur_radius: u32, color: Color) -> RasterImage {
+fn make_shadow(image: &CpuRasterImage, blur_radius: u32, color: Color) -> CpuRasterImage {
     assert_eq!(image.format, PixelFormat::Rgba8);
     let pad = (blur_radius as f32 * BLUR_EXTENT_MULTIPLIER).round() as usize;
     let in_w = image.width as usize;
@@ -185,12 +180,7 @@ fn make_shadow(image: &RasterImage, blur_radius: u32, color: Color) -> RasterIma
         out.push(a);
     }
 
-    RasterImage {
-        width: out_w as u32,
-        height: out_h as u32,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(out),
-    }
+    CpuRasterImage::new(out_w as u32, out_h as u32, PixelFormat::Rgba8, out)
 }
 
 fn box_blur_3pass(buf: &mut [u8], w: usize, h: usize, radius: usize) {

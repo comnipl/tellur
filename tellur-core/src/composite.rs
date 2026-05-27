@@ -16,7 +16,7 @@
 //! source pixels skip the write entirely and fully-opaque ones go
 //! through a 4-byte copy.
 
-use crate::raster::{PixelFormat, RasterImage, Resolution};
+use crate::raster::{CpuRasterImage, PixelFormat, Resolution};
 
 /// Source-over composites `src` onto `dst` at pixel offset
 /// `(offset_x, offset_y)`. Both buffers hold 8-bit straight-alpha RGBA
@@ -28,7 +28,7 @@ use crate::raster::{PixelFormat, RasterImage, Resolution};
 pub fn composite_at(
     dst: &mut [u8],
     dst_size: Resolution,
-    src: &RasterImage,
+    src: &CpuRasterImage,
     offset_x: i32,
     offset_y: i32,
 ) {
@@ -130,16 +130,10 @@ fn blend_row(dst: &mut [u8], src: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
 
-    fn image(width: u32, height: u32, pixels: Vec<u8>) -> RasterImage {
+    fn image(width: u32, height: u32, pixels: Vec<u8>) -> CpuRasterImage {
         assert_eq!(pixels.len(), (width * height * 4) as usize);
-        RasterImage {
-            width,
-            height,
-            format: PixelFormat::Rgba8,
-            pixels: Bytes::from(pixels),
-        }
+        CpuRasterImage::new(width, height, PixelFormat::Rgba8, pixels)
     }
 
     /// Straight-alpha Porter-Duff source-over carried out in `f64`, used
