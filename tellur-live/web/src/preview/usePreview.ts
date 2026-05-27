@@ -147,6 +147,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const displayTokenRef = useRef(0);
   const pngTokenRef = useRef(0);
   const pendingPngRef = useRef(false);
+  const pendingPngUrlRef = useRef<string | null>(null);
   const queuedPngRef = useRef(false);
   const preloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackTokenRef = useRef(0);
@@ -965,9 +966,23 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   );
 
   const requestPngFrame = useCallback(
-    (force: boolean = false) => {
+    (force: boolean = false, atSeconds?: number) => {
       if (!timelineId || !hasServerInfo || !pluginCacheKey) return;
+      const res = resolvedResolution();
+      const frameSeconds = clampSeconds(atSeconds ?? secondsRef.current);
+      const url = frameUrl({
+        timelineId,
+        time: frameSeconds,
+        width: res.width,
+        height: res.height,
+        fps,
+        cacheKey: pluginCacheKey,
+      });
       if (pendingPngRef.current) {
+        if (pendingPngUrlRef.current === url && !queuedPngRef.current) {
+          if (preloadTimerRef.current) clearTimeout(preloadTimerRef.current);
+          return;
+        }
         queuedPngRef.current = true;
         if (force) displayTokenRef.current += 1;
         if (preloadTimerRef.current) clearTimeout(preloadTimerRef.current);
@@ -978,16 +993,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       if (preloadTimerRef.current) clearTimeout(preloadTimerRef.current);
       const id = ++displayTokenRef.current;
       const pngId = ++pngTokenRef.current;
-      const res = resolvedResolution();
-      const frameSeconds = seconds;
-      const url = frameUrl({
-        timelineId,
-        time: frameSeconds,
-        width: res.width,
-        height: res.height,
-        fps,
-        cacheKey: pluginCacheKey,
-      });
+      pendingPngUrlRef.current = url;
 
       loadUncachedMediaObjectUrl(url)
         .then((objectUrl) => {
@@ -1021,7 +1027,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         });
 
       function finish() {
-        if (pngId === pngTokenRef.current) pendingPngRef.current = false;
+        if (pngId === pngTokenRef.current) {
+          pendingPngRef.current = false;
+          pendingPngUrlRef.current = null;
+        }
         if (queuedPngRef.current && !playingRef.current) {
           queuedPngRef.current = false;
           requestPngFrame(true);
@@ -1037,7 +1046,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       hasServerInfo,
       pluginCacheKey,
       resolvedResolution,
-      seconds,
+      clampSeconds,
       fps,
       setImageObjectUrl,
       schedulePreload,
@@ -1246,12 +1255,17 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           end,
           videoCurrentTime: streamVideo.currentTime,
         });
-        setPreviewSecondsState(end);
         playbackRef.current = null;
         if (end >= timelineDuration - EPSILON) {
           setPreviewPlayingState(false);
-          setVideoVisible(false);
-          setImageVisible(true);
+          setPreviewSecondsState(timelineDuration);
+          heldVideoSlotRef.current = session.slot;
+          setActiveVideoSlot(session.slot);
+          setVideoVisible(true);
+          setImageVisible(false);
+          requestPngFrame(true, timelineDuration);
+        } else {
+          setPreviewSecondsState(end);
         }
       };
       session.opened
@@ -1477,8 +1491,11 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           setPreviewPlayingState(false);
           playbackRef.current = null;
           playbackPipelineRef.current = null;
-          setVideoVisible(false);
-          setImageVisible(true);
+          heldVideoSlotRef.current = slot;
+          setActiveVideoSlot(slot);
+          setVideoVisible(true);
+          setImageVisible(false);
+          requestPngFrame(true, timelineDuration);
         };
         setVideoObjectUrl(slot, objectUrl);
         try {
@@ -1589,6 +1606,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     setOwnedStreamCacheRange,
     setPreviewPlayingState,
     setPreviewSecondsState,
+    requestPngFrame,
   ]);
 
   useEffect(() => {
