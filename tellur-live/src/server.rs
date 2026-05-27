@@ -11,7 +11,8 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tellur_core::raster::{PixelFormat, RasterImage, Resolution};
+use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
+use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_renderer::CachingRenderContext;
 
@@ -26,6 +27,7 @@ pub struct ServerOptions {
     pub bind: String,
     pub resolution: Resolution,
     pub fps: u32,
+    pub gpu_preference: GpuPreference,
     pub verbose: bool,
     pub auto_build: Option<AutoBuildOptions>,
 }
@@ -45,10 +47,8 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
                 .unwrap_or_default(),
             auto_build.example
         );
-        if !options.plugin_path.is_file() {
-            eprintln!("plugin is missing; running initial release build");
-            run_release_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
-        }
+        eprintln!("running initial release build");
+        run_release_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
     }
 
     let compile_state = options
@@ -59,7 +59,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
-        ctx: CachingRenderContext::new(),
+        ctx: CachingRenderContext::new().with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
         verbose: options.verbose,
@@ -444,6 +444,7 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
@@ -456,6 +457,9 @@ impl PreviewApp {
             cache_hits: after.hits.saturating_sub(before.hits),
             cache_misses: after.misses.saturating_sub(before.misses),
             bytes_cached: after.bytes_cached,
+            gpu_available: after.gpu_available,
+            gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
+            gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
         })
     }
 
@@ -535,6 +539,7 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         let after = self.ctx.metrics();
 
@@ -552,6 +557,9 @@ impl PreviewApp {
                 cache_hits: after.hits.saturating_sub(before.hits),
                 cache_misses: after.misses.saturating_sub(before.misses),
                 bytes_cached: after.bytes_cached,
+                gpu_available: after.gpu_available,
+                gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
+                gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
             },
             total_start,
         })
@@ -571,11 +579,14 @@ struct VideoStreamSetup {
 }
 
 struct VideoFrame {
-    image: RasterImage,
+    image: CpuRasterImage,
     render_time: Duration,
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
+    gpu_available: bool,
+    gpu_ops: u64,
+    gpu_readbacks: u64,
 }
 
 fn handle_video_stream(
@@ -735,7 +746,7 @@ fn handle_video_stream(
             let frame = app.render_video_rgba(&setup.timeline_id, seconds, setup.resolution)?;
             if app.verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -747,6 +758,9 @@ fn handle_video_stream(
                     frame.cache_hits,
                     frame.cache_misses,
                     format_bytes(frame.bytes_cached as u64),
+                    frame.gpu_available,
+                    frame.gpu_ops,
+                    frame.gpu_readbacks,
                 );
             }
             frame.image
@@ -781,7 +795,7 @@ struct RenderedFrame {
 }
 
 struct RenderedImage {
-    image: RasterImage,
+    image: CpuRasterImage,
     stats: FrameRenderStats,
     total_start: Instant,
 }
@@ -798,6 +812,9 @@ struct FrameRenderStats {
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
+    gpu_available: bool,
+    gpu_ops: u64,
+    gpu_readbacks: u64,
 }
 
 impl FrameRenderStats {
@@ -815,6 +832,10 @@ impl FrameRenderStats {
             ("X-Tellur-Height", self.resolution.height.to_string()),
             ("X-Tellur-Cache-Hits", self.cache_hits.to_string()),
             ("X-Tellur-Cache-Misses", self.cache_misses.to_string()),
+            ("X-Tellur-GPU-Available", self.gpu_available.to_string()),
+            ("X-Tellur-GPU-Active", (self.gpu_ops > 0).to_string()),
+            ("X-Tellur-GPU-Ops", self.gpu_ops.to_string()),
+            ("X-Tellur-GPU-Readbacks", self.gpu_readbacks.to_string()),
         ]
     }
 }
@@ -843,7 +864,7 @@ impl FrameFormat {
 
 fn log_frame_stats(stats: &FrameRenderStats) {
     println!(
-        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={}",
+        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
         stats.timeline_id,
         stats.seconds,
         stats.resolution.width,
@@ -856,6 +877,9 @@ fn log_frame_stats(stats: &FrameRenderStats) {
         stats.cache_hits,
         stats.cache_misses,
         format_bytes(stats.bytes_cached as u64),
+        stats.gpu_available,
+        stats.gpu_ops,
+        stats.gpu_readbacks,
     );
 }
 

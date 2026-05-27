@@ -355,6 +355,7 @@ fn add_fx_rect(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_fx_outline_rect(
     scene: &mut VectorLayer,
     center: Vec2,
@@ -1241,7 +1242,7 @@ fn draw_scan<T: Time>(scene: &mut VectorLayer, time: T, p: Palette) {
     const ANGLE_LABELS: [&str; 12] = [
         "000", "030", "060", "090", "120", "150", "180", "210", "240", "270", "300", "330",
     ];
-    for i in 0..12 {
+    for (i, label) in ANGLE_LABELS.iter().enumerate() {
         let a = i as f32 / 12.0 * TAU - PI * 0.5;
         let stagger = i as f32 * 0.025;
         let tk = ease_out_cubic(time.phase(3.85 + stagger, 4.3 + stagger));
@@ -1280,7 +1281,7 @@ fn draw_scan<T: Time>(scene: &mut VectorLayer, time: T, p: Palette) {
                     scene,
                     Vec2(CX + a.cos() * label_r, CY + a.sin() * label_r),
                     Anchor::CENTER,
-                    ANGLE_LABELS[i],
+                    label,
                     11.0,
                     alpha(p.paper, label_alpha * 0.7),
                     Weight::NORMAL,
@@ -1601,7 +1602,7 @@ fn draw_resolve<T: Time>(scene: &mut VectorLayer, time: T, p: Palette) {
     // a dim outer field ring with hash marks. All keyed to a slow
     // post-settle rotation shared with the satellites.
 
-    let comp_in = ease_out_cubic(time.phase(6.28, 6.7));
+    let comp_in = ease_out_cubic(time.phase(6.27, 6.7));
     if comp_in > 0.0 {
         let breath = 1.0 + wave(time, 1.4, 0.0) * 0.06;
 

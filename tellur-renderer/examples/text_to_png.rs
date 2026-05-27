@@ -53,5 +53,5 @@ fn main() {
     let out = "/tmp/text.png";
     let file = File::create(out).expect("create output file");
     image.export_png(file).expect("export PNG");
-    println!("Wrote {} ({}x{})", out, image.width, image.height);
+    println!("Wrote {} ({}x{})", out, image.width(), image.height());
 }

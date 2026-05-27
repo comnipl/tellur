@@ -1,3 +1,4 @@
+pub mod gpu;
 pub mod outline;
 pub mod rasterize;
 pub mod render_context;

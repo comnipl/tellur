@@ -8,13 +8,12 @@
 
 use std::hash::{Hash, Hasher};
 
-use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
 use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
-use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
-use tellur_core::render_context::RenderContext;
+use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::render_context::{DropShadowInput, RenderContext};
 
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
@@ -86,6 +85,7 @@ impl RasterComponent for DropShadow {
         }
         let sx = target.width as f32 / paint.size.0;
         let sy = target.height as f32 / paint.size.1;
+        let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
 
         // Render the child through the context so its output is memoized
         // independently of the shadow — that's the key win for static
@@ -98,20 +98,7 @@ impl RasterComponent for DropShadow {
             Resolution::new(child_px_w, child_px_h),
         );
 
-        // Build a padded shadow image whose alpha is a blurred copy of
-        // the child's alpha, tinted with `color`. Padding equals the
-        // 3-pass box-blur extent (3 * radius) so the shadow can spread
-        // beyond the child's own bounds.
         let blur_px = (self.blur * sx.max(sy)).round().max(0.0) as u32;
-        let shadow_image = make_shadow(&child_image, blur_px, self.color);
-
-        // Composite shadow then child into a buffer covering `paint`.
-        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
-
-        // Position the shadow's top-left in the output buffer. The
-        // shadow image's local origin corresponds to
-        // `(child_paint.origin + offset - pad)` in our paint-bounds
-        // coordinate space, where `pad` is the 3-pass extent in pixels.
         let pad_px = blur_px as f32 * BLUR_EXTENT_MULTIPLIER;
         let pad_lu_x = pad_px / sx;
         let pad_lu_y = pad_px / sy;
@@ -119,35 +106,60 @@ impl RasterComponent for DropShadow {
         let shadow_local_y = (child_paint.origin.1 + self.offset.1 - pad_lu_y) - paint.origin.1;
         let shadow_px_x = (shadow_local_x * sx).round() as i32;
         let shadow_px_y = (shadow_local_y * sy).round() as i32;
-        composite_at(&mut accum, target, &shadow_image, shadow_px_x, shadow_px_y);
-
-        // Position the child relative to the paint-bounds origin.
         let child_local_x = child_paint.origin.0 - paint.origin.0;
         let child_local_y = child_paint.origin.1 - paint.origin.1;
         let child_px_x = (child_local_x * sx).round() as i32;
         let child_px_y = (child_local_y * sy).round() as i32;
+
+        if gpu_available {
+            let input = DropShadowInput {
+                child: &child_image,
+                target,
+                child_offset_x: child_px_x,
+                child_offset_y: child_px_y,
+                shadow_offset_x: shadow_px_x,
+                shadow_offset_y: shadow_px_y,
+                blur_radius: blur_px,
+                color: self.color,
+            };
+            if let Some(gpu) = ctx.gpu_backend() {
+                if let Some(image) = gpu.drop_shadow(input) {
+                    return image;
+                }
+            }
+        }
+
+        let child_image = ctx.readback(child_image);
+
+        // Build a padded shadow image whose alpha is a blurred copy of
+        // the child's alpha, tinted with `color`. Padding equals the
+        // 3-pass box-blur extent (3 * radius) so the shadow can spread
+        // beyond the child's own bounds.
+        let shadow_image = make_shadow(&child_image, blur_px, self.color);
+
+        // Composite shadow then child into a buffer covering `paint`.
+        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
+
+        composite_at(&mut accum, target, &shadow_image, shadow_px_x, shadow_px_y);
+
+        // Position the child relative to the paint-bounds origin.
         composite_at(&mut accum, target, &child_image, child_px_x, child_px_y);
 
-        RasterImage {
-            width: target.width,
-            height: target.height,
-            format: PixelFormat::Rgba8,
-            pixels: Bytes::from(accum),
-        }
+        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
     }
 }
 
 fn blank_image(target: Resolution) -> RasterImage {
     let bytes = (target.width as usize) * (target.height as usize) * 4;
-    RasterImage {
-        width: target.width,
-        height: target.height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(vec![0u8; bytes]),
-    }
+    RasterImage::cpu(
+        target.width,
+        target.height,
+        PixelFormat::Rgba8,
+        vec![0u8; bytes],
+    )
 }
 
-fn make_shadow(image: &RasterImage, blur_radius: u32, color: Color) -> RasterImage {
+fn make_shadow(image: &CpuRasterImage, blur_radius: u32, color: Color) -> CpuRasterImage {
     assert_eq!(image.format, PixelFormat::Rgba8);
     let pad = (blur_radius as f32 * BLUR_EXTENT_MULTIPLIER).round() as usize;
     let in_w = image.width as usize;
@@ -185,12 +197,7 @@ fn make_shadow(image: &RasterImage, blur_radius: u32, color: Color) -> RasterIma
         out.push(a);
     }
 
-    RasterImage {
-        width: out_w as u32,
-        height: out_h as u32,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(out),
-    }
+    CpuRasterImage::new(out_w as u32, out_h as u32, PixelFormat::Rgba8, out)
 }
 
 fn box_blur_3pass(buf: &mut [u8], w: usize, h: usize, radius: usize) {

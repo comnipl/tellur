@@ -19,13 +19,11 @@
 //! source-over compositing it onto the output at the corresponding pixel
 //! offset.
 
-use bytes::Bytes;
-
 use crate::composite::composite_at;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::Placed;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
-use crate::render_context::RenderContext;
+use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
 #[derive(PartialEq, Hash)]
@@ -247,12 +245,48 @@ pub(crate) fn composite_children(
     placed: &[(Vec2, Vec2, &dyn RasterComponent)],
     ctx: &mut dyn RenderContext,
 ) -> RasterImage {
-    let pixel_count = (target.width as usize) * (target.height as usize);
-    let mut accum = vec![0u8; pixel_count * 4];
-
     let scale_x = target.width as f32 / paint_rect.size.0;
     let scale_y = target.height as f32 / paint_rect.size.1;
+    let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
 
+    if gpu_available {
+        let mut rendered = Vec::with_capacity(placed.len());
+        for (position, child_size, child) in placed {
+            let bounds = child.paint_bounds(*child_size);
+            let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
+            let child_px_h = (bounds.size.1 * scale_y).round().max(1.0) as u32;
+            let paint_x = position.0 + bounds.origin.0 - paint_rect.origin.0;
+            let paint_y = position.1 + bounds.origin.1 - paint_rect.origin.1;
+            let offset_x = (paint_x * scale_x).round() as i32;
+            let offset_y = (paint_y * scale_y).round() as i32;
+            let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
+            rendered.push((image, offset_x, offset_y));
+        }
+
+        let inputs: Vec<CompositeInput<'_>> = rendered
+            .iter()
+            .map(|(image, offset_x, offset_y)| CompositeInput {
+                image,
+                offset_x: *offset_x,
+                offset_y: *offset_y,
+            })
+            .collect();
+        if let Some(gpu) = ctx.gpu_backend() {
+            if let Some(image) = gpu.composite(target, &inputs) {
+                return image;
+            }
+        }
+
+        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
+        for (image, offset_x, offset_y) in rendered {
+            let image = ctx.readback(image);
+            composite_at(&mut accum, target, &image, offset_x, offset_y);
+        }
+
+        return RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum);
+    }
+
+    let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
     for (position, child_size, child) in placed {
         let bounds = child.paint_bounds(*child_size);
         let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
@@ -265,15 +299,11 @@ pub(crate) fn composite_children(
         // Route the child render through the context so cache lookups
         // can intercept it before the underlying `render` runs.
         let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
+        let image = ctx.readback(image);
         composite_at(&mut accum, target, &image, offset_x, offset_y);
     }
 
-    RasterImage {
-        width: target.width,
-        height: target.height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(accum),
-    }
+    RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
 }
 
 /// Smallest axis-aligned rectangle containing both `a` and `b`.

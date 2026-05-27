@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use tellur_core::raster::{PixelFormat, Resolution};
+use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use thiserror::Error;
@@ -221,6 +222,7 @@ impl FfmpegEncoder {
 
                 let build_start = Instant::now();
                 let image = tl.build(t, self.resolution, &mut ctx);
+                let image = ctx.readback(image);
                 build_time += build_start.elapsed();
 
                 if image.format != PixelFormat::Rgba8 {

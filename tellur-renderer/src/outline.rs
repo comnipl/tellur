@@ -10,13 +10,12 @@
 
 use std::hash::{Hash, Hasher};
 
-use bytes::Bytes;
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
 use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
-use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
-use tellur_core::render_context::RenderContext;
+use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::render_context::{OutlineInput, RenderContext};
 
 pub struct Outline {
     /// Stroke width on the outside of the child, in logical units.
@@ -64,6 +63,7 @@ impl RasterComponent for Outline {
         }
         let sx = target.width as f32 / paint.size.0;
         let sy = target.height as f32 / paint.size.1;
+        let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
 
         // Render the child through the context so its output is memoized
         // independently of the outline — matches the shadow component's
@@ -85,9 +85,6 @@ impl RasterComponent for Outline {
         // past the buffer edge and get clipped.
         let width_px_x = (self.width.max(0.0) * sx).round() as u32;
         let width_px_y = (self.width.max(0.0) * sy).round() as u32;
-        let outline_image = make_outline(&child_image, width_px_x, width_px_y, self.color);
-
-        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
 
         let pad_lu_x = width_px_x as f32 / sx;
         let pad_lu_y = width_px_y as f32 / sy;
@@ -95,6 +92,35 @@ impl RasterComponent for Outline {
         let outline_local_y = (child_paint.origin.1 - pad_lu_y) - paint.origin.1;
         let outline_px_x = (outline_local_x * sx).round() as i32;
         let outline_px_y = (outline_local_y * sy).round() as i32;
+        let child_local_x = child_paint.origin.0 - paint.origin.0;
+        let child_local_y = child_paint.origin.1 - paint.origin.1;
+        let child_px_x = (child_local_x * sx).round() as i32;
+        let child_px_y = (child_local_y * sy).round() as i32;
+
+        if gpu_available {
+            let input = OutlineInput {
+                child: &child_image,
+                target,
+                child_offset_x: child_px_x,
+                child_offset_y: child_px_y,
+                outline_offset_x: outline_px_x,
+                outline_offset_y: outline_px_y,
+                radius_x: width_px_x,
+                radius_y: width_px_y,
+                color: self.color,
+            };
+            if let Some(gpu) = ctx.gpu_backend() {
+                if let Some(image) = gpu.outline(input) {
+                    return image;
+                }
+            }
+        }
+
+        let child_image = ctx.readback(child_image);
+        let outline_image = make_outline(&child_image, width_px_x, width_px_y, self.color);
+
+        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
+
         composite_at(
             &mut accum,
             target,
@@ -103,37 +129,28 @@ impl RasterComponent for Outline {
             outline_px_y,
         );
 
-        let child_local_x = child_paint.origin.0 - paint.origin.0;
-        let child_local_y = child_paint.origin.1 - paint.origin.1;
-        let child_px_x = (child_local_x * sx).round() as i32;
-        let child_px_y = (child_local_y * sy).round() as i32;
         composite_at(&mut accum, target, &child_image, child_px_x, child_px_y);
 
-        RasterImage {
-            width: target.width,
-            height: target.height,
-            format: PixelFormat::Rgba8,
-            pixels: Bytes::from(accum),
-        }
+        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
     }
 }
 
 fn blank_image(target: Resolution) -> RasterImage {
     let bytes = (target.width as usize) * (target.height as usize) * 4;
-    RasterImage {
-        width: target.width,
-        height: target.height,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(vec![0u8; bytes]),
-    }
+    RasterImage::cpu(
+        target.width,
+        target.height,
+        PixelFormat::Rgba8,
+        vec![0u8; bytes],
+    )
 }
 
 fn make_outline(
-    image: &RasterImage,
+    image: &CpuRasterImage,
     width_px_x: u32,
     width_px_y: u32,
     color: Color,
-) -> RasterImage {
+) -> CpuRasterImage {
     assert_eq!(image.format, PixelFormat::Rgba8);
     let pad_x = width_px_x as usize;
     let pad_y = width_px_y as usize;
@@ -181,12 +198,7 @@ fn make_outline(
         out.push(a);
     }
 
-    RasterImage {
-        width: out_w as u32,
-        height: out_h as u32,
-        format: PixelFormat::Rgba8,
-        pixels: Bytes::from(out),
-    }
+    CpuRasterImage::new(out_w as u32, out_h as u32, PixelFormat::Rgba8, out)
 }
 
 /// Morphological dilation by an axis-aligned ellipse with semi-axes
