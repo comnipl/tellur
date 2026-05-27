@@ -287,11 +287,9 @@ impl GpuRenderer {
             &self.device,
             encoder,
             &self.composite_pipeline,
-            &dst.buffer,
-            &src.buffer,
+            [&dst.buffer, &src.buffer],
             &params,
-            src.width,
-            src.height,
+            DispatchSize::new(src.width, src.height),
         );
     }
 
@@ -317,11 +315,9 @@ impl GpuRenderer {
             &self.device,
             encoder,
             &self.copy_alpha_pipeline,
-            &src.buffer,
-            &alpha.buffer,
+            [&src.buffer, &alpha.buffer],
             &params,
-            alpha.width,
-            alpha.height,
+            DispatchSize::new(alpha.width, alpha.height),
         );
     }
 
@@ -359,11 +355,9 @@ impl GpuRenderer {
             &self.device,
             encoder,
             &self.blur_pipeline,
-            &src.buffer,
-            &dst.buffer,
+            [&src.buffer, &dst.buffer],
             &params,
-            src.width,
-            src.height,
+            DispatchSize::new(src.width, src.height),
         );
     }
 
@@ -395,11 +389,9 @@ impl GpuRenderer {
             &self.device,
             encoder,
             &self.shadow_pipeline,
-            &dst.buffer,
-            &alpha.buffer,
+            [&dst.buffer, &alpha.buffer],
             &params,
-            alpha.width,
-            alpha.height,
+            DispatchSize::new(alpha.width, alpha.height),
         );
     }
 
@@ -408,10 +400,8 @@ impl GpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         dst: &GpuBufferImage,
         alpha: &GpuBufferImage,
-        offset_x: i32,
-        offset_y: i32,
-        radius_x: u32,
-        radius_y: u32,
+        offset: (i32, i32),
+        radius: (u32, u32),
         color: Color,
     ) {
         let [r, g, b, a] = color_u8(color);
@@ -420,24 +410,22 @@ impl GpuRenderer {
             dst_h: dst.height,
             src_w: alpha.width,
             src_h: alpha.height,
-            offset_x,
-            offset_y,
+            offset_x: offset.0,
+            offset_y: offset.1,
             r,
             g,
             b,
             a,
-            radius_x,
-            radius_y,
+            radius_x: radius.0,
+            radius_y: radius.1,
         };
         dispatch_three_buffer(
             &self.device,
             encoder,
             &self.outline_pipeline,
-            &dst.buffer,
-            &alpha.buffer,
+            [&dst.buffer, &alpha.buffer],
             &params,
-            alpha.width,
-            alpha.height,
+            DispatchSize::new(alpha.width, alpha.height),
         );
     }
 
@@ -637,10 +625,8 @@ impl GpuRasterBackend for GpuRenderer {
             &mut encoder,
             &target,
             &alpha,
-            input.outline_offset_x,
-            input.outline_offset_y,
-            input.radius_x,
-            input.radius_y,
+            (input.outline_offset_x, input.outline_offset_y),
+            (input.radius_x, input.radius_y),
             input.color,
         );
         self.composite_one(
@@ -739,15 +725,25 @@ fn create_vello_renderer(device: &wgpu::Device) -> Option<vello::Renderer> {
     .ok()
 }
 
+#[derive(Clone, Copy)]
+struct DispatchSize {
+    width: u32,
+    height: u32,
+}
+
+impl DispatchSize {
+    fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
 fn dispatch_three_buffer<P: bytemuck::Pod>(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,
-    a: &wgpu::Buffer,
-    b: &wgpu::Buffer,
+    buffers: [&wgpu::Buffer; 2],
     params: &P,
-    width: u32,
-    height: u32,
+    size: DispatchSize,
 ) {
     let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("tellur-gpu-params"),
@@ -761,11 +757,11 @@ fn dispatch_three_buffer<P: bytemuck::Pod>(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: a.as_entire_binding(),
+                resource: buffers[0].as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: b.as_entire_binding(),
+                resource: buffers[1].as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -780,7 +776,11 @@ fn dispatch_three_buffer<P: bytemuck::Pod>(
     });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, &bind_group, &[]);
-    pass.dispatch_workgroups(div_ceil(width, WORKGROUP), div_ceil(height, WORKGROUP), 1);
+    pass.dispatch_workgroups(
+        div_ceil(size.width, WORKGROUP),
+        div_ceil(size.height, WORKGROUP),
+        1,
+    );
 }
 
 fn div_ceil(n: u32, d: u32) -> u32 {
@@ -1471,7 +1471,8 @@ mod tests {
         let rendered =
             GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
         let rendered = readback(&mut gpu, rendered);
-        let center = &rendered.pixels[((1 * 4 + 1) * 4)..((1 * 4 + 2) * 4)];
+        let center_idx = (rendered.width as usize + 1) * 4;
+        let center = &rendered.pixels[center_idx..center_idx + 4];
 
         assert_eq!(center, &[80, 40, 20, 128]);
     }
