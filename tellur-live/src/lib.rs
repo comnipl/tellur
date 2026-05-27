@@ -1,6 +1,8 @@
+pub mod build_watch;
 pub mod plugin;
 pub mod server;
 
+pub use build_watch::{AutoBuildOptions, CompileSnapshot, CompileState, CompileStatus};
 pub use plugin::{
     single_timeline, HotReloadPlugin, PluginLoadError, SingleTimeline, TimelineCollection,
     TimelineInfo,

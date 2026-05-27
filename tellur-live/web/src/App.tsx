@@ -20,6 +20,7 @@ const FALLBACK_TIMELINE: TimelineInfo = {
   title: "Demo Timeline",
   duration: 150,
 };
+const INFO_POLL_MS = 200;
 
 export function App() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
@@ -51,7 +52,7 @@ export function App() {
       } catch (e) {
         if (!cancelled) setLoadError(String(e));
       } finally {
-        if (!cancelled) timer = setTimeout(tick, 1000);
+        if (!cancelled) timer = setTimeout(tick, INFO_POLL_MS);
       }
     };
     tick();
@@ -114,7 +115,12 @@ export function App() {
 
   return (
     <div className="app">
-      <Header projectName="Project Name" url={url} />
+      <Header
+        projectName="Project Name"
+        url={url}
+        compileStatus={info?.compileStatus ?? "compiled"}
+        compileError={info?.compileError ?? null}
+      />
       <div className="workspace">
         <section className="viewer-panel">
           <Preview

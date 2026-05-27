@@ -14,9 +14,10 @@ export interface FrameRequestParams {
   width: number;
   height: number;
   fps: number;
+  cacheKey: string;
 }
 
-export function frameUrl(params: FrameRequestParams, token: number): string {
+export function frameUrl(params: FrameRequestParams): string {
   const query = new URLSearchParams({
     timeline: params.timelineId,
     time: params.time.toFixed(4),
@@ -24,7 +25,7 @@ export function frameUrl(params: FrameRequestParams, token: number): string {
     height: String(params.height),
     fps: String(params.fps),
     format: "png",
-    _: String(token),
+    v: params.cacheKey,
   });
   return `/api/frame?${query}`;
 }
@@ -34,7 +35,7 @@ export interface VideoRequestParams extends FrameRequestParams {
   crf: number;
 }
 
-export function videoUrl(params: VideoRequestParams, token: number): string {
+export function videoUrl(params: VideoRequestParams): string {
   const query = new URLSearchParams({
     timeline: params.timelineId,
     time: params.time.toFixed(4),
@@ -43,7 +44,7 @@ export function videoUrl(params: VideoRequestParams, token: number): string {
     fps: String(params.fps),
     gop: String(params.gop),
     crf: String(params.crf),
-    _: String(token),
+    v: params.cacheKey,
   });
   return `/api/video.mp4?${query}`;
 }

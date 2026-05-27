@@ -25,20 +25,21 @@ tellur_live::export_timeline!("main", "Main", build_timeline);
 The bundled demo plugin can be built with:
 
 ```sh
-cargo build -p tellur-live --example demo_timeline_plugin
+cargo build --release -p tellur-live --example demo_timeline_plugin
 ```
 
 Cargo writes it to:
 
 ```text
-target/debug/examples/libdemo_timeline_plugin.so
+target/release/examples/libdemo_timeline_plugin.so
 ```
 
 ## Run the Preview Host
 
 ```sh
 cargo run -p tellur-live -- serve \
-  --plugin target/debug/examples/libdemo_timeline_plugin.so \
+  -p tellur-live \
+  --example demo_timeline_plugin \
   --host 127.0.0.1 \
   --port 4317 \
   --size 1280x720 \
@@ -50,6 +51,29 @@ Use `--host 0.0.0.0` when the preview server should be reachable from other
 devices on the network.
 Pass `--verbose` to print per-frame timing and cache statistics to stdout.
 
+Passing `-p <package> --example <example>` makes `tellur-live` infer the release
+cdylib path (`target/release/examples/lib<example>.so`) and run
+`cargo build --release -p <package> --example <example>` when watched source
+files change. `--examples` is accepted as an alias for `--example`.
+
+```sh
+cargo run -p tellur-live -- serve \
+  -p tellur-live \
+  --examples demo_timeline_plugin
+```
+
+By default, watch paths are inferred from the package: its `Cargo.toml`, `src`,
+the selected example file, the workspace lockfile/manifest, and local `path`
+dependencies. Use `--plugin <path>` or repeated `--watch-path <path>` arguments
+to override those inferred values.
+
+When a release build succeeds and the cdylib contents change, `tellur-live`
+reloads the plugin, clears the server render cache, and publishes a new
+`cacheKey` to the browser. The browser uses that key in image/video URLs and in
+its saved green cache ranges, so old media cache state is revoked only after a
+successful cdylib update. Failed builds leave the previous plugin and cache key
+in place.
+
 The browser UI is intentionally a thin validation client. It requests
 coalesced PNG frames for still previews and seeking, and fragmented MP4/H.264
 for playback. The Size and FPS controls lower the request resolution and frame
@@ -59,8 +83,9 @@ button can reuse already-buffered video data.
 
 ## HTTP Endpoints
 
-- `GET /api/info` returns resolution, fps, hot-reload errors, and timeline
-  metadata.
+- `GET /api/info` returns resolution, fps, the current media `cacheKey`,
+  compile status (`compiled`, `compiling`, or `failed`), hot-reload errors, and
+  timeline metadata.
 - `GET /api/frame?time=1.25&timeline=main` returns one PNG frame.
 - `GET /api/frame?frame=42&timeline=main` returns one PNG frame by frame index.
 - `GET /api/frame?time=1.25&timeline=main&format=rgba` returns raw RGBA8 bytes

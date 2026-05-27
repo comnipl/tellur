@@ -8,6 +8,7 @@ use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -154,10 +155,22 @@ impl From<std::io::Error> for PluginLoadError {
 struct SourceStamp {
     modified: SystemTime,
     len: u64,
+    hash: u64,
+}
+
+impl SourceStamp {
+    fn cache_key(self) -> String {
+        format!("{:016x}-{:x}", self.hash, self.len)
+    }
+
+    fn same_content(self, other: Self) -> bool {
+        self.len == other.len && self.hash == other.hash
+    }
 }
 
 struct LoadedPlugin {
     stamp: SourceStamp,
+    cache_key: String,
     staged_path: PathBuf,
     collection: Box<dyn TimelineCollection>,
     library: DynamicLibrary,
@@ -192,6 +205,10 @@ impl HotReloadPlugin {
             .map(|loaded| loaded.staged_path.as_path())
     }
 
+    pub fn cache_key(&self) -> Option<&str> {
+        self.loaded.as_ref().map(|loaded| loaded.cache_key.as_str())
+    }
+
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
@@ -201,7 +218,7 @@ impl HotReloadPlugin {
         let changed = self
             .loaded
             .as_ref()
-            .map(|loaded| loaded.stamp != stamp)
+            .map(|loaded| !loaded.stamp.same_content(stamp))
             .unwrap_or(true);
 
         if !changed {
@@ -238,6 +255,7 @@ fn source_stamp(path: &Path) -> Result<SourceStamp, PluginLoadError> {
     Ok(SourceStamp {
         modified: metadata.modified()?,
         len: metadata.len(),
+        hash: file_hash(path)?,
     })
 }
 
@@ -248,6 +266,7 @@ fn load_plugin(path: &Path, stamp: SourceStamp) -> Result<LoadedPlugin, PluginLo
     let collection = unsafe { entry() };
     Ok(LoadedPlugin {
         stamp,
+        cache_key: stamp.cache_key(),
         staged_path,
         collection,
         library,
@@ -270,10 +289,33 @@ fn stage_library(path: &Path, stamp: SourceStamp) -> Result<PathBuf, PluginLoadE
         .as_nanos();
     let dir = std::env::temp_dir().join("tellur-live");
     fs::create_dir_all(&dir)?;
-    let staged = dir.join(format!("{stem}-{modified}-{}.{}", stamp.len, ext));
+    let staged = dir.join(format!(
+        "{stem}-{modified}-{}-{:016x}.{ext}",
+        stamp.len, stamp.hash
+    ));
     fs::copy(path, &staged)?;
     Ok(staged)
 }
+
+fn file_hash(path: &Path) -> Result<u64, PluginLoadError> {
+    let mut file = fs::File::open(path)?;
+    let mut hash = FNV_OFFSET;
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        for byte in &buf[..n] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    Ok(hash)
+}
+
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
 
 struct DynamicLibrary {
     handle: *mut c_void,

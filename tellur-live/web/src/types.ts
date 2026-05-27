@@ -9,6 +9,9 @@ export interface ServerInfo {
   height: number;
   fps: number;
   lastError: string | null;
+  cacheKey: string;
+  compileStatus: "compiled" | "compiling" | "failed";
+  compileError: string | null;
   timelines: TimelineInfo[];
 }
 

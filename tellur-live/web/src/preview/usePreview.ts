@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { frameUrl, videoUrl } from "../api";
-import { mergeCacheRange } from "../cache";
+import {
+  cacheScopeKey,
+  loadCacheRanges,
+  mergeCacheRange,
+  revokeStaleCacheRanges,
+  saveCacheRanges,
+} from "../cache";
 import type { CacheRange, ServerInfo, TimelineInfo } from "../types";
 
 const PRELOAD_DELAY_MS = 260;
@@ -37,6 +43,12 @@ export interface PreviewSettings {
 // the timeline ruler.
 export function usePreview(settings: PreviewSettings): PreviewControls {
   const { info, timeline, scale, fps } = settings;
+  const hasServerInfo = info != null;
+  const timelineId = timeline?.id ?? "";
+  const timelineDuration = timeline?.duration ?? 0;
+  const sourceWidth = info?.width ?? 1;
+  const sourceHeight = info?.height ?? 1;
+  const pluginCacheKey = info?.cacheKey ?? "";
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -60,24 +72,41 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const playbackTokenRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const videoBaseSecondsRef = useRef(0);
+  const cacheScopeRef = useRef("");
+  const lastCacheKeyRef = useRef("");
+  const immediatePreloadRef = useRef(false);
 
   const resolvedResolution = useCallback(() => {
-    if (!info) return { width: 1, height: 1 };
     const s = Math.max(scale, 0.01);
     return {
-      width: Math.max(1, Math.round(info.width * s)),
-      height: Math.max(1, Math.round(info.height * s)),
+      width: Math.max(1, Math.round(sourceWidth * s)),
+      height: Math.max(1, Math.round(sourceHeight * s)),
     };
-  }, [info, scale]);
+  }, [sourceWidth, sourceHeight, scale]);
 
   const videoGop = useCallback(() => Math.max(1, Math.floor(fps / 4)), [fps]);
 
+  const currentCacheScope = useCallback((): string => {
+    if (!timelineId || !pluginCacheKey) return "";
+    const r = resolvedResolution();
+    return cacheScopeKey({
+      cacheKey: pluginCacheKey,
+      timelineId,
+      width: r.width,
+      height: r.height,
+      fps,
+      gop: videoGop(),
+      crf: 23,
+    });
+  }, [timelineId, pluginCacheKey, resolvedResolution, fps, videoGop]);
+
   const videoKey = useCallback(
     (t: number): string => {
-      if (!timeline || !info) return "";
+      if (!timelineId || !pluginCacheKey) return "";
       const r = resolvedResolution();
       return [
-        timeline.id,
+        pluginCacheKey,
+        timelineId,
         t.toFixed(4),
         `${r.width}x${r.height}`,
         String(fps),
@@ -85,7 +114,26 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         "23",
       ].join("|");
     },
-    [timeline, info, fps, resolvedResolution, videoGop],
+    [timelineId, pluginCacheKey, fps, resolvedResolution, videoGop],
+  );
+
+  const recordCacheRanges = useCallback((ranges: CacheRange[]) => {
+    if (ranges.length === 0) return;
+    setCacheRanges((prev) => {
+      let next = prev;
+      for (const range of ranges) {
+        next = mergeCacheRange(next, range.start, range.end);
+      }
+      saveCacheRanges(cacheScopeRef.current, next);
+      return next;
+    });
+  }, []);
+
+  const recordCacheRange = useCallback(
+    (start: number, end: number) => {
+      recordCacheRanges([{ start, end }]);
+    },
+    [recordCacheRanges],
   );
 
   // Track <video>.buffered.end(0) and merge it into cacheRanges so the
@@ -97,17 +145,15 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     const onProgress = () => {
       if (video.buffered.length === 0) return;
       const base = videoBaseSecondsRef.current;
-      setCacheRanges((prev) => {
-        let next = prev;
-        for (let i = 0; i < video.buffered.length; i++) {
-          const start = video.buffered.start(i);
-          const end = video.buffered.end(i);
-          if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
-            next = mergeCacheRange(next, base + start, base + end);
-          }
+      const ranges: CacheRange[] = [];
+      for (let i = 0; i < video.buffered.length; i++) {
+        const start = video.buffered.start(i);
+        const end = video.buffered.end(i);
+        if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+          ranges.push({ start: base + start, end: base + end });
         }
-        return next;
-      });
+      }
+      recordCacheRanges(ranges);
     };
     video.addEventListener("progress", onProgress);
     video.addEventListener("loadeddata", onProgress);
@@ -115,7 +161,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       video.removeEventListener("progress", onProgress);
       video.removeEventListener("loadeddata", onProgress);
     };
-  }, []);
+  }, [recordCacheRanges]);
 
   const clearVideoPreload = useCallback(() => {
     if (preloadTimerRef.current) {
@@ -143,9 +189,21 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     }
   }, []);
 
+  useEffect(() => {
+    const scope = currentCacheScope();
+    const cacheKeyChanged =
+      Boolean(pluginCacheKey) && lastCacheKeyRef.current !== pluginCacheKey;
+    lastCacheKeyRef.current = pluginCacheKey;
+    immediatePreloadRef.current = cacheKeyChanged;
+    cacheScopeRef.current = scope;
+    setCacheRanges(scope ? loadCacheRanges(scope) : []);
+    revokeStaleCacheRanges(pluginCacheKey);
+    clearVideoPreload();
+  }, [currentCacheScope, pluginCacheKey, clearVideoPreload]);
+
   const requestPngFrame = useCallback(
     (force: boolean = false) => {
-      if (!timeline || !info) return;
+      if (!timelineId || !hasServerInfo || !pluginCacheKey) return;
       if (pendingPngRef.current) {
         queuedPngRef.current = true;
         if (force) displayTokenRef.current += 1;
@@ -158,16 +216,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       const id = ++displayTokenRef.current;
       const pngId = ++pngTokenRef.current;
       const res = resolvedResolution();
-      const url = frameUrl(
-        {
-          timelineId: timeline.id,
-          time: seconds,
-          width: res.width,
-          height: res.height,
-          fps,
-        },
-        id,
-      );
+      const url = frameUrl({
+        timelineId,
+        time: seconds,
+        width: res.width,
+        height: res.height,
+        fps,
+        cacheKey: pluginCacheKey,
+      });
       const img = new Image();
       img.onload = () => {
         if (id === displayTokenRef.current) {
@@ -175,9 +231,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           setImageVisible(true);
           setVideoVisible(false);
           setError(null);
-          setCacheRanges((prev) =>
-            mergeCacheRange(prev, seconds, seconds + 1 / Math.max(fps, 1)),
-          );
+          recordCacheRange(seconds, seconds + 1 / Math.max(fps, 1));
         }
         finish();
       };
@@ -195,23 +249,34 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           queuedPngRef.current = false;
           requestPngFrame(true);
         } else if (!playing) {
-          schedulePreload();
+          const delay = force || immediatePreloadRef.current ? 0 : undefined;
+          immediatePreloadRef.current = false;
+          schedulePreload(delay);
         }
       }
     },
-    [timeline, info, resolvedResolution, seconds, fps, playing],
+    [
+      timelineId,
+      hasServerInfo,
+      pluginCacheKey,
+      resolvedResolution,
+      seconds,
+      fps,
+      playing,
+      recordCacheRange,
+    ],
   );
 
   const schedulePreload = useCallback(
     (delay: number = PRELOAD_DELAY_MS) => {
       if (preloadTimerRef.current) clearTimeout(preloadTimerRef.current);
-      if (!timeline || !info || playing) return;
+      if (!timelineId || !hasServerInfo || !pluginCacheKey || playing) return;
       preloadTimerRef.current = setTimeout(() => {
         const video = videoRef.current;
-        if (!video || !timeline || !info || playing) return;
+        if (!video || !timelineId || !hasServerInfo || !pluginCacheKey || playing) return;
         const key = videoKey(seconds);
         if (key && key === preloadedKeyRef.current && video.src) return;
-        const token = ++preloadTokenRef.current;
+        preloadTokenRef.current += 1;
         preloadedKeyRef.current = key;
         const r = resolvedResolution();
         video.pause();
@@ -219,18 +284,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         video.onerror = null;
         video.onended = null;
         videoBaseSecondsRef.current = seconds;
-        video.src = videoUrl(
-          {
-            timelineId: timeline.id,
-            time: seconds,
-            width: r.width,
-            height: r.height,
-            fps,
-            gop: videoGop(),
-            crf: 23,
-          },
-          token,
-        );
+        video.src = videoUrl({
+          timelineId,
+          time: seconds,
+          width: r.width,
+          height: r.height,
+          fps,
+          gop: videoGop(),
+          crf: 23,
+          cacheKey: pluginCacheKey,
+        });
         try {
           video.load();
         } catch {
@@ -238,12 +301,22 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         }
       }, delay);
     },
-    [timeline, info, playing, videoKey, resolvedResolution, seconds, fps, videoGop],
+    [
+      timelineId,
+      hasServerInfo,
+      pluginCacheKey,
+      playing,
+      videoKey,
+      resolvedResolution,
+      seconds,
+      fps,
+      videoGop,
+    ],
   );
 
   const startVideoPlayback = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !timeline || !info) return;
+    if (!video || !timelineId || !hasServerInfo || !pluginCacheKey) return;
     stopRaf();
     if (preloadTimerRef.current) {
       clearTimeout(preloadTimerRef.current);
@@ -256,18 +329,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     videoBaseSecondsRef.current = startSeconds;
     const key = videoKey(startSeconds);
     const r = resolvedResolution();
-    const url = videoUrl(
-      {
-        timelineId: timeline.id,
-        time: startSeconds,
-        width: r.width,
-        height: r.height,
-        fps,
-        gop: videoGop(),
-        crf: 23,
-      },
-      token,
-    );
+    const url = videoUrl({
+      timelineId,
+      time: startSeconds,
+      width: r.width,
+      height: r.height,
+      fps,
+      gop: videoGop(),
+      crf: 23,
+      cacheKey: pluginCacheKey,
+    });
 
     video.onloadeddata = () => {
       if (token === displayTokenRef.current) {
@@ -281,12 +352,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     video.onended = () => {
       if (token !== displayTokenRef.current) return;
       setPlaying(false);
-      const dur = timeline.duration;
+      const dur = timelineDuration;
       const end = Math.min(startSeconds + video.currentTime, dur);
       setSecondsState(end);
       setVideoVisible(false);
       setImageVisible(true);
-      setCacheRanges((prev) => mergeCacheRange(prev, startSeconds, end));
+      recordCacheRange(startSeconds, end);
     };
 
     if (key !== preloadedKeyRef.current || !video.src || video.error) {
@@ -305,26 +376,48 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       if (playbackToken !== playbackTokenRef.current) return;
       const v = videoRef.current;
       if (!v) return;
-      const dur = timeline.duration;
+      const dur = timelineDuration;
       const next = Math.min(startSeconds + v.currentTime, dur);
       setSecondsState(next);
-      setCacheRanges((prev) => mergeCacheRange(prev, startSeconds, next));
+      recordCacheRange(startSeconds, next);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [timeline, info, seconds, videoKey, resolvedResolution, fps, videoGop, stopRaf]);
+  }, [
+    timelineId,
+    timelineDuration,
+    hasServerInfo,
+    pluginCacheKey,
+    seconds,
+    videoKey,
+    resolvedResolution,
+    fps,
+    videoGop,
+    stopRaf,
+    recordCacheRange,
+  ]);
 
   // Re-render the preview whenever seconds / scale / fps / timeline change
   // and we're not actively playing. During playback the <video> element
   // owns the display, so we skip PNG refetches.
   useEffect(() => {
-    if (!timeline || !info) return;
+    if (!timelineId || !hasServerInfo) return;
     if (playing) return;
     requestPngFrame(true);
     // We deliberately leave requestPngFrame out of deps — it captures
     // seconds and we re-trigger via the explicit dep list below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeline?.id, info?.width, info?.height, scale, fps, seconds, playing]);
+  }, [
+    timelineId,
+    hasServerInfo,
+    info?.width,
+    info?.height,
+    info?.cacheKey,
+    scale,
+    fps,
+    seconds,
+    playing,
+  ]);
 
   // Stop RAF on unmount.
   useEffect(() => () => stopRaf(), [stopRaf]);
@@ -341,7 +434,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   }, [playing, clearVideoPreload, stopRaf]);
 
   const togglePlay = useCallback(() => {
-    if (!timeline || !info) return;
+    if (!timelineId || !hasServerInfo) return;
     if (!playing) {
       setPlaying(true);
       // start playback after state flush
@@ -353,27 +446,36 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       if (video) {
         const end = Math.min(
           playbackStartRef.current + video.currentTime,
-          timeline.duration,
+          timelineDuration,
         );
         setSecondsState(end);
+        recordCacheRange(playbackStartRef.current, end);
         video.pause();
       }
       setVideoVisible(false);
       setImageVisible(true);
     }
-  }, [timeline, info, playing, startVideoPlayback, stopRaf]);
+  }, [
+    timelineId,
+    timelineDuration,
+    hasServerInfo,
+    playing,
+    startVideoPlayback,
+    stopRaf,
+    recordCacheRange,
+  ]);
 
   const stepFrame = useCallback(
     (delta: number) => {
-      if (!timeline) return;
+      if (!timelineId) return;
       const step = 1 / Math.max(fps, 1);
       const next = Math.max(
         0,
-        Math.min(timeline.duration, seconds + delta * step),
+        Math.min(timelineDuration, seconds + delta * step),
       );
       setSeconds(next);
     },
-    [timeline, fps, seconds, setSeconds],
+    [timelineId, timelineDuration, fps, seconds, setSeconds],
   );
 
   const rewindToStart = useCallback(() => {

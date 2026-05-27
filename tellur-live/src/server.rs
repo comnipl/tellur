@@ -15,6 +15,9 @@ use tellur_core::raster::{PixelFormat, RasterImage, Resolution};
 use tellur_core::time::TimelineTime;
 use tellur_renderer::CachingRenderContext;
 
+use crate::build_watch::{
+    run_release_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot, CompileState,
+};
 use crate::plugin::{HotReloadPlugin, TimelineInfo};
 
 #[derive(Debug, Clone)]
@@ -24,6 +27,7 @@ pub struct ServerOptions {
     pub resolution: Resolution,
     pub fps: u32,
     pub verbose: bool,
+    pub auto_build: Option<AutoBuildOptions>,
 }
 
 pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
@@ -31,6 +35,27 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     let local_addr = listener.local_addr()?;
     eprintln!("tellur live listening on http://{local_addr}");
     eprintln!("plugin: {}", options.plugin_path.display());
+    if let Some(auto_build) = &options.auto_build {
+        eprintln!(
+            "auto build: cargo build --release{} --example {}",
+            auto_build
+                .package
+                .as_ref()
+                .map(|package| format!(" -p {package}"))
+                .unwrap_or_default(),
+            auto_build.example
+        );
+        if !options.plugin_path.is_file() {
+            eprintln!("plugin is missing; running initial release build");
+            run_release_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
+        }
+    }
+
+    let compile_state = options
+        .auto_build
+        .clone()
+        .map(start_build_watcher)
+        .unwrap_or_else(CompileState::compiled);
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
@@ -38,12 +63,13 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         resolution: options.resolution,
         fps: options.fps,
         verbose: options.verbose,
+        compile_state,
     }));
     {
         let mut app = app
             .lock()
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
-        app.plugin.reload_if_changed()?;
+        app.reload_plugin_if_changed()?;
     }
 
     for stream in listener.incoming() {
@@ -155,9 +181,30 @@ struct PreviewApp {
     resolution: Resolution,
     fps: u32,
     verbose: bool,
+    compile_state: CompileState,
 }
 
 impl PreviewApp {
+    fn reload_plugin_if_changed(&mut self) -> Result<bool, Box<dyn Error>> {
+        let changed = self.plugin.reload_if_changed()?;
+        if changed {
+            self.ctx.clear();
+            self.ctx.clear_metrics();
+        }
+        Ok(changed)
+    }
+
+    fn media_cache_control(&self, query: &HashMap<String, String>) -> &'static str {
+        if matches!(
+            (query.get("v").map(String::as_str), self.plugin.cache_key()),
+            (Some(requested), Some(current)) if requested == current
+        ) {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-store"
+        }
+    }
+
     fn handle_api(&mut self, stream: TcpStream, request: Request) -> Result<(), Box<dyn Error>> {
         match request.path.as_str() {
             "/api/info" => self.handle_info(stream),
@@ -168,13 +215,16 @@ impl PreviewApp {
     }
 
     fn handle_info(&mut self, mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-        self.plugin.reload_if_changed()?;
+        self.reload_plugin_if_changed()?;
         let timelines = self.plugin.collection()?.timelines();
+        let compile = self.compile_state.snapshot();
         let body = info_json(
             self.resolution,
             self.fps,
             &timelines,
             self.plugin.last_error(),
+            self.plugin.cache_key().unwrap_or(""),
+            &compile,
         );
         write_response(
             &mut stream,
@@ -197,13 +247,14 @@ impl PreviewApp {
                     log_frame_stats(&rendered.stats);
                 }
                 let headers = rendered.stats.headers();
-                write_response_with_headers(
+                write_response_with_headers_and_cache_control(
                     &mut stream,
                     200,
                     "OK",
                     "image/png",
                     &headers,
                     &rendered.body,
+                    self.media_cache_control(query),
                 )
             }
             FrameFormat::Rgba => {
@@ -212,13 +263,14 @@ impl PreviewApp {
                     log_frame_stats(&rendered.stats);
                 }
                 let headers = rendered.stats.headers();
-                write_response_with_headers(
+                write_response_with_headers_and_cache_control(
                     &mut stream,
                     200,
                     "OK",
                     "application/vnd.tellur.rgba",
                     &headers,
                     &rendered.body,
+                    self.media_cache_control(query),
                 )
             }
         }
@@ -419,7 +471,7 @@ impl PreviewApp {
         query: &HashMap<String, String>,
     ) -> Result<RenderedImage, Box<dyn Error>> {
         let total_start = Instant::now();
-        self.plugin.reload_if_changed()?;
+        self.reload_plugin_if_changed()?;
         let timelines = self.plugin.collection()?.timelines();
         let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
             return Err("timeline not found".into());
@@ -476,6 +528,7 @@ struct VideoStreamSetup {
     gop: u32,
     crf: u8,
     start_seconds: f32,
+    cache_control: &'static str,
 }
 
 struct VideoFrame {
@@ -495,7 +548,7 @@ fn handle_video_stream(
         let mut app = app
             .lock()
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
-        app.plugin.reload_if_changed()?;
+        app.reload_plugin_if_changed()?;
         let timelines = app.plugin.collection()?.timelines();
         let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
             return Err("timeline not found".into());
@@ -526,6 +579,7 @@ fn handle_video_stream(
             gop,
             crf,
             start_seconds,
+            cache_control: app.media_cache_control(&query),
         }
     };
 
@@ -537,9 +591,9 @@ fn handle_video_stream(
          X-Tellur-Height: {}\r\n\
          X-Tellur-Fps: {}\r\n\
          X-Tellur-Gop: {}\r\n\
-         Cache-Control: no-store\r\n\
+         Cache-Control: {}\r\n\
          Connection: close\r\n\r\n",
-        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop,
+        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
 
     let mut child = Command::new("ffmpeg")
@@ -905,12 +959,32 @@ fn write_response_with_headers(
     extra_headers: &[(&str, String)],
     body: &[u8],
 ) -> Result<(), Box<dyn Error>> {
+    write_response_with_headers_and_cache_control(
+        stream,
+        status,
+        reason,
+        content_type,
+        extra_headers,
+        body,
+        "no-store",
+    )
+}
+
+fn write_response_with_headers_and_cache_control(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    content_type: &str,
+    extra_headers: &[(&str, String)],
+    body: &[u8],
+    cache_control: &str,
+) -> Result<(), Box<dyn Error>> {
     write!(
         stream,
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
-         Cache-Control: no-store\r\n\
+         Cache-Control: {cache_control}\r\n\
          Connection: close\r\n",
         body.len()
     )?;
@@ -943,6 +1017,8 @@ fn info_json(
     fps: u32,
     timelines: &[TimelineInfo],
     last_error: Option<&str>,
+    cache_key: &str,
+    compile: &CompileSnapshot,
 ) -> String {
     let timelines_json = timelines
         .iter()
@@ -960,9 +1036,20 @@ fn info_json(
         Some(e) => format!("\"{}\"", json_escape(e)),
         None => "null".to_owned(),
     };
+    let compile_error = match compile.last_error.as_deref() {
+        Some(e) => format!("\"{}\"", json_escape(e)),
+        None => "null".to_owned(),
+    };
     format!(
-        "{{\"width\":{},\"height\":{},\"fps\":{},\"lastError\":{},\"timelines\":[{}]}}",
-        resolution.width, resolution.height, fps, last_error, timelines_json
+        "{{\"width\":{},\"height\":{},\"fps\":{},\"lastError\":{},\"cacheKey\":\"{}\",\"compileStatus\":\"{}\",\"compileError\":{},\"timelines\":[{}]}}",
+        resolution.width,
+        resolution.height,
+        fps,
+        last_error,
+        json_escape(cache_key),
+        compile.status.as_str(),
+        compile_error,
+        timelines_json
     )
 }
 

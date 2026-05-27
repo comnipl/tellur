@@ -1,11 +1,27 @@
-import { AreaChart } from "lucide-react";
+import {
+  AreaChart,
+  CircleCheck,
+  LoaderCircle,
+  TriangleAlert,
+} from "lucide-react";
+import type { ServerInfo } from "../types";
 
 interface HeaderProps {
   projectName: string;
   url: string;
+  compileStatus: ServerInfo["compileStatus"];
+  compileError: string | null;
 }
 
-export function Header({ projectName, url }: HeaderProps) {
+export function Header({
+  projectName,
+  url,
+  compileStatus,
+  compileError,
+}: HeaderProps) {
+  const status = compileStatusView(compileStatus);
+  const Icon = status.Icon;
+
   return (
     <header className="header">
       <span className="header__logo">
@@ -21,8 +37,31 @@ export function Header({ projectName, url }: HeaderProps) {
         <span className="header__project-name">{projectName}</span>
         <span className="header__project-divider">—</span>
         <span className="header__project-url">{url}</span>
+        <span
+          className={`header__compile header__compile--${compileStatus}`}
+          title={compileError ?? status.label}
+        >
+          <Icon
+            className="header__compile-icon"
+            size={13}
+            strokeWidth={2.2}
+            aria-hidden="true"
+          />
+          <span>{status.label}</span>
+        </span>
       </span>
       <span className="header__spacer" />
     </header>
   );
+}
+
+function compileStatusView(status: ServerInfo["compileStatus"]) {
+  switch (status) {
+    case "compiling":
+      return { label: "Compiling...", Icon: LoaderCircle };
+    case "failed":
+      return { label: "Failed", Icon: TriangleAlert };
+    case "compiled":
+      return { label: "Compiled", Icon: CircleCheck };
+  }
 }
