@@ -42,7 +42,6 @@ cargo run -p tellur-live -- serve \
   --example demo_timeline_plugin \
   --host 127.0.0.1 \
   --port 4317 \
-  --size 1280x720 \
   --fps 30
 ```
 
@@ -85,7 +84,9 @@ three seconds from the current position.
 The browser UI is intentionally a thin validation client. It requests
 coalesced PNG frames for still previews and seeking, and fragmented MP4/H.264
 for playback. The Size and FPS controls lower the request resolution and frame
-rate when full-resolution playback is too expensive. While idle, the client
+rate when full-resolution playback is too expensive. The Size control sends an
+explicit `width` and `height` selected from browser presets, including low,
+HD, 4K, and vertical variants. While idle, the client
 preloads the beginning of the MP4 stream for the current position so the play
 button can reuse already-buffered video data.
 

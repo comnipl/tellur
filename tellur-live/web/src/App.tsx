@@ -14,7 +14,7 @@ import {
   type TimelineViewport,
   type TimelineViewportChange,
 } from "./timelineViewport";
-import type { ServerInfo, TimelineInfo } from "./types";
+import type { PreviewResolution, ServerInfo, TimelineInfo } from "./types";
 
 const FALLBACK_TIMELINE: TimelineInfo = {
   id: "demo",
@@ -23,11 +23,31 @@ const FALLBACK_TIMELINE: TimelineInfo = {
 };
 const INFO_FALLBACK_POLL_MS = 2000;
 const LEGACY_CACHE_RELOAD_KEY = "tellur-live:legacy-cache-reloaded";
+const DEFAULT_PREVIEW_RESOLUTION: PreviewResolution = {
+  width: 1280,
+  height: 720,
+};
+const PREVIEW_RESOLUTION_OPTIONS = [
+  { width: 3840, height: 2160, label: "3840 × 2160" },
+  { width: 1920, height: 1080, label: "1920 × 1080" },
+  { width: 1280, height: 720, label: "1280 × 720" },
+  { width: 854, height: 480, label: "854 × 480" },
+  { width: 640, height: 360, label: "640 × 360" },
+  { width: 426, height: 240, label: "426 × 240" },
+  { width: 2160, height: 3840, label: "2160 × 3840" },
+  { width: 1080, height: 1920, label: "1080 × 1920" },
+  { width: 720, height: 1280, label: "720 × 1280" },
+  { width: 480, height: 854, label: "480 × 854" },
+  { width: 360, height: 640, label: "360 × 640" },
+  { width: 240, height: 426, label: "240 × 426" },
+];
 
 export function App() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [scale, setScale] = useState(1);
+  const [resolution, setResolution] = useState<PreviewResolution>(
+    DEFAULT_PREVIEW_RESOLUTION,
+  );
   const [fps, setFps] = useState(30);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
@@ -35,6 +55,7 @@ export function App() {
   });
   const [measuredFps, setMeasuredFps] = useState(0);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
+  const userSelectedResolutionRef = useRef(false);
 
   useEffect(() => {
     cleanupLegacyMediaCaches()
@@ -64,6 +85,9 @@ export function App() {
       setInfo((prev) => {
         if (!prev) {
           setFps((current) => Math.max(next.fps || current, 1));
+          if (!userSelectedResolutionRef.current) {
+            setResolution({ width: next.width, height: next.height });
+          }
         }
         return next;
       });
@@ -111,7 +135,7 @@ export function App() {
   const preview = usePreview({
     info,
     timeline,
-    scale,
+    resolution,
     fps,
   });
 
@@ -179,9 +203,14 @@ export function App() {
     }
   }, [preview.state.seconds, preview.state.playing]);
 
-  const aspect = info ? info.width / info.height : 16 / 9;
+  const aspect = resolution.width / resolution.height;
   const displayTimeline = timeline ?? FALLBACK_TIMELINE;
   const timelineDuration = displayTimeline.duration;
+  const resolutionOptions = previewResolutionOptions(resolution);
+  const changeResolution = useCallback((next: PreviewResolution) => {
+    userSelectedResolutionRef.current = true;
+    setResolution(next);
+  }, []);
   const updateTimelineViewport = useCallback(
     (next: TimelineViewportChange) => {
       setTimelineViewport((current) => {
@@ -236,12 +265,13 @@ export function App() {
             duration={displayTimeline.duration}
             fps={fps}
             measuredFps={preview.state.playing ? measuredFps : fps}
-            scale={scale}
+            resolution={resolution}
+            resolutionOptions={resolutionOptions}
             playing={preview.state.playing}
             onTogglePlay={preview.togglePlay}
             onStep={preview.stepFrame}
             onRewind={preview.rewindToStart}
-            onScaleChange={setScale}
+            onResolutionChange={changeResolution}
             onFpsChange={setFps}
           />
         </section>
@@ -272,4 +302,35 @@ export function App() {
       </div>
     </div>
   );
+}
+
+interface PreviewResolutionOption extends PreviewResolution {
+  label: string;
+}
+
+function previewResolutionOptions(
+  resolution: PreviewResolution,
+): PreviewResolutionOption[] {
+  if (
+    PREVIEW_RESOLUTION_OPTIONS.some((option) =>
+      sameResolution(option, resolution),
+    )
+  ) {
+    return PREVIEW_RESOLUTION_OPTIONS;
+  }
+
+  return [
+    {
+      ...resolution,
+      label: `${resolution.width} × ${resolution.height}`,
+    },
+    ...PREVIEW_RESOLUTION_OPTIONS,
+  ];
+}
+
+function sameResolution(
+  a: PreviewResolution,
+  b: PreviewResolution,
+): boolean {
+  return a.width === b.width && a.height === b.height;
 }

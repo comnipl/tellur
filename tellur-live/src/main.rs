@@ -330,5 +330,5 @@ fn push_if_exists(paths: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn usage() -> String {
-    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--size 1280x720] [--fps 30] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
+    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--fps 30] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
 }

@@ -14,7 +14,12 @@ import {
   saveCacheRanges,
 } from "../cache";
 import type { CachedVideoRangeBlob } from "../cache";
-import type { CacheRange, ServerInfo, TimelineInfo } from "../types";
+import type {
+  CacheRange,
+  PreviewResolution,
+  ServerInfo,
+  TimelineInfo,
+} from "../types";
 
 const EPSILON = 0.001;
 const PRELOAD_DELAY_MS = 260;
@@ -112,17 +117,15 @@ export interface PreviewControls {
 export interface PreviewSettings {
   info: ServerInfo | null;
   timeline: TimelineInfo | null;
-  scale: number;
+  resolution: PreviewResolution;
   fps: number;
 }
 
 export function usePreview(settings: PreviewSettings): PreviewControls {
-  const { info, timeline, scale, fps } = settings;
+  const { info, timeline, resolution, fps } = settings;
   const hasServerInfo = info != null;
   const timelineId = timeline?.id ?? "";
   const timelineDuration = timeline?.duration ?? 0;
-  const sourceWidth = info?.width ?? 1;
-  const sourceHeight = info?.height ?? 1;
   const pluginCacheKey = info?.cacheKey ?? "";
 
   const videoARef = useRef<HTMLVideoElement>(null);
@@ -169,12 +172,11 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   >(() => {});
 
   const resolvedResolution = useCallback(() => {
-    const s = Math.max(scale, 0.01);
     return {
-      width: Math.max(1, Math.round(sourceWidth * s)),
-      height: Math.max(1, Math.round(sourceHeight * s)),
+      width: Math.max(1, Math.round(resolution.width)),
+      height: Math.max(1, Math.round(resolution.height)),
     };
-  }, [sourceWidth, sourceHeight, scale]);
+  }, [resolution.height, resolution.width]);
 
   const videoGop = useCallback(() => Math.max(1, Math.floor(fps / 4)), [fps]);
 
@@ -1600,7 +1602,8 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     info?.width,
     info?.height,
     info?.cacheKey,
-    scale,
+    resolution.width,
+    resolution.height,
     fps,
     seconds,
     playing,

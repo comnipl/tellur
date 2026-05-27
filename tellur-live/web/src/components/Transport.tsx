@@ -1,26 +1,25 @@
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { formatTimecode } from "../formatTime";
+import type { PreviewResolution } from "../types";
+
+interface ResolutionOption extends PreviewResolution {
+  label: string;
+}
 
 interface TransportProps {
   seconds: number;
   duration: number;
   fps: number;
   measuredFps: number;
-  scale: number;
+  resolution: PreviewResolution;
+  resolutionOptions: ResolutionOption[];
   playing: boolean;
   onTogglePlay: () => void;
   onStep: (delta: number) => void;
   onRewind: () => void;
-  onScaleChange: (scale: number) => void;
+  onResolutionChange: (resolution: PreviewResolution) => void;
   onFpsChange: (fps: number) => void;
 }
-
-const SCALE_OPTIONS = [
-  { value: 1, label: "1920 × 1080" },
-  { value: 0.75, label: "1440 × 810" },
-  { value: 0.5, label: "960 × 540" },
-  { value: 0.25, label: "480 × 270" },
-];
 
 const FPS_OPTIONS = [60, 30, 24, 15, 12];
 
@@ -30,14 +29,16 @@ export function Transport(props: TransportProps) {
     duration,
     fps,
     measuredFps,
-    scale,
+    resolution,
+    resolutionOptions,
     playing,
     onTogglePlay,
     onStep,
     onRewind,
-    onScaleChange,
+    onResolutionChange,
     onFpsChange,
   } = props;
+  const selectedResolutionKey = resolutionKey(resolution);
 
   return (
     <div className="transport">
@@ -100,11 +101,21 @@ export function Transport(props: TransportProps) {
         </label>
         <label className="transport__control">
           <select
-            value={scale}
-            onChange={(e) => onScaleChange(Number(e.target.value))}
+            value={selectedResolutionKey}
+            onChange={(e) => {
+              const option = resolutionOptions.find(
+                (candidate) => resolutionKey(candidate) === e.target.value,
+              );
+              if (option) {
+                onResolutionChange({
+                  width: option.width,
+                  height: option.height,
+                });
+              }
+            }}
           >
-            {SCALE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
+            {resolutionOptions.map((option) => (
+              <option key={resolutionKey(option)} value={resolutionKey(option)}>
                 {option.label}
               </option>
             ))}
@@ -113,4 +124,8 @@ export function Transport(props: TransportProps) {
       </div>
     </div>
   );
+}
+
+function resolutionKey(resolution: PreviewResolution): string {
+  return `${resolution.width}x${resolution.height}`;
 }

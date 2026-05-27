@@ -4,6 +4,11 @@ export interface TimelineInfo {
   duration: number;
 }
 
+export interface PreviewResolution {
+  width: number;
+  height: number;
+}
+
 export interface ServerInfo {
   width: number;
   height: number;

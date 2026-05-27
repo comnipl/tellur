@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, type CSSProperties } from "react";
 
 interface PreviewProps {
   imageSrc: string | null;
@@ -31,12 +31,14 @@ export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
     },
     ref,
   ) {
-    const frameStyle: React.CSSProperties = {
-      aspectRatio: String(aspect || 16 / 9),
+    const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
+    const previewStyle: CSSProperties & { "--preview-aspect": string } = {
+      "--preview-aspect": String(safeAspect),
     };
+
     return (
-      <section className="preview" ref={ref}>
-        <div className="preview__frame" style={frameStyle}>
+      <section className="preview" ref={ref} style={previewStyle}>
+        <div className="preview__frame">
           <div className="preview__media">
             {videoRefs.map((videoRef, slot) => (
               <video
