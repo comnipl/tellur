@@ -172,7 +172,7 @@ impl fmt::Display for CacheMetrics {
         )?;
         writeln!(
             f,
-            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, readback {})",
+            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, rasterize {}, readback {})",
             self.gpu_preference,
             self.gpu_init_attempted,
             self.gpu_available,
@@ -180,6 +180,7 @@ impl fmt::Display for CacheMetrics {
             self.gpu.composites,
             self.gpu.drop_shadows,
             self.gpu.outlines,
+            self.gpu.rasterizes,
             self.gpu.readbacks,
         )?;
         if !self.per_type.is_empty() {

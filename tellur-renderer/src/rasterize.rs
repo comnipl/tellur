@@ -24,8 +24,15 @@ impl<V: VectorComponent + PartialEq + Hash + 'static> RasterComponent for Raster
         self.vector.paint_bounds(size)
     }
 
-    fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
         let graphic = self.vector.render(size);
+        if ctx.prefers_gpu() {
+            if let Some(gpu) = ctx.gpu_backend() {
+                if let Some(image) = gpu.rasterize(&graphic, target) {
+                    return image;
+                }
+            }
+        }
         rasterize(&graphic, target.width, target.height)
     }
 }

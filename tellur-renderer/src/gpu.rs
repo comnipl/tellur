@@ -1,11 +1,15 @@
 use std::borrow::Cow;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tellur_core::color::Color;
+use tellur_core::geometry::{Transform, Vec2};
 use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, Resolution};
 use tellur_core::render_context::{
     CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
 };
+use tellur_core::vector::{Node, Paint, Path as TellurPath, PathCommand, VectorGraphic};
+use vello::kurbo::{Affine, BezPath, Rect as VelloRect, Stroke as VelloStroke};
 use wgpu::util::DeviceExt;
 
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
@@ -19,6 +23,8 @@ pub struct GpuRenderer {
     blur_pipeline: wgpu::ComputePipeline,
     shadow_pipeline: wgpu::ComputePipeline,
     outline_pipeline: wgpu::ComputePipeline,
+    texture_to_buffer_pipeline: wgpu::ComputePipeline,
+    vello_renderer: Option<vello::Renderer>,
     stats: GpuRenderStats,
 }
 
@@ -27,12 +33,13 @@ pub struct GpuRenderStats {
     pub composites: u64,
     pub drop_shadows: u64,
     pub outlines: u64,
+    pub rasterizes: u64,
     pub readbacks: u64,
 }
 
 impl GpuRenderStats {
     pub fn total_ops(self) -> u64 {
-        self.composites + self.drop_shadows + self.outlines
+        self.composites + self.drop_shadows + self.outlines + self.rasterizes
     }
 }
 
@@ -107,6 +114,18 @@ struct ColorCompositeParams {
 unsafe impl bytemuck::Zeroable for ColorCompositeParams {}
 unsafe impl bytemuck::Pod for ColorCompositeParams {}
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TextureToBufferParams {
+    width: u32,
+    height: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+unsafe impl bytemuck::Zeroable for TextureToBufferParams {}
+unsafe impl bytemuck::Pod for TextureToBufferParams {}
+
 impl GpuRenderer {
     pub fn new() -> Result<Self, String> {
         pollster::block_on(Self::new_async())
@@ -127,7 +146,7 @@ impl GpuRenderer {
                 &wgpu::DeviceDescriptor {
                     label: Some("tellur-gpu-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    required_limits: wgpu::Limits::default(),
                 },
                 None,
             )
@@ -152,8 +171,14 @@ impl GpuRenderer {
                 "tellur-outline-composite",
                 &format!("{COMMON_WGSL}{OUTLINE_SHADER}"),
             ),
+            texture_to_buffer_pipeline: compute_pipeline(
+                &device,
+                "tellur-texture-to-buffer",
+                TEXTURE_TO_BUFFER_SHADER,
+            ),
             device,
             queue,
+            vello_renderer: None,
             stats: GpuRenderStats::default(),
         })
     }
@@ -415,6 +440,109 @@ impl GpuRenderer {
             alpha.height,
         );
     }
+
+    fn render_vello_graphic(
+        &mut self,
+        graphic: &VectorGraphic,
+        target: Resolution,
+    ) -> Option<Arc<GpuBufferImage>> {
+        let scene = build_vello_scene(graphic, target)?;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tellur-vello-target"),
+            size: wgpu::Extent3d {
+                width: target.width,
+                height: target.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if self.vello_renderer.is_none() {
+            self.vello_renderer = Some(create_vello_renderer(&self.device)?);
+        }
+        self.vello_renderer
+            .as_mut()?
+            .render_to_texture(
+                &self.device,
+                &self.queue,
+                &scene,
+                &view,
+                &vello::RenderParams {
+                    base_color: vello::peniko::Color::TRANSPARENT,
+                    width: target.width,
+                    height: target.height,
+                    antialiasing_method: vello::AaConfig::Area,
+                },
+            )
+            .ok()?;
+
+        let target_image = self.empty_image(target);
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tellur-vello-copy-to-buffer"),
+            });
+        self.texture_to_buffer(&mut encoder, &view, &target_image);
+        self.queue.submit(Some(encoder.finish()));
+        Some(target_image)
+    }
+
+    fn texture_to_buffer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::TextureView,
+        dst: &GpuBufferImage,
+    ) {
+        let params = TextureToBufferParams {
+            width: dst.width,
+            height: dst.height,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("tellur-texture-to-buffer-params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let layout = self.texture_to_buffer_pipeline.get_bind_group_layout(0);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tellur-texture-to-buffer-bind-group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: dst.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("tellur-texture-to-buffer-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.texture_to_buffer_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            div_ceil(dst.width, WORKGROUP),
+            div_ceil(dst.height, WORKGROUP),
+            1,
+        );
+    }
 }
 
 impl GpuRasterBackend for GpuRenderer {
@@ -528,6 +656,12 @@ impl GpuRasterBackend for GpuRenderer {
         Some(self.raster_image(target))
     }
 
+    fn rasterize(&mut self, graphic: &VectorGraphic, target: Resolution) -> Option<RasterImage> {
+        let target_image = self.render_vello_graphic(graphic, target)?;
+        self.stats.rasterizes = self.stats.rasterizes.saturating_add(1);
+        Some(self.raster_image(target_image))
+    }
+
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage> {
         match image {
             RasterImage::Cpu(image) => Some(image),
@@ -588,7 +722,21 @@ fn compute_pipeline(
         layout: None,
         module: &shader,
         entry_point: "main",
+        compilation_options: Default::default(),
     })
+}
+
+fn create_vello_renderer(device: &wgpu::Device) -> Option<vello::Renderer> {
+    vello::Renderer::new(
+        device,
+        vello::RendererOptions {
+            surface_format: None,
+            use_cpu: false,
+            antialiasing_support: vello::AaSupport::all(),
+            num_init_threads: NonZeroUsize::new(1),
+        },
+    )
+    .ok()
 }
 
 fn dispatch_three_buffer<P: bytemuck::Pod>(
@@ -650,6 +798,179 @@ fn color_u8(color: Color) -> [u32; 4] {
         (color.b * 255.0).round().clamp(0.0, 255.0) as u32,
         (color.a * 255.0).round().clamp(0.0, 255.0) as u32,
     ]
+}
+
+fn build_vello_scene(graphic: &VectorGraphic, target: Resolution) -> Option<vello::Scene> {
+    if target.width == 0
+        || target.height == 0
+        || graphic.view_box.size.0 <= 0.0
+        || graphic.view_box.size.1 <= 0.0
+    {
+        return None;
+    }
+
+    let sx = target.width as f32 / graphic.view_box.size.0;
+    let sy = target.height as f32 / graphic.view_box.size.1;
+    let view = Transform {
+        a: sx,
+        b: 0.0,
+        c: 0.0,
+        d: sy,
+        tx: -graphic.view_box.origin.0 * sx,
+        ty: -graphic.view_box.origin.1 * sy,
+    };
+    let clip = VelloRect::new(0.0, 0.0, target.width as f64, target.height as f64);
+    let mut scene = vello::Scene::new();
+    encode_vello_node(&mut scene, &graphic.root, view, &clip)?;
+    Some(scene)
+}
+
+fn encode_vello_node(
+    scene: &mut vello::Scene,
+    node: &Node,
+    transform: Transform,
+    clip: &VelloRect,
+) -> Option<()> {
+    match node {
+        Node::Group(group) => {
+            let opacity = group.opacity.clamp(0.0, 1.0);
+            if opacity <= 0.0 {
+                return Some(());
+            }
+            let transform = concat_transform(transform, group.transform);
+            if opacity < 1.0 {
+                scene.push_layer(
+                    vello::peniko::BlendMode::default(),
+                    opacity,
+                    Affine::IDENTITY,
+                    clip,
+                );
+            }
+            for child in &group.children {
+                encode_vello_node(scene, child, transform, clip)?;
+            }
+            if opacity < 1.0 {
+                scene.pop_layer();
+            }
+        }
+        Node::Path(path) => encode_vello_path(scene, path, transform)?,
+    }
+    Some(())
+}
+
+fn encode_vello_path(
+    scene: &mut vello::Scene,
+    path: &TellurPath,
+    transform: Transform,
+) -> Option<()> {
+    if path.fill.is_none() && path.stroke.is_none() {
+        return Some(());
+    }
+    let transform = concat_transform(transform, path.transform);
+    let Some(vello_path) = build_vello_path(&path.commands) else {
+        return Some(());
+    };
+    let transform = to_vello_affine(transform);
+
+    if let Some(fill) = &path.fill {
+        if let Some(paint) = to_vello_color(&fill.paint) {
+            scene.fill(
+                vello::peniko::Fill::NonZero,
+                transform,
+                paint,
+                None,
+                &vello_path,
+            );
+        }
+    }
+
+    if let Some(stroke) = &path.stroke {
+        if stroke.width > 0.0 {
+            if let Some(paint) = to_vello_color(&stroke.paint) {
+                scene.stroke(
+                    &VelloStroke::new(stroke.width as f64),
+                    transform,
+                    paint,
+                    None,
+                    &vello_path,
+                );
+            }
+        }
+    }
+
+    Some(())
+}
+
+fn build_vello_path(commands: &[PathCommand]) -> Option<BezPath> {
+    let mut path = BezPath::new();
+    let mut has_open_subpath = false;
+    for command in commands {
+        match *command {
+            PathCommand::MoveTo(p) => {
+                path.move_to(to_vello_point(p));
+                has_open_subpath = true;
+            }
+            PathCommand::LineTo(p) => {
+                if has_open_subpath {
+                    path.line_to(to_vello_point(p));
+                }
+            }
+            PathCommand::QuadTo { control, to } => {
+                if has_open_subpath {
+                    path.quad_to(to_vello_point(control), to_vello_point(to));
+                }
+            }
+            PathCommand::CubicTo { c1, c2, to } => {
+                if has_open_subpath {
+                    path.curve_to(to_vello_point(c1), to_vello_point(c2), to_vello_point(to));
+                }
+            }
+            PathCommand::Close => {
+                if has_open_subpath {
+                    path.close_path();
+                    has_open_subpath = false;
+                }
+            }
+        }
+    }
+    (!path.elements().is_empty()).then_some(path)
+}
+
+fn to_vello_point(p: Vec2) -> (f64, f64) {
+    (p.0 as f64, p.1 as f64)
+}
+
+fn to_vello_color(paint: &Paint) -> Option<vello::peniko::Color> {
+    let Paint::Solid(color) = paint;
+    if color.a <= 0.0 {
+        return None;
+    }
+    let [r, g, b, a] = color_u8(*color);
+    Some(vello::peniko::Color::rgba8(
+        r as u8, g as u8, b as u8, a as u8,
+    ))
+}
+
+fn concat_transform(a: Transform, b: Transform) -> Transform {
+    Transform {
+        a: a.a * b.a + a.c * b.b,
+        b: a.b * b.a + a.d * b.b,
+        c: a.a * b.c + a.c * b.d,
+        d: a.b * b.c + a.d * b.d,
+        tx: a.a * b.tx + a.c * b.ty + a.tx,
+        ty: a.b * b.tx + a.d * b.ty + a.ty,
+    }
+}
+
+fn to_vello_affine(t: Transform) -> Affine {
+    Affine::new([
+        t.a as f64,
+        t.b as f64,
+        t.c as f64,
+        t.d as f64,
+        t.tx as f64,
+        t.ty as f64,
+    ])
 }
 
 const COMMON_WGSL: &str = r#"
@@ -927,13 +1248,43 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+const TEXTURE_TO_BUFFER_SHADER: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    pad0: u32,
+    pad1: u32,
+}
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<storage, read> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let x = id.x;
+    let y = id.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    let c = textureLoad(src, vec2<i32>(i32(x), i32(y)), 0);
+    let r = u32(round(clamp(c.r, 0.0, 1.0) * 255.0));
+    let g = u32(round(clamp(c.g, 0.0, 1.0) * 255.0));
+    let b = u32(round(clamp(c.b, 0.0, 1.0) * 255.0));
+    let a = u32(round(clamp(c.a, 0.0, 1.0) * 255.0));
+    dst[y * params.width + x] = r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tellur_core::composite::composite_at;
+    use tellur_core::geometry::Rect;
     use tellur_core::render_context::{
         CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
     };
+    use tellur_core::vector::{Fill, Path, PathCommand};
 
     fn gpu_or_skip() -> Option<GpuRenderer> {
         match GpuRenderer::new() {
@@ -1047,5 +1398,81 @@ mod tests {
                 0, 0, 0, 0, 1, 2, 3, 255, 0, 0, 0, 0,
             ]
         );
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_fills_simple_rectangle() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(4.0, 4.0),
+            },
+            root: Node::Path(Path {
+                commands: vec![
+                    PathCommand::MoveTo(Vec2(1.0, 1.0)),
+                    PathCommand::LineTo(Vec2(3.0, 1.0)),
+                    PathCommand::LineTo(Vec2(3.0, 3.0)),
+                    PathCommand::LineTo(Vec2(1.0, 3.0)),
+                    PathCommand::Close,
+                ],
+                fill: Some(Fill {
+                    paint: Paint::Solid(Color::rgba_u8(8, 9, 10, 255)),
+                }),
+                stroke: None,
+                transform: Transform::IDENTITY,
+            }),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+
+        let mut filled = 0;
+        for pixel in rendered.pixels.chunks_exact(4) {
+            if pixel[3] != 0 {
+                assert_eq!(pixel, &[8, 9, 10, 255]);
+                filled += 1;
+            }
+        }
+        assert_eq!(filled, 4);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_preserves_straight_alpha() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(4.0, 4.0),
+            },
+            root: Node::Path(Path {
+                commands: vec![
+                    PathCommand::MoveTo(Vec2(1.0, 1.0)),
+                    PathCommand::LineTo(Vec2(3.0, 1.0)),
+                    PathCommand::LineTo(Vec2(3.0, 3.0)),
+                    PathCommand::LineTo(Vec2(1.0, 3.0)),
+                    PathCommand::Close,
+                ],
+                fill: Some(Fill {
+                    paint: Paint::Solid(Color::rgba_u8(80, 40, 20, 128)),
+                }),
+                stroke: None,
+                transform: Transform::IDENTITY,
+            }),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+        let center = &rendered.pixels[((1 * 4 + 1) * 4)..((1 * 4 + 2) * 4)];
+
+        assert_eq!(center, &[80, 40, 20, 128]);
     }
 }

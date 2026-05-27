@@ -17,6 +17,7 @@ use std::any::Any;
 use crate::color::Color;
 use crate::geometry::Vec2;
 use crate::raster::{CpuRasterImage, RasterComponent, RasterImage, Resolution};
+use crate::vector::VectorGraphic;
 
 /// How aggressively a render context should try to keep work on the GPU.
 ///
@@ -145,6 +146,8 @@ pub trait GpuRasterBackend {
     fn drop_shadow(&mut self, input: DropShadowInput<'_>) -> Option<RasterImage>;
 
     fn outline(&mut self, input: OutlineInput<'_>) -> Option<RasterImage>;
+
+    fn rasterize(&mut self, graphic: &VectorGraphic, target: Resolution) -> Option<RasterImage>;
 
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage>;
 }
