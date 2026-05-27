@@ -11,3 +11,7 @@ tellur-renderer = { path = "../tellur-renderer" }
 [[example]]
 name = "demo_timeline_plugin"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "demo_timeline_mp4"
+path = "examples/demo_timeline_mp4.rs"
