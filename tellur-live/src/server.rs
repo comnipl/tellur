@@ -85,13 +85,6 @@ fn handle_connection(
 
     let path = request.path.clone();
     match path.as_str() {
-        "/" | "/index.html" => write_response(
-            &mut stream,
-            200,
-            "OK",
-            "text/html; charset=utf-8",
-            INDEX_HTML.as_bytes(),
-        ),
         "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
         "/api/info" | "/api/frame" | "/api/stream" => {
             let mut app = app
@@ -99,8 +92,30 @@ fn handle_connection(
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
             app.handle_api(stream, request)
         }
-        _ => write_response(
-            &mut stream,
+        other => serve_static(&mut stream, other),
+    }
+}
+
+fn serve_static(stream: &mut TcpStream, path: &str) -> Result<(), Box<dyn Error>> {
+    let asset = match path {
+        "/" | "/index.html" => Some(StaticAsset {
+            body: WEB_INDEX_HTML,
+            mime: "text/html; charset=utf-8",
+        }),
+        "/assets/index.js" => Some(StaticAsset {
+            body: WEB_INDEX_JS,
+            mime: "application/javascript; charset=utf-8",
+        }),
+        "/assets/index.css" => Some(StaticAsset {
+            body: WEB_INDEX_CSS,
+            mime: "text/css; charset=utf-8",
+        }),
+        _ => None,
+    };
+    match asset {
+        Some(asset) => write_response(stream, 200, "OK", asset.mime, asset.body),
+        None => write_response(
+            stream,
             404,
             "Not Found",
             "text/plain; charset=utf-8",
@@ -108,6 +123,15 @@ fn handle_connection(
         ),
     }
 }
+
+struct StaticAsset {
+    body: &'static [u8],
+    mime: &'static str,
+}
+
+const WEB_INDEX_HTML: &[u8] = include_bytes!("../web/dist/index.html");
+const WEB_INDEX_JS: &[u8] = include_bytes!("../web/dist/assets/index.js");
+const WEB_INDEX_CSS: &[u8] = include_bytes!("../web/dist/assets/index.css");
 
 fn is_client_disconnect(error: &(dyn Error + 'static)) -> bool {
     let mut current = Some(error);
@@ -965,463 +989,3 @@ fn json_escape(s: &str) -> String {
     }
     out
 }
-
-const INDEX_HTML: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>tellur live</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #111318;
-      --panel: #1b1f27;
-      --line: #343b49;
-      --text: #eef1f6;
-      --muted: #9aa3b4;
-      --accent: #97c9c3;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      display: grid;
-      grid-template-rows: minmax(0, 1fr) auto;
-    }
-    main {
-      min-height: 0;
-      display: grid;
-      place-items: center;
-      padding: 18px;
-    }
-    .display {
-      width: min(100%, calc((100vh - 108px) * var(--aspect)));
-      max-height: calc(100vh - 108px);
-      aspect-ratio: var(--aspect);
-      background: #050608;
-      border: 1px solid var(--line);
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-    }
-    #frame {
-      display: block;
-    }
-    #canvas, #video {
-      display: none;
-    }
-    #frame, #canvas, #video {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      image-rendering: auto;
-      grid-area: 1 / 1;
-    }
-    footer {
-      border-top: 1px solid var(--line);
-      background: var(--panel);
-      padding: 12px 14px;
-      display: grid;
-      grid-template-columns: auto minmax(120px, 1fr) auto auto auto;
-      gap: 12px;
-      align-items: center;
-    }
-    button {
-      width: 42px;
-      height: 34px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #242a35;
-      color: var(--text);
-      font: 700 16px/1 system-ui, sans-serif;
-      cursor: pointer;
-    }
-    button:hover { border-color: var(--accent); }
-    input[type="range"] {
-      width: 100%;
-      accent-color: var(--accent);
-    }
-    select {
-      height: 34px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #242a35;
-      color: var(--text);
-      padding: 0 8px;
-      font: 13px/1 system-ui, sans-serif;
-    }
-    .control {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .readout {
-      min-width: 190px;
-      text-align: right;
-      color: var(--muted);
-      font-variant-numeric: tabular-nums;
-      white-space: nowrap;
-    }
-    .readout strong { color: var(--text); font-weight: 600; }
-    .error {
-      position: fixed;
-      left: 12px;
-      top: 12px;
-      max-width: min(720px, calc(100vw - 24px));
-      padding: 8px 10px;
-      border: 1px solid #8f4f4f;
-      background: #2a1719;
-      color: #ffd6d6;
-      display: none;
-    }
-    @media (max-width: 720px) {
-      footer {
-        grid-template-columns: auto minmax(120px, 1fr) auto;
-      }
-      .control {
-        justify-self: start;
-      }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="display" id="display"><video id="video" muted playsinline preload="auto"></video><canvas id="canvas"></canvas><img id="frame" alt=""></div>
-  </main>
-  <footer>
-    <button id="play" type="button" aria-label="Play">></button>
-    <input id="seek" type="range" min="0" value="0" step="0.001">
-    <div class="readout"><strong id="seconds">0.000s</strong> / <span id="frameNo">0</span>f</div>
-    <label class="control">Size
-      <select id="scale">
-        <option value="1">100%</option>
-        <option value="0.75">75%</option>
-        <option value="0.5">50%</option>
-        <option value="0.25">25%</option>
-      </select>
-    </label>
-    <label class="control">FPS
-      <select id="fps">
-        <option value="60">60</option>
-        <option value="30" selected>30</option>
-        <option value="24">24</option>
-        <option value="15">15</option>
-        <option value="12">12</option>
-      </select>
-    </label>
-  </footer>
-  <div class="error" id="error"></div>
-  <script>
-    const img = document.getElementById("frame");
-    const video = document.getElementById("video");
-    const canvas = document.getElementById("canvas");
-    const canvasCtx = canvas.getContext("2d");
-    const display = document.getElementById("display");
-    const play = document.getElementById("play");
-    const seek = document.getElementById("seek");
-    const scaleSelect = document.getElementById("scale");
-    const fpsSelect = document.getElementById("fps");
-    const secondsOut = document.getElementById("seconds");
-    const frameOut = document.getElementById("frameNo");
-    const error = document.getElementById("error");
-
-    let info = null;
-    let timeline = null;
-    let playing = false;
-    let seconds = 0;
-    let startedAt = 0;
-    let baseSeconds = 0;
-    let displayToken = 0;
-    let pngToken = 0;
-    let preloadToken = 0;
-    let pendingPng = false;
-    let queuedPng = false;
-    let preloadTimer = null;
-    let preloadedVideoKey = "";
-    let controlsInitialized = false;
-
-    async function loadInfo() {
-      const response = await fetch("/api/info", { cache: "no-store" });
-      info = await response.json();
-      timeline = info.timelines[0];
-      if (!controlsInitialized) {
-        const fpsValue = String(Math.max(info.fps || 30, 1));
-        if ([...fpsSelect.options].some((option) => option.value === fpsValue)) {
-          fpsSelect.value = fpsValue;
-        }
-        controlsInitialized = true;
-      }
-      const aspect = info.width / info.height;
-      display.style.setProperty("--aspect", String(aspect));
-      seek.max = timeline ? String(timeline.duration) : "0";
-      seek.step = String(1 / selectedFps());
-      showError(info.lastError);
-    }
-
-    function showError(message) {
-      error.style.display = message ? "block" : "none";
-      error.textContent = message || "";
-    }
-
-    function updateReadout() {
-      const fps = selectedFps();
-      secondsOut.textContent = `${seconds.toFixed(3)}s`;
-      frameOut.textContent = String(Math.round(seconds * fps));
-      seek.value = String(seconds);
-    }
-
-    function selectedFps() {
-      return Math.max(Number(fpsSelect.value) || (info ? info.fps : 30) || 30, 1);
-    }
-
-    function selectedResolution() {
-      if (!info) return { width: 1, height: 1 };
-      const scale = Math.max(Number(scaleSelect.value) || 1, 0.01);
-      return {
-        width: Math.max(1, Math.round(info.width * scale)),
-        height: Math.max(1, Math.round(info.height * scale))
-      };
-    }
-
-    function applyRenderParams(params) {
-      const target = selectedResolution();
-      params.set("width", String(target.width));
-      params.set("height", String(target.height));
-      params.set("fps", String(selectedFps()));
-      return target;
-    }
-
-    function videoGop() {
-      return Math.max(1, Math.floor(selectedFps() / 4));
-    }
-
-    function videoKey(frameSeconds = seconds) {
-      if (!timeline || !info) return "";
-      const target = selectedResolution();
-      return [
-        timeline.id,
-        frameSeconds.toFixed(4),
-        `${target.width}x${target.height}`,
-        String(selectedFps()),
-        String(videoGop()),
-        "23"
-      ].join("|");
-    }
-
-    function videoUrl(frameSeconds, token) {
-      const fps = selectedFps();
-      const params = new URLSearchParams({
-        timeline: timeline.id,
-        time: frameSeconds.toFixed(4),
-        fps: String(fps),
-        gop: String(videoGop()),
-        crf: "23",
-        _: String(token)
-      });
-      applyRenderParams(params);
-      return `/api/video.mp4?${params}`;
-    }
-
-    function frameParams(format, token, frameSeconds = seconds) {
-      return new URLSearchParams({
-        timeline: timeline.id,
-        time: frameSeconds.toFixed(4),
-        format,
-        _: String(token)
-      });
-    }
-
-    function showCanvas() {
-      canvas.style.display = "block";
-      img.style.display = "none";
-      video.style.display = "none";
-    }
-
-    function showImage() {
-      img.style.display = "block";
-      canvas.style.display = "none";
-      video.style.display = "none";
-    }
-
-    function showVideo() {
-      video.style.display = "block";
-      img.style.display = "none";
-      canvas.style.display = "none";
-    }
-
-    function stopVideo() {
-      clearVideoPreload();
-    }
-
-    function clearVideoPreload() {
-      clearTimeout(preloadTimer);
-      if (!video.src && !preloadedVideoKey) return;
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      preloadedVideoKey = "";
-      preloadToken += 1;
-    }
-
-    function requestPngFrame(force = false) {
-      if (!timeline) return;
-      if (pendingPng) {
-        queuedPng = true;
-        if (force) displayToken += 1;
-        clearTimeout(preloadTimer);
-        return;
-      }
-      pendingPng = true;
-      queuedPng = false;
-      clearTimeout(preloadTimer);
-      const id = ++displayToken;
-      const pngId = ++pngToken;
-      const params = frameParams("png", id);
-      applyRenderParams(params);
-
-      const finish = () => {
-        if (pngId === pngToken) pendingPng = false;
-        if (queuedPng && !playing) {
-          queuedPng = false;
-          requestPngFrame(true);
-        } else if (!playing) {
-          scheduleVideoPreload();
-        }
-      };
-
-      img.onload = () => {
-        if (id === displayToken) {
-          showImage();
-        }
-        finish();
-      };
-      img.onerror = () => {
-        if (id === displayToken) showError("frame request failed");
-        finish();
-      };
-      img.src = `/api/frame?${params}`;
-    }
-
-    function scheduleVideoPreload(delay = 260) {
-      clearTimeout(preloadTimer);
-      if (!timeline || !info || playing) return;
-      preloadTimer = setTimeout(preloadVideo, delay);
-    }
-
-    function preloadVideo() {
-      if (!timeline || !info || playing) return;
-      const key = videoKey(seconds);
-      if (key && key === preloadedVideoKey && video.src) return;
-      const token = ++preloadToken;
-      preloadedVideoKey = key;
-      video.pause();
-      video.onloadeddata = null;
-      video.onerror = null;
-      video.onended = null;
-      video.src = videoUrl(seconds, `preload-${token}`);
-      video.load();
-    }
-
-    function startVideoPlayback() {
-      if (!timeline || !info) return;
-      const token = ++displayToken;
-      const startSeconds = seconds;
-      baseSeconds = startSeconds;
-      startedAt = performance.now();
-      clearTimeout(preloadTimer);
-      const key = videoKey(startSeconds);
-
-      video.onloadeddata = () => { if (token === displayToken) showVideo(); };
-      video.onerror = () => {
-        if (token === displayToken) showError("video stream failed");
-      };
-      video.onended = () => {
-        if (token !== displayToken) return;
-        playing = false;
-        play.textContent = ">";
-        seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
-        updateReadout();
-        requestPngFrame(true);
-      };
-      if (key !== preloadedVideoKey || !video.src || video.error) {
-        preloadedVideoKey = key;
-        video.src = videoUrl(startSeconds, token);
-      }
-      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-        showVideo();
-      }
-      video.play().catch((e) => {
-        if (token === displayToken) showError(String(e));
-      });
-
-      function syncReadout() {
-        if (!playing || token !== displayToken) return;
-        seconds = Math.min(startSeconds + video.currentTime, timeline.duration);
-        updateReadout();
-        requestAnimationFrame(syncReadout);
-      }
-      requestAnimationFrame(syncReadout);
-    }
-
-    play.addEventListener("click", () => {
-      playing = !playing;
-      play.textContent = playing ? "||" : ">";
-      if (playing) {
-        baseSeconds = seconds;
-        startedAt = performance.now();
-        startVideoPlayback();
-      } else {
-        seconds = Math.min(baseSeconds + video.currentTime, timeline ? timeline.duration : seconds);
-        stopVideo();
-        requestPngFrame(true);
-      }
-    });
-
-    seek.addEventListener("input", () => {
-      clearVideoPreload();
-      if (playing) {
-        playing = false;
-        play.textContent = ">";
-      }
-      seconds = Number(seek.value);
-      baseSeconds = seconds;
-      startedAt = performance.now();
-      updateReadout();
-      requestPngFrame(true);
-    });
-
-    function applyPreviewSettings() {
-      if (!info) return;
-      seek.step = String(1 / selectedFps());
-      updateReadout();
-      clearTimeout(preloadTimer);
-      if (playing) {
-        stopVideo();
-        startVideoPlayback();
-      } else {
-        clearVideoPreload();
-        requestPngFrame(true);
-      }
-    }
-
-    scaleSelect.addEventListener("change", applyPreviewSettings);
-    fpsSelect.addEventListener("change", applyPreviewSettings);
-
-    loadInfo()
-      .then(() => {
-        updateReadout();
-        requestPngFrame(true);
-        setInterval(() => { if (!playing) loadInfo(); }, 1000);
-      })
-      .catch((e) => showError(String(e)));
-  </script>
-</body>
-</html>
-"#;

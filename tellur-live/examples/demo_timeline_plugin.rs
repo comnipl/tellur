@@ -73,4 +73,4 @@ fn build_timeline() -> impl Timeline + Send {
     })
 }
 
-tellur_live::export_timeline!("main", "Demo timeline", build_timeline);
+tellur_live::export_timeline!("main", "Demo Timeline", build_timeline);
