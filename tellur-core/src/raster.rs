@@ -122,6 +122,10 @@ impl GpuSurface {
         self.handle.as_ref()
     }
 
+    pub fn handle_arc(&self) -> Arc<dyn Any + Send + Sync> {
+        Arc::clone(&self.handle)
+    }
+
     pub fn downcast_handle<T: Any + Send + Sync>(&self) -> Option<&T> {
         self.handle.as_ref().downcast_ref::<T>()
     }

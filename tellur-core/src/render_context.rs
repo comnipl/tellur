@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use crate::color::Color;
 use crate::geometry::Vec2;
 use crate::raster::{CpuRasterImage, RasterComponent, RasterImage, Resolution};
 
@@ -24,14 +25,15 @@ use crate::raster::{CpuRasterImage, RasterComponent, RasterImage, Resolution};
 /// CPU fallback remains the default behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GpuPreference {
-    #[default]
     Disabled,
+    #[default]
+    Auto,
     PreferGpu,
 }
 
 impl GpuPreference {
     pub const fn prefers_gpu(self) -> bool {
-        matches!(self, Self::PreferGpu)
+        matches!(self, Self::Auto | Self::PreferGpu)
     }
 }
 
@@ -59,6 +61,15 @@ pub trait RenderContext {
         self.gpu_preference().prefers_gpu()
     }
 
+    /// Returns a device backend for GPU-capable components.
+    ///
+    /// The backend exposes generic raster primitives rather than per-component
+    /// hooks; `Layer`, `DropShadow`, `Outline`, and future elements decide
+    /// inside their own `render` implementation whether those primitives apply.
+    fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
+        None
+    }
+
     /// Renders `component` at the given logical `size` into a
     /// `target`-sized pixel buffer, possibly returning a cached result
     /// from a previous identical request.
@@ -77,14 +88,65 @@ pub trait RenderContext {
     fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
         match image {
             RasterImage::Cpu(image) => image,
-            RasterImage::Gpu(surface) => {
+            image @ RasterImage::Gpu(_) => {
+                let backend = match &image {
+                    RasterImage::Gpu(surface) => surface.backend(),
+                    RasterImage::Cpu(_) => unreachable!(),
+                };
+                if let Some(gpu) = self.gpu_backend() {
+                    if let Some(image) = gpu.readback(image) {
+                        return image;
+                    }
+                }
                 panic!(
-                    "render context returned a GPU image for backend '{}' but did not implement readback",
-                    surface.backend()
+                    "render context returned a GPU image for backend '{backend}' but did not implement readback",
                 )
             }
         }
     }
+}
+
+pub struct CompositeInput<'a> {
+    pub image: &'a RasterImage,
+    pub offset_x: i32,
+    pub offset_y: i32,
+}
+
+pub struct DropShadowInput<'a> {
+    pub child: &'a RasterImage,
+    pub target: Resolution,
+    pub child_offset_x: i32,
+    pub child_offset_y: i32,
+    pub shadow_offset_x: i32,
+    pub shadow_offset_y: i32,
+    pub blur_radius: u32,
+    pub color: Color,
+}
+
+pub struct OutlineInput<'a> {
+    pub child: &'a RasterImage,
+    pub target: Resolution,
+    pub child_offset_x: i32,
+    pub child_offset_y: i32,
+    pub outline_offset_x: i32,
+    pub outline_offset_y: i32,
+    pub radius_x: u32,
+    pub radius_y: u32,
+    pub color: Color,
+}
+
+pub trait GpuRasterBackend {
+    fn composite(
+        &mut self,
+        target: Resolution,
+        inputs: &[CompositeInput<'_>],
+    ) -> Option<RasterImage>;
+
+    fn drop_shadow(&mut self, input: DropShadowInput<'_>) -> Option<RasterImage>;
+
+    fn outline(&mut self, input: OutlineInput<'_>) -> Option<RasterImage>;
+
+    fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage>;
 }
 
 /// A `RenderContext` that performs no caching. Every call goes straight

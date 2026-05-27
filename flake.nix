@@ -35,7 +35,13 @@
             pkgs.pkg-config
             pkgs.mold
             pkgs.fontconfig
+            pkgs.vulkan-loader
+            pkgs.vulkan-tools
           ];
+
+          LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux (
+            pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]
+          );
         };
       }
     );

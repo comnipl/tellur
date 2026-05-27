@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tellur_core::raster::Resolution;
+use tellur_core::render_context::GpuPreference;
 use tellur_live::{serve, AutoBuildOptions, ServerOptions};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -31,6 +32,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
     let mut port = 4317u16;
     let mut resolution = Resolution::new(1280, 720);
     let mut fps = 30u32;
+    let mut gpu_preference = GpuPreference::Auto;
     let mut verbose = false;
     let mut auto_build_requested = false;
     let mut build_package: Option<String> = None;
@@ -74,6 +76,12 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
             }
             "--verbose" => {
                 verbose = true;
+            }
+            "--gpu" => {
+                gpu_preference = GpuPreference::PreferGpu;
+            }
+            "--no-gpu" => {
+                gpu_preference = GpuPreference::Disabled;
             }
             "--watch" => {
                 auto_build_requested = true;
@@ -135,6 +143,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
         bind: bind.unwrap_or_else(|| format!("{host}:{port}")),
         resolution,
         fps,
+        gpu_preference,
         verbose,
         auto_build,
     })
@@ -330,5 +339,5 @@ fn push_if_exists(paths: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn usage() -> String {
-    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--fps 30] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
+    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--fps 30] [--gpu|--no-gpu] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
 }
