@@ -24,7 +24,7 @@ use sysinfo::System;
 use tellur_core::dyn_compare::DynEq;
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
-use tellur_core::render_context::{GpuPreference, GpuRasterBackend, RenderContext};
+use tellur_core::render_context::{CachePolicy, GpuPreference, GpuRasterBackend, RenderContext};
 
 use crate::gpu::{GpuRenderStats, GpuRenderer};
 
@@ -471,33 +471,48 @@ impl RenderContext for CachingRenderContext {
         let start = Instant::now();
         let child_acc_at_start = self.total_render_time;
 
-        // hit_or_miss is the common-tail return point so timing
-        // bookkeeping lives in exactly one place.
-        let (img, was_hit) = {
-            let key = CacheKey::of(component, size, target);
-            if let Some(img) = self.cache.get(&key).cloned() {
-                (img, true)
-            } else {
-                // Miss path: produce the image, then decide whether to
-                // admit it. Nested `ctx.render` calls happen inside
-                // `component.render`, which is why timing is wrapped
-                // around the whole block.
-                let img = component.render(size, target, self);
-                let bytes = Self::image_bytes(&img);
+        // Transparent components (pure pass-through wrappers like
+        // `Positioned`) get no cache slot of their own: they delegate
+        // straight to a child through `ctx.render`, so caching them would
+        // only duplicate the child's entry and double-count its bytes.
+        // Timing is independent of this — the bookkeeping below runs either
+        // way — so a transparent wrapper's (near-zero) self-cost stays
+        // visible and the child's time is attributed to the child.
+        let key = match component.cache_policy() {
+            CachePolicy::Transparent => None,
+            CachePolicy::Memoize => Some(CacheKey::of(component, size, target)),
+        };
 
-                if bytes > self.cap_bytes {
-                    self.oversize_skips += 1;
+        // `counted` gates the hit/miss tally so transparent passes (which
+        // are neither) don't masquerade as cache misses; `was_hit` only
+        // matters when `counted`.
+        let (img, was_hit, counted) = match key {
+            None => (component.render(size, target, self), false, false),
+            Some(key) => {
+                if let Some(img) = self.cache.get(&key).cloned() {
+                    (img, true, true)
                 } else {
-                    self.evict_to_fit(bytes);
-                    if self.under_memory_pressure() {
-                        self.shed_under_pressure();
-                        self.pressure_skips += 1;
+                    // Miss path: produce the image, then decide whether to
+                    // admit it. Nested `ctx.render` calls happen inside
+                    // `component.render`, which is why timing is wrapped
+                    // around the whole block.
+                    let img = component.render(size, target, self);
+                    let bytes = Self::image_bytes(&img);
+
+                    if bytes > self.cap_bytes {
+                        self.oversize_skips += 1;
                     } else {
-                        self.cache.put(key, img.clone());
-                        self.cur_bytes += bytes;
+                        self.evict_to_fit(bytes);
+                        if self.under_memory_pressure() {
+                            self.shed_under_pressure();
+                            self.pressure_skips += 1;
+                        } else {
+                            self.cache.put(key, img.clone());
+                            self.cur_bytes += bytes;
+                        }
                     }
+                    (img, false, true)
                 }
-                (img, false)
             }
         };
 
@@ -510,16 +525,89 @@ impl RenderContext for CachingRenderContext {
             .per_type
             .entry(type_id)
             .or_insert_with(|| (TypeStats::default(), type_name));
-        if was_hit {
-            self.hits += 1;
-            stats.hits += 1;
-        } else {
-            self.misses += 1;
-            stats.misses += 1;
+        if counted {
+            if was_hit {
+                self.hits += 1;
+                stats.hits += 1;
+            } else {
+                self.misses += 1;
+                stats.misses += 1;
+            }
         }
         stats.inclusive_time += inclusive;
         stats.self_time += self_time;
 
         img
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tellur_core::color::Color;
+    use tellur_core::geometry::Vec2;
+    use tellur_core::layer::Layer;
+    use tellur_core::placement::RasterPlacement;
+    use tellur_core::raster::{RasterComponent, Resolution};
+    use tellur_core::render_context::{CachePolicy, GpuPreference, PassThrough, RenderContext};
+    use tellur_core::shapes::Rectangle;
+    use tellur_core::vector::Paint;
+
+    use super::CachingRenderContext;
+    use crate::rasterize::Rasterizable;
+
+    fn scene() -> Layer {
+        Layer::builder()
+            .size(Vec2(40.0, 30.0))
+            .child(
+                Rectangle {
+                    size: Vec2(20.0, 10.0),
+                    fill: Paint::Solid(Color::rgba_u8(200, 40, 60, 255)).into(),
+                    stroke: None,
+                }
+                .rasterize()
+                .place_at(Vec2(5.0, 7.0)),
+            )
+            .build()
+    }
+
+    #[test]
+    fn positioned_is_transparent_to_cache() {
+        let positioned = Rectangle {
+            size: Vec2(1.0, 1.0),
+            fill: Paint::Solid(Color::rgb_u8(0, 0, 0)).into(),
+            stroke: None,
+        }
+        .rasterize()
+        .place_at(Vec2::ZERO);
+        assert_eq!(positioned.cache_policy(), CachePolicy::Transparent);
+    }
+
+    // A transparent `Positioned` must not change pixels: routing its child
+    // through the context (so the child owns the cache slot) has to produce
+    // exactly what an uncached pass produces, on both the first (miss) and
+    // second (hit) frame.
+    #[test]
+    fn passthrough_and_cache_agree_through_positioned() {
+        let size = Vec2(40.0, 30.0);
+        let target = Resolution::new(40, 30);
+
+        let mut pass = PassThrough;
+        let a = {
+            let img = scene().render(size, target, &mut pass);
+            pass.readback(img)
+        };
+
+        let mut cache = CachingRenderContext::new().with_gpu_preference(GpuPreference::Disabled);
+        let first = {
+            let img = scene().render(size, target, &mut cache);
+            cache.readback(img)
+        };
+        let second = {
+            let img = scene().render(size, target, &mut cache);
+            cache.readback(img)
+        };
+
+        assert_eq!(a.pixels, first.pixels);
+        assert_eq!(a.pixels, second.pixels);
     }
 }

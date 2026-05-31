@@ -155,7 +155,7 @@ pub mod raster {
 
     use crate::geometry::{Anchor, Constraints, Rect, Vec2};
     use crate::raster::{RasterComponent, RasterImage, Resolution};
-    use crate::render_context::RenderContext;
+    use crate::render_context::{CachePolicy, RenderContext};
 
     /// A [`RasterComponent`] shifted by `offset` in its parent's coordinate
     /// space. See the [module docs](self) for how the offset is applied.
@@ -199,6 +199,14 @@ pub mod raster {
             }
         }
 
+        fn cache_policy(&self) -> CachePolicy {
+            // A `Positioned` produces no image of its own — it delegates
+            // straight to its child. Caching it would only duplicate the
+            // child's entry (and double-count its bytes), so stay transparent
+            // and let the child own the cache slot.
+            CachePolicy::Transparent
+        }
+
         fn render(
             &self,
             size: Vec2,
@@ -206,7 +214,10 @@ pub mod raster {
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             // The offset rides in `paint_bounds`; the parent composites it.
-            self.child.render(size, target, ctx)
+            // Route the child through the context (rather than a direct
+            // `child.render`) so the child owns the cache entry and its render
+            // time is attributed to the child, not folded into this wrapper.
+            ctx.render(self.child.as_ref(), size, target)
         }
     }
 

@@ -38,6 +38,21 @@ impl GpuPreference {
     }
 }
 
+/// Whether a render context should give a component its own cache slot.
+///
+/// Most components are [`Memoize`](CachePolicy::Memoize): their rendered
+/// image is keyed and reused. A [`Transparent`](CachePolicy::Transparent)
+/// component produces no image of its own — it delegates straight to a child
+/// through [`RenderContext::render`], so caching it would only duplicate the
+/// child's entry (and double-count its bytes). This is orthogonal to timing:
+/// a transparent call is still timed, it just does not allocate a cache slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CachePolicy {
+    #[default]
+    Memoize,
+    Transparent,
+}
+
 /// Drives raster component rendering and provides a hook for caching.
 ///
 /// Components forward child `render` calls through
