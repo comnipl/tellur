@@ -1,100 +1,118 @@
-//! Placement primitives for positioning components inside a parent layout.
+//! Placement: wrapping a component in a [`Positioned`] so it paints at an
+//! offset in its parent's coordinate space.
 //!
-//! [`Placed`] is a `(position, component)` pair stored by layer-like
-//! containers (e.g. [`VectorLayer::children`](crate::layer::VectorLayer)).
-//! It deliberately lives *outside* the component traits so that a
-//! [`VectorComponent`] or [`RasterComponent`] describes only its intrinsic
-//! shape, while its placement in a parent is expressed by wrapping it.
+//! [`Positioned`] is the component-system replacement for the old `Placed`
+//! `(position, child)` pair. Placement is now expressed as a real component
+//! that a parent stores as a plain `Box<dyn _Component>`, so it composes with
+//! [`Fragment`](crate::fragment::Fragment), the layout containers, and
+//! everything else uniformly — there is no separate "placed" world.
 //!
-//! The [`VectorPlacement`] and [`RasterPlacement`] extension traits give
-//! every component fluent methods to produce a `Placed`:
+//! The fluent entry points mirror the geometry vocabulary:
 //!
 //! ```ignore
 //! use tellur_core::placement::VectorPlacement;
 //!
-//! scene.add(background.place_at(Vec2::ZERO));
-//! scene.add(circle.anchored(Anchor::CENTER).snap_to(target_point));
-//! scene.add(dot.anchored(Anchor::CENTER_LEFT).snap_to(stripe_anchor.point(scene_size)));
+//! background.place_at(Vec2::ZERO);                       // top-left at a point
+//! circle.anchored(Anchor::CENTER).snap_to(target_point); // an anchor onto a point
 //! ```
 //!
-//! The anchor-based methods mirror [`Vec2::anchored`] →
-//! [`AnchoredSize::snap_to`](crate::geometry::AnchoredSize::snap_to) so the
-//! geometry vocabulary carries over directly to component placement.
+//! The anchor-based path mirrors [`Vec2::anchored`] →
+//! [`AnchoredSize::snap_to`](crate::geometry::AnchoredSize::snap_to), so the
+//! geometry vocabulary carries straight over to component placement.
 
 use std::hash::{Hash, Hasher};
 
-use crate::geometry::{Anchor, Constraints, Vec2};
-use crate::raster::RasterComponent;
-use crate::vector::VectorComponent;
+use crate::geometry::{Anchor, Constraints, Rect, Transform, Vec2};
+use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
-/// A component paired with its top-left position in the parent's
-/// coordinate space.
+/// A [`VectorComponent`] shifted by `offset` in its parent's coordinate space.
 ///
-/// `C` is typically `dyn VectorComponent` or `dyn RasterComponent`, so the
-/// concrete struct stored is `Placed<dyn VectorComponent>` etc. The
-/// `?Sized` bound allows the dyn case.
-pub struct Placed<C: ?Sized> {
-    pub position: Vec2,
-    pub child: Box<C>,
+/// Renders its child inside a translating [`Group`], so the produced node tree
+/// is identical to what a parent container used to emit for a placed child.
+/// `offset` is computed eagerly by the [`VectorPlacement`] fluent methods (and
+/// their builder-side mirror), so a `Positioned` is fully determined at
+/// construction — there is no re-anchoring at render time.
+pub struct Positioned {
+    pub offset: Vec2,
+    pub child: Box<dyn VectorComponent>,
 }
 
-impl<C: ?Sized + PartialEq> PartialEq for Placed<C> {
+impl Positioned {
+    /// Wraps `child` so its local origin is shifted to `offset`.
+    pub fn new(offset: Vec2, child: impl Into<Box<dyn VectorComponent>>) -> Self {
+        Self {
+            offset,
+            child: child.into(),
+        }
+    }
+}
+
+impl PartialEq for Positioned {
     fn eq(&self, other: &Self) -> bool {
-        self.position == other.position && *self.child == *other.child
+        self.offset == other.offset && *self.child == *other.child
     }
 }
 
-impl<C: ?Sized + Hash> Hash for Placed<C> {
+impl Hash for Positioned {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.position.hash(state);
-        (*self.child).hash(state);
+        self.offset.hash(state);
+        self.child.hash(state);
     }
 }
 
-// Type-erasure conversions for handing a `Placed<ConcreteType>` to
-// containers typed against `Placed<dyn ...>` (e.g. `VectorLayer.children`).
-// The `Box<C>` → `Box<dyn ...>` unsizing is implicit via the explicit
-// `let` binding.
+impl VectorComponent for Positioned {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.child.layout(constraints)
+    }
 
-impl<C: VectorComponent + 'static> From<Placed<C>> for Placed<dyn VectorComponent> {
-    fn from(placed: Placed<C>) -> Self {
-        let child: Box<dyn VectorComponent> = placed.child;
-        Placed {
-            position: placed.position,
-            child,
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        let bounds = self.child.paint_bounds(size);
+        Rect {
+            origin: bounds.origin + self.offset,
+            size: bounds.size,
+        }
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let inner = self.child.render(size);
+        VectorGraphic {
+            view_box: Rect {
+                origin: inner.view_box.origin + self.offset,
+                size: inner.view_box.size,
+            },
+            root: Node::Group(Group {
+                transform: Transform::translate(self.offset),
+                opacity: 1.0,
+                children: vec![inner.root],
+            }),
         }
     }
 }
 
-impl<C: RasterComponent + 'static> From<Placed<C>> for Placed<dyn RasterComponent> {
-    fn from(placed: Placed<C>) -> Self {
-        let child: Box<dyn RasterComponent> = placed.child;
-        Placed {
-            position: placed.position,
-            child,
-        }
+impl From<Positioned> for Box<dyn VectorComponent> {
+    fn from(positioned: Positioned) -> Self {
+        Box::new(positioned)
     }
 }
 
 /// Extension trait that adds placement methods to every [`VectorComponent`].
 ///
-/// Brought into scope alongside `use tellur_core::vector::VectorComponent`,
-/// it lets callers write `circle.place_at(pos)` or
-/// `circle.anchored(Anchor::CENTER).snap_to(target)` instead of manually
-/// computing the offset and boxing the component.
+/// Brought into scope alongside `use tellur_core::vector::VectorComponent`, it
+/// lets callers write `circle.place_at(pos)` or
+/// `circle.anchored(Anchor::CENTER).snap_to(target)` to obtain a
+/// [`Positioned`] component.
 pub trait VectorPlacement: VectorComponent + Sized + 'static {
-    /// Places the component so its local origin `(0, 0)` lands at `position`
-    /// in the parent's coordinate space.
-    fn place_at(self, position: Vec2) -> Placed<dyn VectorComponent> {
-        Placed {
-            position,
+    /// Places the component so its local origin `(0, 0)` lands at `position`.
+    fn place_at(self, position: Vec2) -> Positioned {
+        Positioned {
+            offset: position,
             child: Box::new(self),
         }
     }
 
     /// Begins an anchor-based placement: `anchor` picks a point on the
-    /// component's own [`view_box`](VectorComponent::view_box), which a
-    /// follow-up `snap_to` then aligns onto a point in the parent.
+    /// component's intrinsic box, which a follow-up `snap_to` aligns onto a
+    /// point in the parent.
     fn anchored(self, anchor: Anchor) -> AnchoredVectorComponent<Self> {
         AnchoredVectorComponent {
             component: self,
@@ -105,71 +123,136 @@ pub trait VectorPlacement: VectorComponent + Sized + 'static {
 
 impl<T: VectorComponent + 'static> VectorPlacement for T {}
 
-/// Intermediate produced by [`VectorPlacement::anchored`]. Holds the
-/// component and the anchor point on its `view_box` until a snap target is
-/// provided.
+/// Intermediate produced by [`VectorPlacement::anchored`]. Holds the component
+/// and the chosen anchor until a snap target is provided.
 pub struct AnchoredVectorComponent<C: VectorComponent> {
     component: C,
     anchor: Anchor,
 }
 
 impl<C: VectorComponent + 'static> AnchoredVectorComponent<C> {
-    /// Places the component so the chosen anchor on its intrinsic layout
-    /// size (obtained via `layout(Constraints::UNBOUNDED)`) lands on
-    /// `target_point` in the parent's coordinate space.
-    pub fn snap_to(self, target_point: Vec2) -> Placed<dyn VectorComponent> {
+    /// Places the component so the chosen anchor on its intrinsic layout size
+    /// (obtained via `layout(Constraints::UNBOUNDED)`) lands on `target_point`.
+    pub fn snap_to(self, target_point: Vec2) -> Positioned {
         let intrinsic = self.component.layout(Constraints::UNBOUNDED);
-        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
-        Placed {
-            position,
+        let offset = intrinsic.anchored(self.anchor).snap_to(target_point);
+        Positioned {
+            offset,
             child: Box::new(self.component),
         }
     }
 }
 
-/// Extension trait that adds placement methods to every [`RasterComponent`].
+/// Raster counterparts of the vector placement types. Same shape and
+/// semantics, operating on `Box<dyn RasterComponent>`.
 ///
-/// Mirrors [`VectorPlacement`] one-to-one; the produced `Placed` wraps a
-/// `dyn RasterComponent` instead.
-pub trait RasterPlacement: RasterComponent + Sized + 'static {
-    /// Places the component so its local origin `(0, 0)` lands at `position`
-    /// in the parent's coordinate space.
-    fn place_at(self, position: Vec2) -> Placed<dyn RasterComponent> {
-        Placed {
-            position,
-            child: Box::new(self),
+/// A raster [`Positioned`](raster::Positioned) carries its offset purely in its
+/// `paint_bounds` origin; `render` delegates to the child untouched, because
+/// the parent's `composite_children` pass applies the offset at compositing
+/// time (`position + paint_bounds.origin - paint_rect.origin`).
+pub mod raster {
+    use std::hash::{Hash, Hasher};
+
+    use crate::geometry::{Anchor, Constraints, Rect, Vec2};
+    use crate::raster::{RasterComponent, RasterImage, Resolution};
+    use crate::render_context::RenderContext;
+
+    /// A [`RasterComponent`] shifted by `offset` in its parent's coordinate
+    /// space. See the [module docs](self) for how the offset is applied.
+    pub struct Positioned {
+        pub offset: Vec2,
+        pub child: Box<dyn RasterComponent>,
+    }
+
+    impl Positioned {
+        pub fn new(offset: Vec2, child: impl Into<Box<dyn RasterComponent>>) -> Self {
+            Self {
+                offset,
+                child: child.into(),
+            }
         }
     }
 
-    /// Begins an anchor-based placement; see
-    /// [`VectorPlacement::anchored`] for the same idea on the vector side.
-    fn anchored(self, anchor: Anchor) -> AnchoredRasterComponent<Self> {
-        AnchoredRasterComponent {
-            component: self,
-            anchor,
+    impl PartialEq for Positioned {
+        fn eq(&self, other: &Self) -> bool {
+            self.offset == other.offset && *self.child == *other.child
+        }
+    }
+
+    impl Hash for Positioned {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.offset.hash(state);
+            self.child.hash(state);
+        }
+    }
+
+    impl RasterComponent for Positioned {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            self.child.layout(constraints)
+        }
+
+        fn paint_bounds(&self, size: Vec2) -> Rect {
+            let bounds = self.child.paint_bounds(size);
+            Rect {
+                origin: bounds.origin + self.offset,
+                size: bounds.size,
+            }
+        }
+
+        fn render(
+            &self,
+            size: Vec2,
+            target: Resolution,
+            ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            // The offset rides in `paint_bounds`; the parent composites it.
+            self.child.render(size, target, ctx)
+        }
+    }
+
+    impl From<Positioned> for Box<dyn RasterComponent> {
+        fn from(positioned: Positioned) -> Self {
+            Box::new(positioned)
+        }
+    }
+
+    /// Raster mirror of [`VectorPlacement`](super::VectorPlacement).
+    pub trait RasterPlacement: RasterComponent + Sized + 'static {
+        fn place_at(self, position: Vec2) -> Positioned {
+            Positioned {
+                offset: position,
+                child: Box::new(self),
+            }
+        }
+
+        fn anchored(self, anchor: Anchor) -> AnchoredRasterComponent<Self> {
+            AnchoredRasterComponent {
+                component: self,
+                anchor,
+            }
+        }
+    }
+
+    impl<T: RasterComponent + 'static> RasterPlacement for T {}
+
+    /// Intermediate produced by [`RasterPlacement::anchored`].
+    pub struct AnchoredRasterComponent<C: RasterComponent> {
+        component: C,
+        anchor: Anchor,
+    }
+
+    impl<C: RasterComponent + 'static> AnchoredRasterComponent<C> {
+        pub fn snap_to(self, target_point: Vec2) -> Positioned {
+            let intrinsic = self.component.layout(Constraints::UNBOUNDED);
+            let offset = intrinsic.anchored(self.anchor).snap_to(target_point);
+            Positioned {
+                offset,
+                child: Box::new(self.component),
+            }
         }
     }
 }
 
-impl<T: RasterComponent + 'static> RasterPlacement for T {}
-
-/// Intermediate produced by [`RasterPlacement::anchored`]; counterpart of
-/// [`AnchoredVectorComponent`].
-pub struct AnchoredRasterComponent<C: RasterComponent> {
-    component: C,
-    anchor: Anchor,
-}
-
-impl<C: RasterComponent + 'static> AnchoredRasterComponent<C> {
-    /// Places the component so the chosen anchor on its intrinsic layout
-    /// size (obtained via `layout(Constraints::UNBOUNDED)`) lands on
-    /// `target_point` in the parent's coordinate space.
-    pub fn snap_to(self, target_point: Vec2) -> Placed<dyn RasterComponent> {
-        let intrinsic = self.component.layout(Constraints::UNBOUNDED);
-        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
-        Placed {
-            position,
-            child: Box::new(self.component),
-        }
-    }
-}
+// Re-export the raster placement trait at the module root so existing
+// `use tellur_core::placement::RasterPlacement;` paths keep resolving.
+pub use raster::RasterPlacement;

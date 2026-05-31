@@ -1150,5 +1150,4 @@ pub mod raster {
             RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
         }
     }
-
 }

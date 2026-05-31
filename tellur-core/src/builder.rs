@@ -23,7 +23,7 @@
 use std::hash::Hash;
 
 use crate::geometry::{Anchor, Constraints, Vec2};
-use crate::placement::Placed;
+use crate::placement::{raster::Positioned as RasterPositioned, Positioned};
 use crate::raster::RasterComponent;
 use crate::vector::VectorComponent;
 
@@ -47,9 +47,9 @@ pub trait RasterBuilder: Sized {
 /// `Foo::builder()…​.place_at(pos)` works with no `.build()`.
 pub trait VectorBuilderPlacement: VectorBuilder {
     /// Places the built component's local origin at `position`.
-    fn place_at(self, position: Vec2) -> Placed<dyn VectorComponent> {
-        Placed {
-            position,
+    fn place_at(self, position: Vec2) -> Positioned {
+        Positioned {
+            offset: position,
             child: Box::new(self.build_component()),
         }
     }
@@ -68,9 +68,9 @@ impl<B: VectorBuilder> VectorBuilderPlacement for B {}
 
 /// Raster counterpart of [`VectorBuilderPlacement`].
 pub trait RasterBuilderPlacement: RasterBuilder {
-    fn place_at(self, position: Vec2) -> Placed<dyn RasterComponent> {
-        Placed {
-            position,
+    fn place_at(self, position: Vec2) -> RasterPositioned {
+        RasterPositioned {
+            offset: position,
             child: Box::new(self.build_component()),
         }
     }
@@ -96,11 +96,11 @@ pub struct AnchoredVectorBuilder<C: VectorComponent> {
 impl<C: VectorComponent + 'static> AnchoredVectorBuilder<C> {
     /// Places the component so the chosen anchor on its intrinsic layout size
     /// lands on `target_point`.
-    pub fn snap_to(self, target_point: Vec2) -> Placed<dyn VectorComponent> {
+    pub fn snap_to(self, target_point: Vec2) -> Positioned {
         let intrinsic = self.component.layout(Constraints::UNBOUNDED);
-        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
-        Placed {
-            position,
+        let offset = intrinsic.anchored(self.anchor).snap_to(target_point);
+        Positioned {
+            offset,
             child: Box::new(self.component),
         }
     }
@@ -113,11 +113,11 @@ pub struct AnchoredRasterBuilder<C: RasterComponent> {
 }
 
 impl<C: RasterComponent + 'static> AnchoredRasterBuilder<C> {
-    pub fn snap_to(self, target_point: Vec2) -> Placed<dyn RasterComponent> {
+    pub fn snap_to(self, target_point: Vec2) -> RasterPositioned {
         let intrinsic = self.component.layout(Constraints::UNBOUNDED);
-        let position = intrinsic.anchored(self.anchor).snap_to(target_point);
-        Placed {
-            position,
+        let offset = intrinsic.anchored(self.anchor).snap_to(target_point);
+        RasterPositioned {
+            offset,
             child: Box::new(self.component),
         }
     }

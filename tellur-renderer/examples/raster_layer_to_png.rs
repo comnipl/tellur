@@ -20,7 +20,7 @@ use tellur_renderer::RasterizableBuilder;
 /// A translucent colored circle. The whole shape is parameterised by hue
 /// and radius; saturation, lightness and alpha are baked in.
 #[component(vector)]
-fn blob(radius: f32, hue: f32) -> impl VectorComponent {
+fn Blob(radius: f32, hue: f32) -> impl VectorComponent {
     Circle::builder()
         .radius(radius)
         .fill(Paint::Solid(Color::hsla(hue, 0.7, 0.55, 0.65)))

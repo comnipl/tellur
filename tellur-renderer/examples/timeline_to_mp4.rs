@@ -37,7 +37,7 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 /// straight in (`From<TimelineTime> for LocalTime`). The single `.build()`
 /// is at this component's own tree root; every child below it is buildless.
 #[component(raster)]
-fn bouncing_dot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
+fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
     let rx = phase.interpolate(0.0, 1.0);
     Frame::builder()

@@ -3,7 +3,7 @@
 //!
 //! ```ignore
 //! #[component(vector)]
-//! fn bouncing_dot(#[available] available: Vec2, t: LocalTime) -> impl VectorComponent {
+//! fn BouncingDot(#[available] available: Vec2, t: LocalTime) -> impl VectorComponent {
 //!     // `available` is the parent-assigned size at render time.
 //!     // `t` is a regular struct field / builder member.
 //!     // The body returns a component tree.
@@ -19,8 +19,12 @@
 //!
 //! ## Function form
 //!
-//! Expands to a `BouncingDot` struct (PascalCase of the fn name) whose fields
-//! are the non-`#[available]` function arguments. The function body becomes a
+//! A function-form component is written in PascalCase (mirroring the type it
+//! defines and React's component functions); the name is PascalCase-normalized
+//! to derive the struct, so a `BouncingDot` fn expands to a `BouncingDot`
+//! struct whose fields are the non-`#[available]` function arguments. Since the
+//! fn is consumed by the macro and re-emitted as a struct, no `non_snake_case`
+//! lint fires. The function body becomes a
 //! private `__tellur_build` helper; the trait impl forwards `layout`,
 //! `paint_bounds`, and `render` to the built body. An `#[available]` argument
 //! is threaded through the layout protocol rather than stored as a field.

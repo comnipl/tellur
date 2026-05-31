@@ -13,6 +13,7 @@ use std::hash::{Hash, Hasher};
 
 use tellur_core::color::Color;
 use tellur_core::dyn_compare::hash_f32;
+use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::phase::Phase;
@@ -139,7 +140,7 @@ impl Hud {
                 corners
                     .into_iter()
                     .enumerate()
-                    .flat_map(move |(i, (ax, ay, dx, dy))| {
+                    .map(move |(i, (ax, ay, dx, dy))| {
                         let stagger = i as f32 * 0.05;
                         let pop =
                             ease_out_cubic(local_phase(intro_t, 0.1 + stagger, 0.6 + stagger));
@@ -147,63 +148,73 @@ impl Hud {
                         let color = alpha(p.paper, 0.55 * life);
                         let hx = if dx > 0.0 { ax } else { ax - len };
                         let vy = if dy > 0.0 { ay } else { ay - len };
-                        let horizontal =
-                            rect(Vec2(hx, ay - stroke_w * 0.5), Vec2(len, stroke_w), color);
-                        let vertical =
-                            rect(Vec2(ax - stroke_w * 0.5, vy), Vec2(stroke_w, len), color);
-                        horizontal.into_iter().chain(vertical)
+                        Fragment::builder()
+                            .child(
+                                Rect::builder()
+                                    .position(Vec2(hx, ay - stroke_w * 0.5))
+                                    .size(Vec2(len, stroke_w))
+                                    .color(color),
+                            )
+                            .child(
+                                Rect::builder()
+                                    .position(Vec2(ax - stroke_w * 0.5, vy))
+                                    .size(Vec2(stroke_w, len))
+                                    .color(color),
+                            )
+                            .build()
                     }),
             )
             // Top-left wordmark + tagline.
-            .maybe_child(label(
-                Vec2(inset, inset - 22.0),
-                Anchor::BOTTOM_LEFT,
-                "TELLUR",
-                20.0,
-                alpha(p.paper, label_alpha),
-                Weight::BOLD,
-            ))
-            .maybe_child(label(
-                Vec2(inset + 96.0, inset - 22.0),
-                Anchor::BOTTOM_LEFT,
-                "kinetic-motion · 7.6s",
-                13.0,
-                alpha(p.paper, 0.5 * life * label_in),
-                Weight::NORMAL,
-            ))
+            .child(
+                Label::builder()
+                    .position(Vec2(inset, inset - 22.0))
+                    .anchor(Anchor::BOTTOM_LEFT)
+                    .text("TELLUR")
+                    .size(20.0)
+                    .color(alpha(p.paper, label_alpha))
+                    .weight(Weight::BOLD),
+            )
+            .child(
+                Label::builder()
+                    .position(Vec2(inset + 96.0, inset - 22.0))
+                    .anchor(Anchor::BOTTOM_LEFT)
+                    .text("kinetic-motion · 7.6s")
+                    .size(13.0)
+                    .color(alpha(p.paper, 0.5 * life * label_in))
+                    .weight(Weight::NORMAL),
+            )
             // Top-right section marker + accent dot.
-            .maybe_child(label(
-                Vec2(marker_x, inset - 22.0),
-                Anchor::BOTTOM_RIGHT,
-                idx_text,
-                14.0,
-                alpha(p.paper, 0.75 * life * label_in),
-                Weight::NORMAL,
-            ))
-            .maybe_child(circle(
-                Vec2(marker_x - 128.0, inset - 28.0),
-                4.5 * label_in,
-                Some(alpha(idx_color, life * label_in)),
-                None,
-            ))
+            .child(
+                Label::builder()
+                    .position(Vec2(marker_x, inset - 22.0))
+                    .anchor(Anchor::BOTTOM_RIGHT)
+                    .text(idx_text)
+                    .size(14.0)
+                    .color(alpha(p.paper, 0.75 * life * label_in))
+                    .weight(Weight::NORMAL),
+            )
+            .child(
+                Circle::builder()
+                    .center(Vec2(marker_x - 128.0, inset - 28.0))
+                    .radius(4.5 * label_in)
+                    .fill(alpha(idx_color, life * label_in)),
+            )
             // Static "OBS" badge below the section marker — reads as a "live
             // observation" tag without animating per frame (so it stays inside
             // the cached HUD raster).
-            .maybe_child(label(
-                Vec2(marker_x, inset + 4.0),
-                Anchor::TOP_RIGHT,
-                "OBS · TELLUR-04",
-                11.0,
-                alpha(p.paper, 0.4 * life * label_in),
-                Weight::NORMAL,
-            ))
+            .child(
+                Label::builder()
+                    .position(Vec2(marker_x, inset + 4.0))
+                    .anchor(Anchor::TOP_RIGHT)
+                    .text("OBS · TELLUR-04")
+                    .size(11.0)
+                    .color(alpha(p.paper, 0.4 * life * label_in))
+                    .weight(Weight::NORMAL),
+            )
             // Bottom edge tick ruler — every 4th tick is taller.
-            .children((0..17).filter_map(move |i| {
+            .children((0..17).map(move |i| {
                 let stagger = i as f32 * 0.018;
                 let pop = ease_out_cubic(local_phase(intro_t, 0.3 + stagger, 0.8 + stagger));
-                if pop <= 0.0 {
-                    return None;
-                }
                 let bar_left = inset + 24.0;
                 let bar_right = SCENE_SIZE.0 - inset - 24.0;
                 let tick_y_top = SCENE_SIZE.1 - inset + 28.0;
@@ -212,11 +223,14 @@ impl Hud {
                 let major = i % 4 == 0;
                 let height = if major { 18.0 } else { 8.0 };
                 let color = alpha(p.paper, if major { 0.55 } else { 0.35 } * life);
-                rect(Vec2(x - 1.0, tick_y_top), Vec2(2.0, height * pop), color)
+                Rect::builder()
+                    .position(Vec2(x - 1.0, tick_y_top))
+                    .size(Vec2(2.0, height * pop))
+                    .color(color)
             }))
             // Left + right edge tick rulers — completes the four-sided
             // instrument frame so the scaffold reads as a full HUD.
-            .children((0..11).flat_map(move |i| {
+            .children((0..11).map(move |i| {
                 let stagger = i as f32 * 0.02;
                 let pop = ease_out_cubic(local_phase(intro_t, 0.55 + stagger, 1.0 + stagger));
                 let v_bar_top = inset + 60.0;
@@ -226,41 +240,42 @@ impl Hud {
                 let major = i % 5 == 0;
                 let width = if major { 16.0 } else { 7.0 };
                 let color = alpha(p.paper, if major { 0.5 } else { 0.3 } * life);
-                let left = (pop > 0.0)
-                    .then(|| {
-                        // Left side ticks point inward.
-                        rect(Vec2(inset - 28.0, y - 1.0), Vec2(width * pop, 2.0), color)
-                    })
-                    .flatten();
-                let right = (pop > 0.0)
-                    .then(|| {
-                        // Right side ticks point inward.
-                        rect(
-                            Vec2(SCENE_SIZE.0 - inset + 28.0 - width * pop, y - 1.0),
-                            Vec2(width * pop, 2.0),
-                            color,
-                        )
-                    })
-                    .flatten();
-                left.into_iter().chain(right)
+                Fragment::builder()
+                    // Left side ticks point inward.
+                    .maybe_child((pop > 0.0).then(|| {
+                        Rect::builder()
+                            .position(Vec2(inset - 28.0, y - 1.0))
+                            .size(Vec2(width * pop, 2.0))
+                            .color(color)
+                    }))
+                    // Right side ticks point inward.
+                    .maybe_child((pop > 0.0).then(|| {
+                        Rect::builder()
+                            .position(Vec2(SCENE_SIZE.0 - inset + 28.0 - width * pop, y - 1.0))
+                            .size(Vec2(width * pop, 2.0))
+                            .color(color)
+                    }))
+                    .build()
             }))
             // Bottom-corner runtime + resolution readouts.
-            .maybe_child(label(
-                Vec2(inset, SCENE_SIZE.1 - inset + 20.0),
-                Anchor::TOP_LEFT,
-                "RUNTIME 7600MS · 60FPS",
-                12.0,
-                alpha(p.paper, 0.45 * life * label_in),
-                Weight::NORMAL,
-            ))
-            .maybe_child(label(
-                Vec2(SCENE_SIZE.0 - inset, SCENE_SIZE.1 - inset + 20.0),
-                Anchor::TOP_RIGHT,
-                "1920 × 1080 · RGBA",
-                12.0,
-                alpha(p.paper, 0.45 * life * label_in),
-                Weight::NORMAL,
-            ))
+            .child(
+                Label::builder()
+                    .position(Vec2(inset, SCENE_SIZE.1 - inset + 20.0))
+                    .anchor(Anchor::TOP_LEFT)
+                    .text("RUNTIME 7600MS · 60FPS")
+                    .size(12.0)
+                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .weight(Weight::NORMAL),
+            )
+            .child(
+                Label::builder()
+                    .position(Vec2(SCENE_SIZE.0 - inset, SCENE_SIZE.1 - inset + 20.0))
+                    .anchor(Anchor::TOP_RIGHT)
+                    .text("1920 × 1080 · RGBA")
+                    .size(12.0)
+                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .weight(Weight::NORMAL),
+            )
             .build()
     }
 }

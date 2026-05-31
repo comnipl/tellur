@@ -175,7 +175,10 @@ mod builder_tests {
     fn complete_builder_converts_into_self_and_box() {
         // bon derive(Into): a complete builder converts into the struct itself
         // (so `impl Into<Ellipse>` args accept a builder, no `.build()`).
-        let e: Ellipse = Ellipse::builder().radii(Vec2(3.0, 3.0)).fill(paint()).into();
+        let e: Ellipse = Ellipse::builder()
+            .radii(Vec2(3.0, 3.0))
+            .fill(paint())
+            .into();
         assert_eq!(e.radii, Vec2(3.0, 3.0));
         assert!(e.fill.is_some());
 
@@ -196,7 +199,7 @@ mod builder_tests {
         let p = Ellipse::builder()
             .radii(Vec2(5.0, 5.0))
             .place_at(Vec2(2.0, 3.0));
-        assert_eq!(p.position, Vec2(2.0, 3.0));
+        assert_eq!(p.offset, Vec2(2.0, 3.0));
 
         // anchored().snap_to() on a builder: CENTER of a 10x10 box snapped to
         // (10,10) lands its origin at (5,5).
@@ -204,6 +207,6 @@ mod builder_tests {
             .radii(Vec2(5.0, 5.0))
             .anchored(Anchor::CENTER)
             .snap_to(Vec2(10.0, 10.0));
-        assert_eq!(p2.position, Vec2(5.0, 5.0));
+        assert_eq!(p2.offset, Vec2(5.0, 5.0));
     }
 }

@@ -2,6 +2,7 @@ pub mod builder;
 pub mod color;
 pub mod composite;
 pub mod dyn_compare;
+pub mod fragment;
 pub mod geometry;
 pub mod interpolate;
 pub mod layer;

@@ -25,7 +25,7 @@ use tellur_core::vector::Paint;
 use tellur_renderer::{CachingRenderContext, DropShadow, RasterizableBuilder};
 
 #[component(raster)]
-fn bouncing_dot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
+fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
     let rx = phase.interpolate(0.0, 1.0);
     Frame::builder()

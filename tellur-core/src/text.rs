@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::dyn_compare::hash_f32;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
-use crate::placement::Placed;
+use crate::placement::{Positioned, VectorPlacement};
 use crate::vector::{
     Fill, Group, Node, Paint, Path as VPath, PathCommand, VectorComponent, VectorGraphic,
 };
@@ -486,29 +486,26 @@ impl Text {
     /// are zero-width placeholders so positional indexing matches.
     ///
     /// Useful for attaching per-span effects (transforms, drop shadows
-    /// on the rasterized form, outlines, ...) by manipulating each
-    /// [`Placed<TextSpanGraphic>`] before composing them back into a
-    /// layer:
+    /// on the rasterized form, outlines, ...) by composing each
+    /// [`Positioned`] span back into a layer:
     ///
     /// ```ignore
-    /// let [hello, world, bang]: [Placed<TextSpanGraphic>; 3] =
-    ///     Text { ... }.into_spans().try_into().unwrap();
-    ///
-    /// let layer = VectorLayer {
-    ///     size: None,                 // auto-fit
-    ///     children: vec![hello.into(), world.into(), bang.into()],
-    /// };
+    /// let layer = Text::builder()...
+    ///     .into_spans()
+    ///     .into_iter()
+    ///     .fold(VectorLayer::builder().size(...), |layer, span| layer.child(span))
+    ///     .build();
     /// ```
-    pub fn into_spans(self) -> Vec<Placed<TextSpanGraphic>> {
+    pub fn into_spans(self) -> Vec<Positioned> {
         let (_, line_height) = self.line_metrics();
         self.shape_per_span()
             .into_iter()
-            .map(|s| Placed {
-                position: Vec2(s.start_x, 0.0),
-                child: Box::new(TextSpanGraphic {
+            .map(|s| {
+                TextSpanGraphic {
                     paths: s.paths,
                     size: Vec2(s.width, line_height),
-                }),
+                }
+                .place_at(Vec2(s.start_x, 0.0))
             })
             .collect()
     }
