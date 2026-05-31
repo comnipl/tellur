@@ -32,7 +32,7 @@ use tellur_renderer::{DropShadow, Rasterizable, RasterizableBuilder};
 use common::{alpha, Palette, DURATION, SCENE_SIZE};
 use hud::{Hud, HUD_INTRO_END, HUD_INTRO_START, HUD_OUTRO_END, HUD_OUTRO_START};
 
-use backdrop::Backdrop;
+use backdrop::{Backdrop, BACKDROP_REVEAL_END, BACKDROP_REVEAL_START};
 use field::Field;
 use overlay::Overlay;
 use overture::Overture;
@@ -63,7 +63,7 @@ pub fn build_timeline() -> impl Timeline + Send {
                     // saturates (~0.6s), so it caches as its own raster child.
                     .child(
                         Backdrop::builder()
-                            .time(t)
+                            .reveal(t.phase(BACKDROP_REVEAL_START, BACKDROP_REVEAL_END))
                             .palette(palette)
                             .rasterize()
                             .place_at(Vec2::ZERO),
