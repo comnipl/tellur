@@ -6,9 +6,11 @@
 //! can rely on the invariant without re-checking.
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
 use thiserror::Error;
 
+use crate::dyn_compare::hash_f32;
 use crate::interpolate::Interpolate;
 
 /// A finite `f32` constrained to the unit interval `[0.0, 1.0]` (both
@@ -60,6 +62,16 @@ impl Phase {
     /// so the `Phase` reads as "the driver" in animation code.
     pub fn interpolate<T: Interpolate>(self, from: T, to: T) -> T {
         from.interpolate(to, self)
+    }
+}
+
+// `f32` implements neither `Hash` nor `Eq` (NaN), so `Phase` can't derive
+// `Hash`. Key on the bit pattern instead — the same convention `Color` and the
+// geometry value types use — so a `Phase` field makes a `#[component]` cacheable
+// out of the box (its hash stabilizes once the phase saturates to 1.0).
+impl Hash for Phase {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_f32(self.0, state);
     }
 }
 
