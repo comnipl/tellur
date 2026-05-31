@@ -149,6 +149,11 @@ pub trait GpuRasterBackend {
 
     fn rasterize(&mut self, graphic: &VectorGraphic, target: Resolution) -> Option<RasterImage>;
 
+    /// Produces a target-sized image filled with a single solid color.
+    /// Lets solid-color leaves (backgrounds, transparent spacers) start
+    /// life on the GPU instead of being CPU-filled and uploaded.
+    fn solid_fill(&mut self, target: Resolution, color: Color) -> Option<RasterImage>;
+
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage>;
 }
 

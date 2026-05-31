@@ -1105,8 +1105,15 @@ pub mod raster {
             &self,
             _size: Vec2,
             target: Resolution,
-            _ctx: &mut dyn RenderContext,
+            ctx: &mut dyn RenderContext,
         ) -> RasterImage {
+            if ctx.prefers_gpu() {
+                if let Some(gpu) = ctx.gpu_backend() {
+                    if let Some(image) = gpu.solid_fill(target, Color::rgba_u8(0, 0, 0, 0)) {
+                        return image;
+                    }
+                }
+            }
             let bytes = (target.width as usize) * (target.height as usize) * 4;
             RasterImage::cpu(
                 target.width,
@@ -1133,8 +1140,15 @@ pub mod raster {
             &self,
             _size: Vec2,
             target: Resolution,
-            _ctx: &mut dyn RenderContext,
+            ctx: &mut dyn RenderContext,
         ) -> RasterImage {
+            if ctx.prefers_gpu() {
+                if let Some(gpu) = ctx.gpu_backend() {
+                    if let Some(image) = gpu.solid_fill(target, self.color) {
+                        return image;
+                    }
+                }
+            }
             let pixels = (target.width as usize) * (target.height as usize);
             let mut buf = Vec::with_capacity(pixels * 4);
             let r = (self.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
