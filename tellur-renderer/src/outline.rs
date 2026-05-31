@@ -17,11 +17,13 @@ use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{OutlineInput, RenderContext};
 
+#[tellur_core::component(raster)]
 pub struct Outline {
     /// Stroke width on the outside of the child, in logical units.
     pub width: f32,
     /// Stroke color (its alpha is multiplied with the ring alpha).
     pub color: Color,
+    #[builder(into)]
     pub child: Box<dyn RasterComponent>,
 }
 

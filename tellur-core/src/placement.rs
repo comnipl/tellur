@@ -12,7 +12,7 @@
 //! ```ignore
 //! use tellur_core::placement::VectorPlacement;
 //!
-//! scene.add(background.at(Vec2::ZERO));
+//! scene.add(background.place_at(Vec2::ZERO));
 //! scene.add(circle.anchored(Anchor::CENTER).snap_to(target_point));
 //! scene.add(dot.anchored(Anchor::CENTER_LEFT).snap_to(stripe_anchor.point(scene_size)));
 //! ```
@@ -79,13 +79,13 @@ impl<C: RasterComponent + 'static> From<Placed<C>> for Placed<dyn RasterComponen
 /// Extension trait that adds placement methods to every [`VectorComponent`].
 ///
 /// Brought into scope alongside `use tellur_core::vector::VectorComponent`,
-/// it lets callers write `circle.at(pos)` or
+/// it lets callers write `circle.place_at(pos)` or
 /// `circle.anchored(Anchor::CENTER).snap_to(target)` instead of manually
 /// computing the offset and boxing the component.
 pub trait VectorPlacement: VectorComponent + Sized + 'static {
     /// Places the component so its local origin `(0, 0)` lands at `position`
     /// in the parent's coordinate space.
-    fn at(self, position: Vec2) -> Placed<dyn VectorComponent> {
+    fn place_at(self, position: Vec2) -> Placed<dyn VectorComponent> {
         Placed {
             position,
             child: Box::new(self),
@@ -134,7 +134,7 @@ impl<C: VectorComponent + 'static> AnchoredVectorComponent<C> {
 pub trait RasterPlacement: RasterComponent + Sized + 'static {
     /// Places the component so its local origin `(0, 0)` lands at `position`
     /// in the parent's coordinate space.
-    fn at(self, position: Vec2) -> Placed<dyn RasterComponent> {
+    fn place_at(self, position: Vec2) -> Placed<dyn RasterComponent> {
         Placed {
             position,
             child: Box::new(self),

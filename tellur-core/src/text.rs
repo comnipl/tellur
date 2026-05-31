@@ -235,9 +235,12 @@ impl Default for Weight {
 /// Any `None` field inherits the value from the enclosing [`Text`]'s
 /// base. To color a substring, insert a `TextSpan` whose `fill` is
 /// `Some(Paint::Solid(color))` between plain spans.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, bon::Builder)]
+#[builder(derive(Into))]
 pub struct TextSpan {
+    #[builder(into)]
     pub text: String,
+    #[builder(into)]
     pub fill: Option<Paint>,
     pub font: Option<Arc<Font>>,
     pub size: Option<f32>,
@@ -252,6 +255,19 @@ impl TextSpan {
             text: text.into(),
             ..Self::default()
         }
+    }
+}
+
+// Lets `Text::builder().span("…")` accept a bare string as a plain span.
+impl From<&str> for TextSpan {
+    fn from(text: &str) -> Self {
+        Self::plain(text)
+    }
+}
+
+impl From<String> for TextSpan {
+    fn from(text: String) -> Self {
+        Self::plain(text)
     }
 }
 
@@ -296,12 +312,16 @@ impl Hash for TextSpan {
 /// `font`, `size`, `weight`, and `fill` are the defaults used by every
 /// `TextSpan` that does not override them; `spans` carries the actual
 /// content and any per-region styling.
+#[crate::component(vector)]
 #[derive(Clone)]
 pub struct Text {
+    #[children(each = span)]
     pub spans: Vec<TextSpan>,
     pub font: Arc<Font>,
     pub size: f32,
+    #[builder(default)]
     pub weight: Weight,
+    #[builder(into)]
     pub fill: Paint,
 }
 

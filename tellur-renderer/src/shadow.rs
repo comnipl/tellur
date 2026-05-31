@@ -15,13 +15,16 @@ use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{DropShadowInput, RenderContext};
 
+#[tellur_core::component(raster)]
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
+    #[builder(default = Vec2::ZERO)]
     pub offset: Vec2,
     /// Gaussian-equivalent blur radius (logical units).
     pub blur: f32,
     /// Shadow color (the alpha channel is multiplied with the child's).
     pub color: Color,
+    #[builder(into)]
     pub child: Box<dyn RasterComponent>,
 }
 

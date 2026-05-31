@@ -114,8 +114,10 @@ pub(crate) fn finite_axis(v: f32) -> f32 {
 // ─── vector containers ───────────────────────────────────────────────────
 
 /// Wraps a child with empty space on each side.
+#[crate::component(vector)]
 pub struct Padding {
     pub insets: EdgeInsets,
+    #[builder(into)]
     pub child: Box<dyn VectorComponent>,
 }
 
@@ -169,9 +171,11 @@ impl VectorComponent for Padding {
 /// Use [`Place`] alone if you need an anchor placement at the parent's
 /// max size, or [`Frame`] when you want sizing and anchored placement
 /// in one container.
+#[crate::component(vector)]
 pub struct Sized {
     pub width: SizeMode,
     pub height: SizeMode,
+    #[builder(into)]
     pub child: Box<dyn VectorComponent>,
 }
 
@@ -215,9 +219,11 @@ impl VectorComponent for Sized {
 /// For an anchor placement that doesn't claim the whole available
 /// region, wrap a [`Sized`] inside `Place`, or use [`Frame`] which
 /// combines both in one container.
+#[crate::component(vector)]
 pub struct Place {
     pub child_anchor: Anchor,
     pub at: Anchor,
+    #[builder(into)]
     pub child: Box<dyn VectorComponent>,
 }
 
@@ -269,11 +275,13 @@ impl VectorComponent for Place {
 /// Shorthand for `Sized` + `Place`: declares the outer size on each
 /// axis with a `SizeMode` and anchors the child inside that box. Pass
 /// `Anchor::TOP_LEFT` for both anchors to get pure top-left placement.
+#[crate::component(vector)]
 pub struct Frame {
     pub width: SizeMode,
     pub height: SizeMode,
     pub child_anchor: Anchor,
     pub at: Anchor,
+    #[builder(into)]
     pub child: Box<dyn VectorComponent>,
 }
 
@@ -331,14 +339,21 @@ impl VectorComponent for Frame {
 /// the stack expands to the parent's max constraint on the main axis
 /// (or collapses to the intrinsic sum if the constraint is unbounded),
 /// and follows the cross-align rule on the cross axis.
+#[crate::component(vector)]
 #[derive(PartialEq)]
 pub struct Stack {
+    // `#[builder(field)]` members (the streamed children) must precede the
+    // setter members, per bon's member-ordering rule.
+    #[children(each = child)]
+    pub children: Vec<Box<dyn VectorComponent>>,
     pub axis: Axis,
     pub size: Option<Vec2>,
+    #[builder(default)]
     pub spacing: f32,
+    #[builder(default = MainAlign::Start)]
     pub main_align: MainAlign,
+    #[builder(default = CrossAlign::Start)]
     pub cross_align: CrossAlign,
-    pub children: Vec<Box<dyn VectorComponent>>,
 }
 
 impl Hash for Stack {
@@ -541,9 +556,13 @@ impl VectorComponent for Stack {
 /// Paints a background fill and/or stroke behind a child, sized to the
 /// child's layout size. Combine with [`Padding`] for the typical
 /// CSS-style "padded box with a background".
+#[crate::component(vector)]
 pub struct DecoratedBox {
+    #[builder(into)]
     pub child: Box<dyn VectorComponent>,
+    #[builder(into)]
     pub background: Option<Paint>,
+    #[builder(into)]
     pub border: Option<Stroke>,
 }
 
@@ -602,6 +621,7 @@ impl VectorComponent for DecoratedBox {
 
 /// An empty box of the given size. Useful as a spacer between stack
 /// children or to reserve a region without any visible content.
+#[crate::component(vector)]
 #[derive(PartialEq, Hash)]
 pub struct SizedBox {
     pub size: Vec2,
@@ -627,35 +647,10 @@ impl VectorComponent for SizedBox {
     }
 }
 
-/// Fluent extension adding `.padding(...)`, `.background(...)`,
-/// `.border(...)` to every [`VectorComponent`]. For `Sized` / `Place` /
-/// `Frame` use the struct literal form directly.
-pub trait VectorLayoutExt: VectorComponent + ::core::marker::Sized + 'static {
-    fn padding(self, insets: EdgeInsets) -> Padding {
-        Padding {
-            insets,
-            child: Box::new(self),
-        }
-    }
-
-    fn background(self, paint: Paint) -> DecoratedBox {
-        DecoratedBox {
-            child: Box::new(self),
-            background: Some(paint),
-            border: None,
-        }
-    }
-
-    fn border(self, stroke: Stroke) -> DecoratedBox {
-        DecoratedBox {
-            child: Box::new(self),
-            background: None,
-            border: Some(stroke),
-        }
-    }
-}
-
-impl<T: VectorComponent + 'static> VectorLayoutExt for T {}
+// The fluent `.padding()` / `.background()` / `.border()` shorthands were
+// removed: decoration is now written with the explicit container builders
+// (`Padding::builder()`, `DecoratedBox::builder()`), which compose buildless
+// via `.child(..)`.
 
 // ─── raster containers ───────────────────────────────────────────────────
 
@@ -674,8 +669,10 @@ pub mod raster {
     use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
     use crate::render_context::RenderContext;
 
+    #[crate::component(raster)]
     pub struct Padding {
         pub insets: EdgeInsets,
+        #[builder(into)]
         pub child: Box<dyn RasterComponent>,
     }
 
@@ -738,9 +735,11 @@ pub mod raster {
 
     /// Sizes the outer box on each axis (`Fill` / `Hug` / `Fixed`) and
     /// places the child at the outer box's top-left.
+    #[crate::component(raster)]
     pub struct Sized {
         pub width: SizeMode,
         pub height: SizeMode,
+        #[builder(into)]
         pub child: Box<dyn RasterComponent>,
     }
 
@@ -796,9 +795,11 @@ pub mod raster {
 
     /// Fills the parent's max constraint and places the child via
     /// anchor snapping.
+    #[crate::component(raster)]
     pub struct Place {
         pub child_anchor: Anchor,
         pub at: Anchor,
+        #[builder(into)]
         pub child: Box<dyn RasterComponent>,
     }
 
@@ -863,11 +864,13 @@ pub mod raster {
     }
 
     /// Shorthand for `Sized` + `Place` combined.
+    #[crate::component(raster)]
     pub struct Frame {
         pub width: SizeMode,
         pub height: SizeMode,
         pub child_anchor: Anchor,
         pub at: Anchor,
+        #[builder(into)]
         pub child: Box<dyn RasterComponent>,
     }
 
@@ -933,14 +936,20 @@ pub mod raster {
         }
     }
 
+    #[crate::component(raster)]
     #[derive(PartialEq)]
     pub struct Stack {
+        // `#[builder(field)]` members must precede the setter members.
+        #[children(each = child)]
+        pub children: Vec<Box<dyn RasterComponent>>,
         pub axis: Axis,
         pub size: Option<Vec2>,
+        #[builder(default)]
         pub spacing: f32,
+        #[builder(default = MainAlign::Start)]
         pub main_align: MainAlign,
+        #[builder(default = CrossAlign::Start)]
         pub cross_align: CrossAlign,
-        pub children: Vec<Box<dyn RasterComponent>>,
     }
 
     impl Hash for Stack {
@@ -1021,8 +1030,11 @@ pub mod raster {
     /// Raster decoration. Only solid-color backgrounds are supported for
     /// now; stroking on raster is left to the vector path. For richer
     /// decoration, decorate on the vector side and rasterize after.
+    #[crate::component(raster)]
     pub struct DecoratedBox {
+        #[builder(into)]
         pub child: Box<dyn RasterComponent>,
+        #[builder(into)]
         pub background: Option<Color>,
     }
 
@@ -1045,7 +1057,7 @@ pub mod raster {
         }
 
         // paint_bounds intentionally falls back to the default
-        // `Rect { origin: 0, size }`, so a `.background()` acts as a
+        // `Rect { origin: 0, size }`, so a `DecoratedBox` acts as a
         // clip rectangle for children whose paint bounds spill outward
         // (e.g. drop shadows on outer children).
 
@@ -1078,6 +1090,7 @@ pub mod raster {
         }
     }
 
+    #[crate::component(raster)]
     #[derive(PartialEq, Hash)]
     pub struct SizedBox {
         pub size: Vec2,
@@ -1138,22 +1151,4 @@ pub mod raster {
         }
     }
 
-    /// Fluent extension mirroring [`super::VectorLayoutExt`] for raster.
-    pub trait RasterLayoutExt: RasterComponent + ::core::marker::Sized + 'static {
-        fn padding(self, insets: EdgeInsets) -> Padding {
-            Padding {
-                insets,
-                child: Box::new(self),
-            }
-        }
-
-        fn background(self, color: Color) -> DecoratedBox {
-            DecoratedBox {
-                child: Box::new(self),
-                background: Some(color),
-            }
-        }
-    }
-
-    impl<T: RasterComponent + 'static> RasterLayoutExt for T {}
 }

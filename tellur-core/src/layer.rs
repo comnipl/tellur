@@ -26,14 +26,17 @@ use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
+#[crate::component(vector)]
 #[derive(PartialEq, Hash)]
 pub struct VectorLayer {
+    // `#[builder(field)]` members must precede the setter members.
+    #[children(each = child)]
+    pub children: Vec<Placed<dyn VectorComponent>>,
     /// `Some(size)` for a fixed extent; `None` to auto-fit the
     /// bounding box of the children's placed paint bounds (the layer's
     /// `view_box.origin` then matches that bounding rect's origin, so
     /// children with negative positions are not clipped).
     pub size: Option<Vec2>,
-    pub children: Vec<Placed<dyn VectorComponent>>,
 }
 
 impl VectorLayer {
@@ -122,12 +125,15 @@ impl VectorComponent for VectorLayer {
     }
 }
 
+#[crate::component(raster)]
 #[derive(PartialEq, Hash)]
 pub struct Layer {
+    // `#[builder(field)]` members must precede the setter members.
+    #[children(each = child)]
+    pub children: Vec<Placed<dyn RasterComponent>>,
     /// `Some(size)` for a fixed extent; `None` to auto-fit the
     /// bounding box of the children's placed paint bounds.
     pub size: Option<Vec2>,
-    pub children: Vec<Placed<dyn RasterComponent>>,
 }
 
 impl Layer {
@@ -346,7 +352,7 @@ mod tests {
     fn vector_layer_fit_to_single_child_size() {
         let layer = VectorLayer {
             size: None,
-            children: vec![rect(80.0, 40.0).at(Vec2(10.0, 20.0))],
+            children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0))],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(80.0, 40.0));
     }
@@ -356,8 +362,8 @@ mod tests {
         let layer = VectorLayer {
             size: None,
             children: vec![
-                rect(50.0, 50.0).at(Vec2(0.0, 0.0)),
-                rect(50.0, 50.0).at(Vec2(100.0, 100.0)),
+                rect(50.0, 50.0).place_at(Vec2(0.0, 0.0)),
+                rect(50.0, 50.0).place_at(Vec2(100.0, 100.0)),
             ],
         };
         // bounding (0,0)..(150,150) → size (150, 150)
@@ -369,8 +375,8 @@ mod tests {
         let layer = VectorLayer {
             size: None,
             children: vec![
-                rect(100.0, 100.0).at(Vec2(-30.0, 0.0)),
-                rect(100.0, 100.0).at(Vec2(50.0, 20.0)),
+                rect(100.0, 100.0).place_at(Vec2(-30.0, 0.0)),
+                rect(100.0, 100.0).place_at(Vec2(50.0, 20.0)),
             ],
         };
         // bounding (-30,0)..(150,120) → size (180, 120)
@@ -381,7 +387,7 @@ mod tests {
     fn vector_layer_fixed_size_unchanged() {
         let layer = VectorLayer {
             size: Some(Vec2(500.0, 300.0)),
-            children: vec![rect(80.0, 40.0).at(Vec2(10.0, 20.0))],
+            children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0))],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(500.0, 300.0));
     }

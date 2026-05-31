@@ -12,42 +12,40 @@
 use std::time::Instant;
 
 use tellur_core::color::Color;
+use tellur_core::component;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
-use tellur_core::layout::raster::{Frame, RasterLayoutExt, Stack};
+use tellur_core::layout::raster::{DecoratedBox, Frame, Padding, Stack};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::raster::{RasterComponent, Resolution};
-use tellur_core::raster_component;
 use tellur_core::render_context::{PassThrough, RenderContext};
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time, TimelineTime};
 use tellur_core::timeline::{timeline, Timeline};
 use tellur_core::vector::Paint;
-use tellur_renderer::{CachingRenderContext, DropShadow, Rasterizable};
+use tellur_renderer::{CachingRenderContext, DropShadow, RasterizableBuilder};
 
-#[raster_component]
-fn BouncingDot(t: LocalTime) -> impl RasterComponent {
+#[component(raster)]
+fn bouncing_dot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
     let rx = phase.interpolate(0.0, 1.0);
-    let radius = 30.0;
-    Frame {
-        width: SizeMode::Fill,
-        height: SizeMode::Fixed(60.0),
-        child_anchor: Anchor::CENTER,
-        at: Anchor::new(rx, 0.5),
-        child: DropShadow {
-            offset: Vec2(0.0, 8.0),
-            blur: 4.0,
-            color: Color::rgba_u8(255, 255, 255, 100),
-            child: Circle {
-                radius,
-                fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
-                stroke: None,
-            }
-            .rasterize()
-            .boxed(),
-        }
-        .boxed(),
-    }
+    Frame::builder()
+        .width(SizeMode::Fill)
+        .height(SizeMode::Fixed(60.0))
+        .child_anchor(Anchor::CENTER)
+        .at(Anchor::new(rx, 0.5))
+        .child(
+            DropShadow::builder()
+                .offset(Vec2(0.0, 8.0))
+                .blur(4.0)
+                .color(Color::rgba_u8(255, 255, 255, 100))
+                .child(
+                    Circle::builder()
+                        .radius(30.0)
+                        .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
+                        .rasterize(),
+                ),
+        )
+        .build()
 }
 
 fn bench(
@@ -84,34 +82,22 @@ fn main() {
     let total_frames = (duration * fps as f32).ceil() as u64;
 
     let tl = timeline(duration, move |t, target, ctx| {
-        Stack {
-            axis: Axis::Vertical,
-            size: None,
-            spacing: 0.0,
-            main_align: MainAlign::SpaceEvenly,
-            cross_align: CrossAlign::Stretch,
-            children: vec![
-                BouncingDot {
-                    t: t.fps(60).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(30).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(24).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(16).into(),
-                }
-                .boxed(),
-            ],
-        }
-        .padding(EdgeInsets::all(100.0))
-        .background(Color::rgb_u8(20, 20, 30))
-        .render(scene_size, target, ctx)
+        DecoratedBox::builder()
+            .background(Color::rgb_u8(20, 20, 30))
+            .child(
+                Padding::builder().insets(EdgeInsets::all(100.0)).child(
+                    Stack::builder()
+                        .axis(Axis::Vertical)
+                        .main_align(MainAlign::SpaceEvenly)
+                        .cross_align(CrossAlign::Stretch)
+                        .child(BouncingDot::builder().t(t.fps(60)))
+                        .child(BouncingDot::builder().t(t.fps(30)))
+                        .child(BouncingDot::builder().t(t.fps(24)))
+                        .child(BouncingDot::builder().t(t.fps(16))),
+                ),
+            )
+            .build()
+            .render(scene_size, target, ctx)
     });
 
     println!(

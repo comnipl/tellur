@@ -7,96 +7,84 @@
 //! distributes the four tracks evenly inside a padded scene with
 //! `CrossAlign::Stretch`. The dot itself is purely a tree of layout
 //! containers — `Frame` declares its outer shape and anchors the
-//! decorated circle inside it; `.padding(...)` keeps the dot off the
-//! track edges. The circle is wrapped in an `Outline` (white stroke)
-//! and then a `DropShadow`, so the shadow falls behind the combined
-//! stroked shape.
+//! decorated circle inside it. The circle is wrapped in an `Outline`
+//! (white stroke) and then a `DropShadow`, so the shadow falls behind
+//! the combined stroked shape.
 
 use std::path::Path;
 
 use tellur_core::color::Color;
+use tellur_core::component;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
-use tellur_core::layout::raster::{Frame, RasterLayoutExt, Stack};
+use tellur_core::layout::raster::{DecoratedBox, Frame, Padding, Stack};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::raster::{RasterComponent, Resolution};
-use tellur_core::raster_component;
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time};
 use tellur_core::timeline::timeline;
 use tellur_core::vector::Paint;
-use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, Rasterizable};
+use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across the
 /// track's width. `Frame` declares the track's outer shape (fill the
 /// parent width, fix the height at 60) and anchors the circle so it
 /// stays fully inside: both `child_anchor` and `at` use the same
-/// bounce-driven ratio, so the dot's left edge touches the frame's
-/// left at `rx = 0` and its right edge touches at `rx = 1`. The circle
-/// itself is decorated with a white `Outline` and a `DropShadow` —
-/// `Outline` runs first so the shadow falls behind the stroked shape.
-#[raster_component]
-fn BouncingDot(t: LocalTime) -> impl RasterComponent {
+/// bounce-driven ratio. The circle itself is decorated with a white
+/// `Outline` and a `DropShadow` — `Outline` runs first so the shadow
+/// falls behind the stroked shape.
+///
+/// `#[builder(into)] t: LocalTime` lets the call site pass a `TimelineTime`
+/// straight in (`From<TimelineTime> for LocalTime`). The single `.build()`
+/// is at this component's own tree root; every child below it is buildless.
+#[component(raster)]
+fn bouncing_dot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
     let rx = phase.interpolate(0.0, 1.0);
-    let radius = 30.0;
-    Frame {
-        width: SizeMode::Fill,
-        height: SizeMode::Fixed(60.0),
-        child_anchor: Anchor::CENTER,
-        at: Anchor::new(rx, 0.5),
-        child: DropShadow {
-            offset: Vec2(0.0, 8.0),
-            blur: 10.0,
-            color: Color::rgba_u8(0, 0, 0, 200),
-            child: Outline {
-                width: 4.0,
-                color: Color::rgb_u8(255, 255, 255),
-                child: Circle {
-                    radius,
-                    fill: Paint::Solid(Color::hsl(200.0, 0.7, 0.6)).into(),
-                    stroke: None,
-                }
-                .rasterize()
-                .boxed(),
-            }
-            .boxed(),
-        }
-        .boxed(),
-    }
+    Frame::builder()
+        .width(SizeMode::Fill)
+        .height(SizeMode::Fixed(60.0))
+        .child_anchor(Anchor::CENTER)
+        .at(Anchor::new(rx, 0.5))
+        .child(
+            DropShadow::builder()
+                .offset(Vec2(0.0, 8.0))
+                .blur(10.0)
+                .color(Color::rgba_u8(0, 0, 0, 200))
+                .child(
+                    Outline::builder()
+                        .width(4.0)
+                        .color(Color::rgb_u8(255, 255, 255))
+                        .child(
+                            Circle::builder()
+                                .radius(30.0)
+                                .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
+                                .rasterize(),
+                        ),
+                ),
+        )
+        .build()
 }
 
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let tl = timeline(5.0, move |t, target, ctx| {
-        Stack {
-            axis: Axis::Vertical,
-            size: None,
-            spacing: 0.0,
-            main_align: MainAlign::SpaceEvenly,
-            cross_align: CrossAlign::Stretch,
-            children: vec![
-                BouncingDot { t: t.into() }.boxed(),
-                BouncingDot {
-                    t: t.fps(60).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(30).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(24).into(),
-                }
-                .boxed(),
-                BouncingDot {
-                    t: t.fps(16).into(),
-                }
-                .boxed(),
-            ],
-        }
-        .padding(EdgeInsets::all(100.0))
-        .background(Color::rgb_u8(20, 20, 30))
-        .render(scene_size, target, ctx)
+        DecoratedBox::builder()
+            .background(Color::rgb_u8(20, 20, 30))
+            .child(
+                Padding::builder().insets(EdgeInsets::all(100.0)).child(
+                    Stack::builder()
+                        .axis(Axis::Vertical)
+                        .main_align(MainAlign::SpaceEvenly)
+                        .cross_align(CrossAlign::Stretch)
+                        .child(BouncingDot::builder().t(t))
+                        .child(BouncingDot::builder().t(t.fps(60)))
+                        .child(BouncingDot::builder().t(t.fps(30)))
+                        .child(BouncingDot::builder().t(t.fps(24)))
+                        .child(BouncingDot::builder().t(t.fps(16))),
+                ),
+            )
+            .build()
+            .render(scene_size, target, ctx)
     });
 
     let out = Path::new("/tmp/timeline.mp4");
