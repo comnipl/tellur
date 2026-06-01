@@ -1,17 +1,46 @@
 //! Unshadowed overlay pass: the pre-OVERTURE boot flash, the crisp white
 //! SCAN→RESOLVE transition flash, and the gentle exit fade into the bg color.
 //! Lives above the foreground shadow pass so the flashes stay crisp.
+//!
+//! Each of the three effects is a one-shot gate confined to a short time
+//! window; for the long spans between them the overlay paints nothing. To let
+//! `CachingRenderContext` reuse the (empty or saturated) raster across those
+//! spans instead of re-rasterizing every frame, the component takes one
+//! `Phase` per gate window rather than raw time — the same trick `Hud` and
+//! `Backdrop` use. Outside a window its `Phase` is a stable 0.0 (before) or
+//! 1.0 (after), so the component hashes equal frame to frame and caches.
 
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
+use tellur_core::phase::Phase;
 use tellur_core::text::Weight;
-use tellur_core::time::{Time, TimelineTime};
 
 use super::common::*;
 
+// Gate windows, each spanning a one-shot effect from its first sub-event start
+// to its last sub-event end. The matching `Phase` is `time.phase(START, END)`,
+// so it saturates to 1.0 once the effect is over and sits at 0.0 before it
+// begins — stable, and therefore cacheable, on every frame outside the window.
+pub const OVERLAY_BOOT_START: f32 = 0.05;
+pub const OVERLAY_BOOT_END: f32 = 0.55;
+pub const OVERLAY_FLASH_START: f32 = 4.9;
+pub const OVERLAY_FLASH_END: f32 = 5.35;
+pub const OVERLAY_FADE_START: f32 = 7.25;
+// The fade runs to the end of the timeline, so its window end is `DURATION`.
+
+const OVERLAY_BOOT_WIDTH: f32 = OVERLAY_BOOT_END - OVERLAY_BOOT_START;
+const OVERLAY_FLASH_WIDTH: f32 = OVERLAY_FLASH_END - OVERLAY_FLASH_START;
+
+// Sub-phase of an event spanning `[start, end]` (both absolute, but shifted
+// into the window-local frame by the caller) at virtual elapsed time `t`.
+// Mirrors `hud::local_phase` / `backdrop::local_phase`.
+fn local_phase(virtual_t: f32, start: f32, end: f32) -> Phase {
+    Phase::saturating((virtual_t - start) / (end - start))
+}
+
 #[tellur_core::component(vector)]
-pub fn Overlay(time: TimelineTime, palette: Palette) -> impl VectorComponent {
+pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl VectorComponent {
     let p = palette;
     VectorLayer::builder()
         .size(SCENE_SIZE)
@@ -19,8 +48,14 @@ pub fn Overlay(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // subtitle briefly appears at center then fades, before the HUD has
         // finished assembling. Reads as a system startup flash.
         .maybe_child({
-            let boot_in = ease_in_out_expo(time.phase(0.05, 0.18));
-            let boot_out = ease_in_out_expo(time.phase(0.32, 0.55));
+            // Virtual elapsed seconds inside the boot window. The window width
+            // is exactly 0.5, so this round-trips the original `time` bit-for-
+            // bit; sub-events are then expressed in window-local coordinates.
+            let t = boot.get() * OVERLAY_BOOT_WIDTH;
+            let boot_in =
+                ease_in_out_expo(local_phase(t, 0.05 - OVERLAY_BOOT_START, 0.18 - OVERLAY_BOOT_START));
+            let boot_out =
+                ease_in_out_expo(local_phase(t, 0.32 - OVERLAY_BOOT_START, 0.55 - OVERLAY_BOOT_START));
             let boot_life = (boot_in * (1.0 - boot_out)).clamp(0.0, 1.0);
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
@@ -56,8 +91,17 @@ pub fn Overlay(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // unshadowed overlay so it doesn't smear into a grey haze through the
         // foreground shadow pass.
         .maybe_child({
-            let flash = ease_out_quint(time.phase(4.9, 5.05))
-                * (1.0 - ease_in_out_expo(time.phase(5.05, 5.35)));
+            let t = flash.get() * OVERLAY_FLASH_WIDTH;
+            let flash = ease_out_quint(local_phase(
+                t,
+                4.9 - OVERLAY_FLASH_START,
+                5.05 - OVERLAY_FLASH_START,
+            )) * (1.0
+                - ease_in_out_expo(local_phase(
+                    t,
+                    5.05 - OVERLAY_FLASH_START,
+                    5.35 - OVERLAY_FLASH_START,
+                )));
             (flash > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)
@@ -65,9 +109,10 @@ pub fn Overlay(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .color(alpha(p.paper, flash * 0.22))
             })
         })
-        // Exit fade — gentle quint ease into the bg color.
+        // Exit fade — gentle quint ease into the bg color. The `fade` phase
+        // already spans the whole window, so it drives the ease directly.
         .maybe_child({
-            let fade = ease_in_out_quint(time.phase(7.25, DURATION));
+            let fade = ease_in_out_quint(fade);
             (fade > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)

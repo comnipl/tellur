@@ -34,7 +34,10 @@ use hud::{Hud, HUD_INTRO_END, HUD_INTRO_START, HUD_OUTRO_END, HUD_OUTRO_START};
 
 use backdrop::{Backdrop, BACKDROP_REVEAL_END, BACKDROP_REVEAL_START};
 use field::Field;
-use overlay::Overlay;
+use overlay::{
+    Overlay, OVERLAY_BOOT_END, OVERLAY_BOOT_START, OVERLAY_FADE_START, OVERLAY_FLASH_END,
+    OVERLAY_FLASH_START,
+};
 use overture::Overture;
 use resolve::Resolve;
 use scan::Scan;
@@ -135,7 +138,9 @@ pub fn build_timeline() -> impl Timeline + Send {
                     )
                     .child(
                         Overlay::builder()
-                            .time(t)
+                            .boot(t.phase(OVERLAY_BOOT_START, OVERLAY_BOOT_END))
+                            .flash(t.phase(OVERLAY_FLASH_START, OVERLAY_FLASH_END))
+                            .fade(t.phase(OVERLAY_FADE_START, DURATION))
                             .palette(palette)
                             .rasterize()
                             .place_at(Vec2::ZERO),
