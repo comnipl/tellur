@@ -11,6 +11,7 @@
 
 use std::time::Instant;
 
+use tellur_core::builder::RasterEffect;
 use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
@@ -34,15 +35,15 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
         .child_anchor(Anchor::CENTER)
         .at(Anchor::new(rx, 0.5))
         .child(
-            DropShadow::builder()
-                .offset(Vec2(0.0, 8.0))
-                .blur(4.0)
-                .color(Color::rgba_u8(255, 255, 255, 100))
-                .child(
-                    Circle::builder()
-                        .radius(30.0)
-                        .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
-                        .rasterize(),
+            Circle::builder()
+                .radius(30.0)
+                .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
+                .rasterize()
+                .effect(
+                    DropShadow::builder()
+                        .offset(Vec2(0.0, 8.0))
+                        .blur(4.0)
+                        .color(Color::rgba_u8(255, 255, 255, 100)),
                 ),
         )
         .build()

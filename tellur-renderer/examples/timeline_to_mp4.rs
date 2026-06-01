@@ -7,12 +7,14 @@
 //! distributes the four tracks evenly inside a padded scene with
 //! `CrossAlign::Stretch`. The dot itself is purely a tree of layout
 //! containers — `Frame` declares its outer shape and anchors the
-//! decorated circle inside it. The circle is wrapped in an `Outline`
-//! (white stroke) and then a `DropShadow`, so the shadow falls behind
-//! the combined stroked shape.
+//! decorated circle inside it. The circle is decorated via
+//! `.rasterize().effect(Outline).effect(DropShadow)` — the first
+//! `.effect()` is innermost, so the white stroke applies first and the
+//! `DropShadow` falls behind the combined stroked shape.
 
 use std::path::Path;
 
+use tellur_core::builder::RasterEffect;
 use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
@@ -29,9 +31,10 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 /// track's width. `Frame` declares the track's outer shape (fill the
 /// parent width, fix the height at 60) and anchors the circle so it
 /// stays fully inside: both `child_anchor` and `at` use the same
-/// bounce-driven ratio. The circle itself is decorated with a white
-/// `Outline` and a `DropShadow` — `Outline` runs first so the shadow
-/// falls behind the stroked shape.
+/// bounce-driven ratio. The circle itself is decorated via
+/// `.rasterize().effect(Outline).effect(DropShadow)` — the first
+/// `.effect()` is innermost, so the white `Outline` runs first and the
+/// `DropShadow` falls behind the stroked shape.
 ///
 /// `#[builder(into)] t: LocalTime` lets the call site pass a `TimelineTime`
 /// straight in (`From<TimelineTime> for LocalTime`). The single `.build()`
@@ -46,20 +49,20 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
         .child_anchor(Anchor::CENTER)
         .at(Anchor::new(rx, 0.5))
         .child(
-            DropShadow::builder()
-                .offset(Vec2(0.0, 8.0))
-                .blur(10.0)
-                .color(Color::rgba_u8(0, 0, 0, 200))
-                .child(
+            Circle::builder()
+                .radius(30.0)
+                .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
+                .rasterize()
+                .effect(
                     Outline::builder()
                         .width(4.0)
-                        .color(Color::rgb_u8(255, 255, 255))
-                        .child(
-                            Circle::builder()
-                                .radius(30.0)
-                                .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.6)))
-                                .rasterize(),
-                        ),
+                        .color(Color::rgb_u8(255, 255, 255)),
+                )
+                .effect(
+                    DropShadow::builder()
+                        .offset(Vec2(0.0, 8.0))
+                        .blur(10.0)
+                        .color(Color::rgba_u8(0, 0, 0, 200)),
                 ),
         )
         .build()

@@ -18,7 +18,7 @@ mod overture;
 mod resolve;
 mod scan;
 
-use tellur_core::builder::{RasterBuilderPlacement, VectorBuilderPlacement};
+use tellur_core::builder::{RasterEffect, VectorBuilderPlacement};
 use tellur_core::color::Color;
 use tellur_core::geometry::Vec2;
 use tellur_core::layer::{Layer, VectorLayer};
@@ -71,53 +71,56 @@ pub fn build_timeline() -> impl Timeline + Send {
                             .rasterize()
                             .place_at(Vec2::ZERO),
                     )
-                    // Foreground: two stacked shadows (a soft paper-tinted halo
-                    // with no offset, then a deeper dark drop further back)
-                    // behind the vector sections. The sections are each a
-                    // full-size child of one VectorLayer; `VectorLayer::render`
-                    // wraps every child in an identity-transform, opacity-1.0
-                    // group — a transparent passthrough — so the nested grouping
-                    // rasterizes identically to one flat layer while the global
-                    // leaf z-order (overture before field before …) is kept.
+                    // Foreground: the vector sections rasterized, then wrapped
+                    // by two stacked shadows via chained `.effect()`. Effects
+                    // apply inside-out, so the first `.effect()` is the
+                    // innermost soft paper-tinted halo with no offset, and the
+                    // last `.effect()` is the outermost deeper dark drop further
+                    // back. The sections are each a full-size child of one
+                    // VectorLayer; `VectorLayer::render` wraps every child in an
+                    // identity-transform, opacity-1.0 group — a transparent
+                    // passthrough — so the nested grouping rasterizes
+                    // identically to one flat layer while the global leaf
+                    // z-order (overture before field before …) is kept.
                     .child(
-                        DropShadow::builder()
-                            .offset(Vec2(0.0, 22.0))
-                            .blur(26.0)
-                            .color(Color::rgba_u8(0, 0, 0, 170))
+                        VectorLayer::builder()
+                            .size(SCENE_SIZE)
                             .child(
+                                Overture::builder()
+                                    .time(t)
+                                    .palette(palette)
+                                    .place_at(Vec2::ZERO),
+                            )
+                            .child(
+                                Field::builder()
+                                    .time(t)
+                                    .palette(palette)
+                                    .place_at(Vec2::ZERO),
+                            )
+                            .child(
+                                Scan::builder()
+                                    .time(t)
+                                    .palette(palette)
+                                    .place_at(Vec2::ZERO),
+                            )
+                            .child(
+                                Resolve::builder()
+                                    .time(t)
+                                    .palette(palette)
+                                    .place_at(Vec2::ZERO),
+                            )
+                            .rasterize()
+                            .effect(
                                 DropShadow::builder()
                                     // offset omitted → Vec2::ZERO (ambient halo)
                                     .blur(18.0)
-                                    .color(alpha(palette.paper, 0.26))
-                                    .child(
-                                        VectorLayer::builder()
-                                            .size(SCENE_SIZE)
-                                            .child(
-                                                Overture::builder()
-                                                    .time(t)
-                                                    .palette(palette)
-                                                    .place_at(Vec2::ZERO),
-                                            )
-                                            .child(
-                                                Field::builder()
-                                                    .time(t)
-                                                    .palette(palette)
-                                                    .place_at(Vec2::ZERO),
-                                            )
-                                            .child(
-                                                Scan::builder()
-                                                    .time(t)
-                                                    .palette(palette)
-                                                    .place_at(Vec2::ZERO),
-                                            )
-                                            .child(
-                                                Resolve::builder()
-                                                    .time(t)
-                                                    .palette(palette)
-                                                    .place_at(Vec2::ZERO),
-                                            )
-                                            .rasterize(),
-                                    ),
+                                    .color(alpha(palette.paper, 0.26)),
+                            )
+                            .effect(
+                                DropShadow::builder()
+                                    .offset(Vec2(0.0, 22.0))
+                                    .blur(26.0)
+                                    .color(Color::rgba_u8(0, 0, 0, 170)),
                             )
                             .place_at(Vec2::ZERO),
                     )
