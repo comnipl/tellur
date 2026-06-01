@@ -13,9 +13,11 @@
 //! and line breaking are deferred to a follow-up.
 
 use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
 use std::path::Path as FsPath;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use lru::LruCache;
 use rustybuzz::{ttf_parser, UnicodeBuffer};
 use thiserror::Error;
 
@@ -63,16 +65,50 @@ pub static CURSIVE: LazyLock<Arc<Font>> =
 pub static FANTASY: LazyLock<Arc<Font>> =
     LazyLock::new(|| Arc::new(Font::fantasy().expect("resolve system fantasy font")));
 
+/// Number of distinct shaped spans cached per font. Bounds memory for
+/// long-running sessions whose text varies continuously (e.g. a live
+/// numeric readout) while comfortably covering any realistic set of
+/// static labels.
+const SHAPE_CACHE_CAPACITY: usize = 512;
+
+/// Cache key for a shaped span: everything that determines the produced
+/// glyph geometry except the font itself (the cache is per-font). The
+/// fill/paint is deliberately excluded — it is cheap to re-apply and
+/// often animates frame to frame, so keying on it would defeat the cache.
+#[derive(PartialEq, Eq, Hash)]
+struct ShapeKey {
+    weight: u16,
+    size_bits: u32,
+    baseline_bits: u32,
+    text: String,
+}
+
+/// Memoized geometry of one shaped span, in span-local coordinates (the
+/// first glyph origin sits near `x = 0` and the baseline is baked in).
+/// Paint is not stored; the caller pairs each glyph with the current fill.
+struct ShapedGlyphs {
+    /// One entry per visible glyph. Whitespace and empty-outline glyphs
+    /// are omitted, but their advance is already folded into `width`.
+    glyphs: Vec<Vec<PathCommand>>,
+    /// Total advance of the span.
+    width: f32,
+}
+
 /// An owned font, cheaply shareable via `Arc<Font>` across components.
 ///
-/// The byte buffer is reference-counted; a fresh `rustybuzz::Face` is
-/// constructed per shaping/outlining call. The parse is not free but is
-/// inexpensive relative to a full text render, and this avoids the
-/// self-referential storage that would be needed to cache the face
-/// alongside its backing bytes.
+/// The byte buffer is reference-counted. Shaping a span — building a
+/// `rustybuzz::Face`, shaping with rustybuzz, and outlining each glyph —
+/// is comparatively expensive and fully determined by
+/// `(weight, size, baseline, text)`, so the per-span result is memoized
+/// in `shape_cache`: a label whose content is stable across frames shapes
+/// once and is reused thereafter, even while its fill color animates (the
+/// cache stores geometry only; the caller re-attaches the paint). The
+/// cache lives on the font so its lifetime is bound to the backing bytes
+/// and shared exactly along the `Arc<Font>` graph.
 pub struct Font {
     data: Arc<Vec<u8>>,
     face_index: u32,
+    shape_cache: Mutex<LruCache<ShapeKey, Arc<ShapedGlyphs>>>,
 }
 
 impl Font {
@@ -92,7 +128,13 @@ impl Font {
     ) -> Result<Self, FontError> {
         let data: Arc<Vec<u8>> = bytes.into();
         rustybuzz::Face::from_slice(data.as_ref(), face_index).ok_or(FontError::Parse)?;
-        Ok(Self { data, face_index })
+        Ok(Self {
+            data,
+            face_index,
+            shape_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(SHAPE_CACHE_CAPACITY).expect("cache capacity is non-zero"),
+            )),
+        })
     }
 
     /// Reads `path` into memory and constructs a `Font` from the bytes
@@ -183,6 +225,96 @@ impl Font {
     fn face(&self) -> rustybuzz::Face<'_> {
         rustybuzz::Face::from_slice(self.data.as_ref(), self.face_index)
             .expect("font data validated in Font constructors")
+    }
+
+    /// Returns the memoized span-local geometry for `text` at the given
+    /// style, computing and caching it on a miss. Keyed on
+    /// `(weight, size, baseline, text)`; the result carries no paint, so
+    /// callers re-attach the (possibly per-frame) fill themselves.
+    fn shaped_glyphs(
+        &self,
+        weight: Weight,
+        size: f32,
+        baseline_y: f32,
+        text: &str,
+    ) -> Arc<ShapedGlyphs> {
+        let key = ShapeKey {
+            weight: weight.0,
+            size_bits: size.to_bits(),
+            baseline_bits: baseline_y.to_bits(),
+            text: text.to_owned(),
+        };
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return Arc::clone(hit);
+            }
+        }
+        let shaped = Arc::new(self.shape_uncached(weight, size, baseline_y, text));
+        if let Ok(mut cache) = self.shape_cache.lock() {
+            cache.put(key, Arc::clone(&shaped));
+        }
+        shaped
+    }
+
+    /// The uncached path behind [`Font::shaped_glyphs`]: builds a fresh
+    /// `rustybuzz::Face`, shapes `text`, and outlines every glyph into
+    /// span-local path commands.
+    fn shape_uncached(
+        &self,
+        weight: Weight,
+        size: f32,
+        baseline_y: f32,
+        text: &str,
+    ) -> ShapedGlyphs {
+        let mut face = self.face();
+        // Apply the OpenType `wght` axis. No effect on fonts without a
+        // `wght` axis; the call returns `None` and we just keep going.
+        face.set_variations(&[rustybuzz::Variation {
+            tag: ttf_parser::Tag::from_bytes(b"wght"),
+            value: weight.0 as f32,
+        }]);
+        let upem = face.units_per_em() as f32;
+        let scale = size / upem;
+
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(text);
+        let glyph_buffer = rustybuzz::shape(&face, &[], buffer);
+
+        let mut glyphs = Vec::new();
+        let mut pen_x: f32 = 0.0;
+        for (info, pos) in glyph_buffer
+            .glyph_infos()
+            .iter()
+            .zip(glyph_buffer.glyph_positions().iter())
+        {
+            let glyph_id = ttf_parser::GlyphId(info.glyph_id as u16);
+            let x_off = pos.x_offset as f32 * scale;
+            let y_off = pos.y_offset as f32 * scale;
+            // Span starts at x = 0 in its own space.
+            let glyph_x = pen_x + x_off;
+            // Font Y points up; flipping by subtracting `y_off` from the
+            // Y-down baseline puts the glyph in our space.
+            let glyph_y = baseline_y - y_off;
+
+            let mut builder = OutlinePathBuilder {
+                commands: Vec::new(),
+                scale,
+                origin_x: glyph_x,
+                origin_y: glyph_y,
+            };
+            face.outline_glyph(glyph_id, &mut builder);
+            if !builder.commands.is_empty() {
+                glyphs.push(builder.commands);
+            }
+
+            pen_x += pos.x_advance as f32 * scale;
+            // y_advance is typically 0 for horizontal text.
+        }
+
+        ShapedGlyphs {
+            glyphs,
+            width: pen_x,
+        }
     }
 }
 
@@ -392,6 +524,7 @@ impl Text {
         for span in &self.spans {
             let span_start_x = pen_x;
             let mut span_paths: Vec<(Vec<PathCommand>, Paint)> = Vec::new();
+            let mut width = 0.0;
 
             if !span.text.is_empty() {
                 let font = self.effective_font(span);
@@ -399,53 +532,18 @@ impl Text {
                 let fill = self.effective_fill(span);
                 let weight = self.effective_weight(span);
 
-                let mut face = font.face();
-                // Apply the OpenType `wght` axis. No effect on fonts
-                // without a `wght` axis; the call returns `None` and
-                // we just keep going.
-                face.set_variations(&[rustybuzz::Variation {
-                    tag: ttf_parser::Tag::from_bytes(b"wght"),
-                    value: weight.0 as f32,
-                }]);
-                let upem = face.units_per_em() as f32;
-                let scale = size / upem;
-
-                let mut buffer = UnicodeBuffer::new();
-                buffer.push_str(&span.text);
-                let glyph_buffer = rustybuzz::shape(&face, &[], buffer);
-
-                for (info, pos) in glyph_buffer
-                    .glyph_infos()
-                    .iter()
-                    .zip(glyph_buffer.glyph_positions().iter())
-                {
-                    let glyph_id = ttf_parser::GlyphId(info.glyph_id as u16);
-                    let x_off = pos.x_offset as f32 * scale;
-                    let y_off = pos.y_offset as f32 * scale;
-                    // Local x: span starts at 0 in its own space.
-                    let glyph_x = (pen_x - span_start_x) + x_off;
-                    // Font Y points up; flipping by subtracting `y_off`
-                    // from the Y-down baseline puts the glyph in our
-                    // space.
-                    let glyph_y = baseline_y - y_off;
-
-                    let mut builder = OutlinePathBuilder {
-                        commands: Vec::new(),
-                        scale,
-                        origin_x: glyph_x,
-                        origin_y: glyph_y,
-                    };
-                    face.outline_glyph(glyph_id, &mut builder);
-                    if !builder.commands.is_empty() {
-                        span_paths.push((builder.commands, fill.clone()));
-                    }
-
-                    pen_x += pos.x_advance as f32 * scale;
-                    // y_advance is typically 0 for horizontal text.
+                // The shaped geometry (face build + shaping + per-glyph
+                // outlining) is memoized on the font; only the fill — which
+                // may animate frame to frame — is re-applied here.
+                let shaped = font.shaped_glyphs(weight, size, baseline_y, &span.text);
+                span_paths.reserve(shaped.glyphs.len());
+                for commands in &shaped.glyphs {
+                    span_paths.push((commands.clone(), fill.clone()));
                 }
+                width = shaped.width;
+                pen_x += shaped.width;
             }
 
-            let width = pen_x - span_start_x;
             out.push(ShapedSpan {
                 start_x: span_start_x,
                 width,
