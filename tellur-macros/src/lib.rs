@@ -51,13 +51,20 @@
 //! argument is `None`. All four add to the same vec, so they interleave and
 //! preserve order. All other `#[builder(...)]` attributes pass straight through
 //! to `bon`.
+//!
+//! A raster component's child field/argument annotated `#[effect]` (which must be
+//! a `Box<dyn RasterComponent>`) additionally gets an `Effect` impl on its builder
+//! *while the child slot is unset*, so callers can write
+//! `base.effect(ThisEffect::builder()…)` instead of nesting `.child(base)`. It is
+//! purely additive — the normal `.child(...)` setter and the component itself are
+//! untouched — and is rejected on `#[component(vector)]`.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, Attribute, FnArg, Ident, Item, ItemFn, ItemStruct, Meta, Pat,
-    PatType, Type,
+    parse_macro_input, parse_quote, Attribute, Field, FnArg, Ident, Item, ItemFn, ItemStruct, Meta,
+    Pat, PatType, Type,
 };
 
 /// Kind of component the macro targets.
@@ -175,7 +182,13 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
     };
 
     let mut children: Option<Children> = None;
+    let mut effect_child: Option<Ident> = None;
     for field in named.named.iter_mut() {
+        // `#[effect]`: tag this field as the effect-child slot (raster only).
+        if field.attrs.iter().any(|a| a.path().is_ident("effect")) {
+            effect_child = Some(parse_effect_field(field, kind, effect_child.is_some())?);
+        }
+
         let Some(pos) = field
             .attrs
             .iter()
@@ -203,7 +216,7 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
     }
 
     let ident = s.ident.clone();
-    let glue = emit_glue(&ident, kind, &children);
+    let glue = emit_glue(&ident, kind, &children, &effect_child);
     Ok(quote! {
         #[derive(::tellur_core::__bon::Builder)]
         #[builder(derive(Into), crate = ::tellur_core::__bon)]
@@ -239,6 +252,7 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     let mut available_ident: Option<&Ident> = None;
     let mut available_type: Option<&Type> = None;
     let mut children: Option<Children> = None;
+    let mut effect_child: Option<Ident> = None;
 
     for arg in &func.sig.inputs {
         let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg else {
@@ -287,12 +301,33 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
                     item_ty,
                     each,
                 });
+            } else if a.path().is_ident("effect") {
+                // Drop the attr (don't forward it to bon) and record the slot.
+                if !matches!(kind, Kind::Raster) {
+                    return Err(syn::Error::new_spanned(
+                        a,
+                        "#[effect] is only valid on a #[component(raster)]",
+                    ));
+                }
+                if effect_child.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        a,
+                        "component fn supports at most one #[effect] argument",
+                    ));
+                }
+                if !is_boxed_raster_component(ty) {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "#[effect] argument must be of type `Box<dyn RasterComponent>`",
+                    ));
+                }
+                effect_child = Some(pi.ident.clone());
             } else if a.path().is_ident("builder") {
                 forwarded.push(a.clone());
             } else {
                 return Err(syn::Error::new_spanned(
                     a,
-                    "unsupported attribute on component fn argument (allowed: #[available], #[children(...)], #[builder(...)])",
+                    "unsupported attribute on component fn argument (allowed: #[available], #[children(...)], #[builder(...)], #[effect])",
                 ));
             }
         }
@@ -374,7 +409,7 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
         })
         .collect();
 
-    let glue = emit_glue(&struct_ident, kind, &children);
+    let glue = emit_glue(&struct_ident, kind, &children, &effect_child);
 
     Ok(quote! {
         #[derive(::core::clone::Clone, ::core::cmp::PartialEq, ::tellur_core::__bon::Builder)]
@@ -424,12 +459,45 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
 /// - `From<ident>` and `From<identBuilder<IsComplete>>` for `Box<dyn _>`,
 /// - the `VectorBuilder` / `RasterBuilder` marker on the complete builder,
 /// - streaming child setters when a `#[children]` member is present.
-fn emit_glue(ident: &Ident, kind: Kind, children: &Option<Children>) -> TokenStream2 {
+fn emit_glue(
+    ident: &Ident,
+    kind: Kind,
+    children: &Option<Children>,
+    effect_child: &Option<Ident>,
+) -> TokenStream2 {
     let builder_ty = format_ident!("{}Builder", ident);
     let state_mod = Ident::new(&pascal_to_snake(&builder_ty.to_string()), ident.span());
     let comp = kind.component_trait();
     let bld = kind.builder_trait();
     let box_dyn = quote!(::std::boxed::Box<dyn #comp>);
+
+    // For a raster component whose child field is tagged `#[effect]`, implement
+    // `Effect` on the builder *while that child slot is still unset*: `apply`
+    // fills the child and finishes the build. The `SetChild<S>: IsComplete`
+    // bound means "setting the child completes the builder" — i.e. every other
+    // required member is already set — so a forgotten parameter is reported at
+    // the `.effect(...)` call site. `Output` is the concrete component, keeping
+    // `.effect().effect()` chaining and `.place_at()` working.
+    let effect_impl = match (kind, effect_child) {
+        (Kind::Raster, Some(field)) => {
+            let field_pascal = snake_to_pascal_ident(field);
+            let set_ty = format_ident!("Set{}", field_pascal);
+            quote! {
+                impl<__S> ::tellur_core::builder::Effect for #builder_ty<__S>
+                where
+                    __S: #state_mod::State,
+                    __S::#field_pascal: #state_mod::IsUnset,
+                    #state_mod::#set_ty<__S>: #state_mod::IsComplete,
+                {
+                    type Output = #ident;
+                    fn apply(self, child: #box_dyn) -> #ident {
+                        #builder_ty::build(self.#field(child))
+                    }
+                }
+            }
+        }
+        _ => quote! {},
+    };
 
     let children_methods = children.as_ref().map(|c| {
         let field = &c.field;
@@ -509,6 +577,8 @@ fn emit_glue(ident: &Ident, kind: Kind, children: &Option<Children>) -> TokenStr
         }
 
         #children_methods
+
+        #effect_impl
     }
 }
 
@@ -535,6 +605,44 @@ fn parse_children_each(attr: &Attribute) -> syn::Result<Option<Ident>> {
             "expected `#[children]` or `#[children(each = name)]`",
         )),
     }
+}
+
+/// Strips `#[effect]` from a struct field, validates it, and returns the field
+/// ident (the effect-child slot). Errors for non-raster components, a second
+/// `#[effect]`, or a field that isn't a `Box<dyn RasterComponent>`.
+fn parse_effect_field(field: &mut Field, kind: Kind, already: bool) -> syn::Result<Ident> {
+    let pos = field
+        .attrs
+        .iter()
+        .position(|a| a.path().is_ident("effect"))
+        .expect("caller checked an #[effect] attr is present");
+    let attr = field.attrs.remove(pos);
+    if !matches!(kind, Kind::Raster) {
+        return Err(syn::Error::new_spanned(
+            &attr,
+            "#[effect] is only valid on a #[component(raster)]",
+        ));
+    }
+    if already {
+        return Err(syn::Error::new_spanned(
+            &attr,
+            "#[component] supports at most one #[effect] field",
+        ));
+    }
+    if !is_boxed_raster_component(&field.ty) {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "#[effect] field must be of type `Box<dyn RasterComponent>`",
+        ));
+    }
+    Ok(field.ident.clone().unwrap())
+}
+
+/// Whether `ty` is a `Box<dyn …RasterComponent>` (the only legal `#[effect]`
+/// field type). Tolerant of a qualified path on the trait.
+fn is_boxed_raster_component(ty: &Type) -> bool {
+    let normalized: String = quote!(#ty).to_string().split_whitespace().collect();
+    normalized.starts_with("Box<dyn") && normalized.ends_with("RasterComponent>")
 }
 
 /// Returns the `T` of a `Vec<T>` type, if `ty` is one.

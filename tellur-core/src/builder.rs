@@ -122,3 +122,49 @@ impl<C: RasterComponent + 'static> AnchoredRasterBuilder<C> {
         }
     }
 }
+
+/// A raster→raster wrapping step: given a boxed child, produce the *concrete*
+/// effect component that wraps it.
+///
+/// The component macro implements this (for `#[component(raster)]` types whose
+/// child field is tagged `#[effect]`) on the effect's *builder while its child
+/// slot is still empty* — so a caller passes `DropShadow::builder()…` with no
+/// `.child()` and no `.build()`, and [`RasterEffect::effect`] fills the child.
+/// `Output` is the concrete component (not `Box<dyn RasterComponent>`, which has
+/// no `RasterComponent` impl), so `.effect()` results keep chaining and placing.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a ready-to-apply raster effect",
+    note = "an effect builder must have every parameter set and its `#[effect]` child slot still empty"
+)]
+pub trait Effect {
+    type Output: RasterComponent + 'static;
+    fn apply(self, child: Box<dyn RasterComponent>) -> Self::Output;
+}
+
+/// Blanket extension adding `.effect(...)` / `.effect_with(...)` to every built
+/// raster component, mirroring [`RasterPlacement`](crate::placement::RasterPlacement).
+///
+/// Effects apply inside-out: the first `.effect()` is closest to the base and
+/// each subsequent one wraps further out, so
+/// `base.effect(halo).effect(drop)` builds `drop { child: halo { child: base } }`.
+pub trait RasterEffect: RasterComponent + Sized + 'static {
+    /// Applies a builder effect (e.g. `DropShadow::builder()…` with its child
+    /// slot empty), returning the concrete wrapper so further `.effect()` /
+    /// `.place_at()` calls keep resolving.
+    fn effect<E: Effect>(self, effect: E) -> E::Output {
+        effect.apply(Box::new(self))
+    }
+
+    /// Escape hatch: applies an arbitrary closure that receives the boxed child
+    /// and returns any concrete raster component — for ad-hoc or multi-wrapper
+    /// composition a single-`child` builder effect cannot express.
+    fn effect_with<C, F>(self, wrap: F) -> C
+    where
+        F: FnOnce(Box<dyn RasterComponent>) -> C,
+        C: RasterComponent + 'static,
+    {
+        wrap(Box::new(self))
+    }
+}
+
+impl<T: RasterComponent + 'static> RasterEffect for T {}

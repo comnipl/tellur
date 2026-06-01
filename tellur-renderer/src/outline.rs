@@ -23,6 +23,7 @@ pub struct Outline {
     pub width: f32,
     /// Stroke color (its alpha is multiplied with the ring alpha).
     pub color: Color,
+    #[effect]
     #[builder(into)]
     pub child: Box<dyn RasterComponent>,
 }

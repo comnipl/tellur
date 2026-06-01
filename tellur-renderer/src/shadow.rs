@@ -24,6 +24,7 @@ pub struct DropShadow {
     pub blur: f32,
     /// Shadow color (the alpha channel is multiplied with the child's).
     pub color: Color,
+    #[effect]
     #[builder(into)]
     pub child: Box<dyn RasterComponent>,
 }
@@ -265,5 +266,72 @@ fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
                 count -= 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tellur_core::builder::RasterEffect;
+
+    /// Minimal raster leaf used as the base in effect-stack tests.
+    #[derive(PartialEq, Hash)]
+    struct Stub;
+
+    impl RasterComponent for Stub {
+        fn layout(&self, _constraints: Constraints) -> Vec2 {
+            Vec2::ZERO
+        }
+        fn paint_bounds(&self, _size: Vec2) -> Rect {
+            Rect {
+                origin: Vec2::ZERO,
+                size: Vec2::ZERO,
+            }
+        }
+        fn render(&self, _size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+            blank_image(target)
+        }
+    }
+
+    #[test]
+    fn effect_stack_equals_manual_nesting() {
+        // First `.effect()` is innermost (closest to base); the last is outermost,
+        // so this must equal `dark { child: halo { child: base } }`.
+        let chained = Stub
+            .effect(DropShadow::builder().blur(18.0).color(Color::rgba_u8(0, 0, 0, 40)))
+            .effect(
+                DropShadow::builder()
+                    .offset(Vec2(0.0, 22.0))
+                    .blur(26.0)
+                    .color(Color::rgba_u8(0, 0, 0, 170)),
+            );
+
+        let manual = DropShadow {
+            offset: Vec2(0.0, 22.0),
+            blur: 26.0,
+            color: Color::rgba_u8(0, 0, 0, 170),
+            child: Box::new(DropShadow {
+                offset: Vec2::ZERO,
+                blur: 18.0,
+                color: Color::rgba_u8(0, 0, 0, 40),
+                child: Box::new(Stub),
+            }),
+        };
+
+        // `DropShadow` is not `Debug`, so compare with `==` rather than `assert_eq!`.
+        assert!(chained == manual);
+    }
+
+    #[test]
+    fn effect_with_closure_wraps_base() {
+        let wrapped = Stub.effect_with(|child| {
+            DropShadow::builder()
+                .blur(5.0)
+                .color(Color::rgba_u8(0, 0, 0, 10))
+                .child(child)
+                .build()
+        });
+        assert_eq!(wrapped.blur.to_bits(), 5.0f32.to_bits());
+        assert_eq!(wrapped.color, Color::rgba_u8(0, 0, 0, 10));
     }
 }
