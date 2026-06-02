@@ -243,6 +243,17 @@ impl GpuRenderer {
         ))
     }
 
+    /// Allocates a target-sized transparent storage buffer.
+    ///
+    /// wgpu (per the WebGPU spec) zero-initializes a freshly created buffer
+    /// before its first use, so the blend paths (composite / shadow / outline)
+    /// that read-modify-write the destination still start from transparent
+    /// without any explicit fill. This deliberately does **not** issue the
+    /// `vec![0u8; len]` + whole-buffer `write_buffer` it used to: that per-frame
+    /// ~8 MiB CPU alloc + memset + CPU→GPU upload was the dominant CPU cost of
+    /// the GPU render path, and it was entirely redundant (the blend paths get
+    /// transparency from zero-init; the full-overwrite `texture_to_buffer` copy
+    /// never depended on the contents at all).
     fn empty_image(&self, resolution: Resolution) -> Arc<GpuBufferImage> {
         let len = (resolution.width as usize) * (resolution.height as usize) * 4;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -253,7 +264,6 @@ impl GpuRenderer {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&buffer, 0, &vec![0u8; len]);
         Arc::new(GpuBufferImage {
             width: resolution.width,
             height: resolution.height,
