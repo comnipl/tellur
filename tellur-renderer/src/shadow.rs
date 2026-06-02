@@ -288,7 +288,12 @@ mod tests {
                 size: Vec2::ZERO,
             }
         }
-        fn render(&self, _size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             blank_image(target)
         }
     }
@@ -298,7 +303,11 @@ mod tests {
         // First `.effect()` is innermost (closest to base); the last is outermost,
         // so this must equal `dark { child: halo { child: base } }`.
         let chained = Stub
-            .effect(DropShadow::builder().blur(18.0).color(Color::rgba_u8(0, 0, 0, 40)))
+            .effect(
+                DropShadow::builder()
+                    .blur(18.0)
+                    .color(Color::rgba_u8(0, 0, 0, 40)),
+            )
             .effect(
                 DropShadow::builder()
                     .offset(Vec2(0.0, 22.0))

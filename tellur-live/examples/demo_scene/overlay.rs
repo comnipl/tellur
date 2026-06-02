@@ -52,10 +52,16 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
             // is exactly 0.5, so this round-trips the original `time` bit-for-
             // bit; sub-events are then expressed in window-local coordinates.
             let t = boot.get() * OVERLAY_BOOT_WIDTH;
-            let boot_in =
-                ease_in_out_expo(local_phase(t, 0.05 - OVERLAY_BOOT_START, 0.18 - OVERLAY_BOOT_START));
-            let boot_out =
-                ease_in_out_expo(local_phase(t, 0.32 - OVERLAY_BOOT_START, 0.55 - OVERLAY_BOOT_START));
+            let boot_in = ease_in_out_expo(local_phase(
+                t,
+                0.05 - OVERLAY_BOOT_START,
+                0.18 - OVERLAY_BOOT_START,
+            ));
+            let boot_out = ease_in_out_expo(local_phase(
+                t,
+                0.32 - OVERLAY_BOOT_START,
+                0.55 - OVERLAY_BOOT_START,
+            ));
             let boot_life = (boot_in * (1.0 - boot_out)).clamp(0.0, 1.0);
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
