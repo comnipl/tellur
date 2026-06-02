@@ -6,16 +6,15 @@
 //! enough pixels; its `layout_box` is left unchanged so shadows do not
 //! disturb layout.
 
-use std::hash::{Hash, Hasher};
-
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
-use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{DropShadowInput, RenderContext};
+use tellur_core::Keyable;
 
 #[tellur_core::component(raster)]
+#[derive(Keyable)]
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
     #[builder(default = Vec2::ZERO)]
@@ -27,24 +26,6 @@ pub struct DropShadow {
     #[effect]
     #[builder(into)]
     pub child: Box<dyn RasterComponent>,
-}
-
-impl PartialEq for DropShadow {
-    fn eq(&self, other: &Self) -> bool {
-        self.offset == other.offset
-            && self.blur.to_bits() == other.blur.to_bits()
-            && self.color == other.color
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for DropShadow {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.offset.hash(state);
-        hash_f32(self.blur, state);
-        self.color.hash(state);
-        self.child.hash(state);
-    }
 }
 
 /// 3-pass box blur with kernel radius `r` has a total convolution

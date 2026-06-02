@@ -20,10 +20,9 @@
 //! [`AnchoredSize::snap_to`](crate::geometry::AnchoredSize::snap_to), so the
 //! geometry vocabulary carries straight over to component placement.
 
-use std::hash::{Hash, Hasher};
-
 use crate::geometry::{Anchor, Constraints, Rect, Transform, Vec2};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
+use crate::Keyable;
 
 /// A [`VectorComponent`] shifted by `offset` in its parent's coordinate space.
 ///
@@ -32,6 +31,7 @@ use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 /// `offset` is computed eagerly by the [`VectorPlacement`] fluent methods (and
 /// their builder-side mirror), so a `Positioned` is fully determined at
 /// construction — there is no re-anchoring at render time.
+#[derive(Keyable)]
 pub struct Positioned {
     pub offset: Vec2,
     pub child: Box<dyn VectorComponent>,
@@ -44,19 +44,6 @@ impl Positioned {
             offset,
             child: child.into(),
         }
-    }
-}
-
-impl PartialEq for Positioned {
-    fn eq(&self, other: &Self) -> bool {
-        self.offset == other.offset && *self.child == *other.child
-    }
-}
-
-impl Hash for Positioned {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.offset.hash(state);
-        self.child.hash(state);
     }
 }
 
@@ -151,14 +138,14 @@ impl<C: VectorComponent + 'static> AnchoredVectorComponent<C> {
 /// the parent's `composite_children` pass applies the offset at compositing
 /// time (`position + paint_bounds.origin - paint_rect.origin`).
 pub mod raster {
-    use std::hash::{Hash, Hasher};
-
     use crate::geometry::{Anchor, Constraints, Rect, Vec2};
     use crate::raster::{RasterComponent, RasterImage, Resolution};
     use crate::render_context::{CachePolicy, RenderContext};
+    use crate::Keyable;
 
     /// A [`RasterComponent`] shifted by `offset` in its parent's coordinate
     /// space. See the [module docs](self) for how the offset is applied.
+    #[derive(Keyable)]
     pub struct Positioned {
         pub offset: Vec2,
         pub child: Box<dyn RasterComponent>,
@@ -170,19 +157,6 @@ pub mod raster {
                 offset,
                 child: child.into(),
             }
-        }
-    }
-
-    impl PartialEq for Positioned {
-        fn eq(&self, other: &Self) -> bool {
-            self.offset == other.offset && *self.child == *other.child
-        }
-    }
-
-    impl Hash for Positioned {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.offset.hash(state);
-            self.child.hash(state);
         }
     }
 

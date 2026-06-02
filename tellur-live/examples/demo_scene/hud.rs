@@ -9,10 +9,7 @@
 //! reuse the rasterized image for the full steady-state span instead of
 //! re-rendering every frame.
 
-use std::hash::{Hash, Hasher};
-
 use tellur_core::color::Color;
-use tellur_core::dyn_compare::hash_f32;
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Vec2};
 use tellur_core::layer::VectorLayer;
@@ -60,30 +57,12 @@ fn local_phase(virtual_t: f32, start: f32, end: f32) -> Phase {
     Phase::saturating((virtual_t - start) / (end - start))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Hash)]
 pub struct Hud {
     pub palette: Palette,
     pub intro: Phase,
     pub outro: Phase,
     pub section: u8,
-}
-
-impl PartialEq for Hud {
-    fn eq(&self, other: &Self) -> bool {
-        self.section == other.section
-            && self.intro == other.intro
-            && self.outro == other.outro
-            && self.palette == other.palette
-    }
-}
-
-impl Hash for Hud {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.section.hash(state);
-        hash_f32(self.intro.get(), state);
-        hash_f32(self.outro.get(), state);
-        self.palette.hash(state);
-    }
 }
 
 impl VectorComponent for Hud {

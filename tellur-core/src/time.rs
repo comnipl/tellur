@@ -31,6 +31,7 @@
 //! ```
 
 use crate::phase::Phase;
+use crate::Keyable;
 
 /// A point in time, measured in seconds.
 ///
@@ -132,15 +133,9 @@ pub trait Time: Copy + Sized {
 /// A point on the global timeline that a [`crate::timeline::Timeline`] is
 /// being sampled at. Produced by the renderer; users typically don't
 /// construct it directly.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct TimelineTime {
     seconds: f32,
-}
-
-impl std::hash::Hash for TimelineTime {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        crate::dyn_compare::hash_f32(self.seconds, state);
-    }
 }
 
 impl TimelineTime {
@@ -160,15 +155,9 @@ impl Time for TimelineTime {
 
 /// A remapped time, no longer relative to the global timeline origin.
 /// Produced by [`Time::during_ripple`] and [`Time::lerp`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct LocalTime {
     seconds: f32,
-}
-
-impl std::hash::Hash for LocalTime {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        crate::dyn_compare::hash_f32(self.seconds, state);
-    }
 }
 
 impl LocalTime {

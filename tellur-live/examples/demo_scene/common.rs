@@ -12,12 +12,10 @@
 //! `Aabb` alias for `geometry::Rect`.
 
 use std::f32::consts::{PI, TAU};
-use std::hash::{Hash, Hasher};
 
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
-use tellur_core::dyn_compare::hash_f32;
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Rect as Aabb, Transform, Vec2};
 use tellur_core::phase::Phase;
@@ -26,6 +24,7 @@ use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::Time;
 use tellur_core::vector::{Group, Node, Paint, Stroke, VectorComponent, VectorGraphic};
+use tellur_core::Keyable;
 
 pub const DURATION: f32 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
@@ -48,32 +47,13 @@ pub struct Palette {
 }
 
 // Composable rotation + non-uniform scale + opacity wrapper.
+#[derive(Keyable)]
 pub struct Fx {
     pub angle: f32,
     pub sx: f32,
     pub sy: f32,
     pub opacity: f32,
     pub child: Box<dyn VectorComponent>,
-}
-
-impl PartialEq for Fx {
-    fn eq(&self, other: &Self) -> bool {
-        self.angle.to_bits() == other.angle.to_bits()
-            && self.sx.to_bits() == other.sx.to_bits()
-            && self.sy.to_bits() == other.sy.to_bits()
-            && self.opacity.to_bits() == other.opacity.to_bits()
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for Fx {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.angle, state);
-        hash_f32(self.sx, state);
-        hash_f32(self.sy, state);
-        hash_f32(self.opacity, state);
-        self.child.hash(state);
-    }
 }
 
 impl VectorComponent for Fx {
@@ -226,29 +206,12 @@ pub fn Rect(position: Vec2, size: Vec2, color: Color) -> impl VectorComponent {
 // always return the intrinsic `2 * radius` size — the scene's clip handles
 // overflow, not the layout. Used by `Circle` so every circle stays a real
 // circle regardless of how big it grows (e.g. the outward pulse in RESOLVE).
+#[derive(Keyable)]
 struct TrueCircle {
     radius: f32,
     fill: Option<Color>,
     stroke_color: Option<Color>,
     stroke_width: f32,
-}
-
-impl PartialEq for TrueCircle {
-    fn eq(&self, other: &Self) -> bool {
-        self.radius.to_bits() == other.radius.to_bits()
-            && self.fill == other.fill
-            && self.stroke_color == other.stroke_color
-            && self.stroke_width.to_bits() == other.stroke_width.to_bits()
-    }
-}
-
-impl Hash for TrueCircle {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.radius, state);
-        self.fill.hash(state);
-        self.stroke_color.hash(state);
-        hash_f32(self.stroke_width, state);
-    }
 }
 
 impl VectorComponent for TrueCircle {

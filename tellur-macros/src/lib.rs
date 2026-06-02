@@ -63,9 +63,25 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, Attribute, Field, FnArg, Ident, Item, ItemFn, ItemStruct, Meta,
-    Pat, PatType, Type,
+    parse_macro_input, parse_quote, Attribute, DeriveInput, Field, FnArg, Ident, Item, ItemFn,
+    ItemStruct, Meta, Pat, PatType, Type,
 };
+
+mod keyable;
+
+/// Derives `PartialEq`, `Eq`, and `Hash` for a type that contains `f32`/`f64`
+/// (directly or through `Option`/`Vec`/arrays/tuples), comparing and hashing
+/// every float by its bit pattern. Unlike the stock derives this yields a
+/// mutually consistent, `Eq`-sound trio even though floats are neither `Eq`
+/// nor `Hash`. Non-float fields delegate to their own `PartialEq`/`Hash`.
+#[proc_macro_derive(Keyable)]
+pub fn keyable(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match keyable::derive(input) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
 
 /// Kind of component the macro targets.
 #[derive(Clone, Copy)]
@@ -393,35 +409,43 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             )
         };
 
-    // Field-by-field hash so bare `f32` / `f64` fields route through the
-    // bit-pattern hashers (they don't implement `Hash`).
-    let hash_field_calls: Vec<TokenStream2> = field_idents
+    // Float-aware `PartialEq`/`Eq`/`Hash` so the synthesized component is a
+    // consistent cache key even with bare `f32`/`f64` fields (which are neither
+    // `Eq` nor `Hash`). Shares its codegen with `#[derive(Keyable)]`, so
+    // `Option<f32>`, `Vec<f32>`, etc. are handled too — not just bare floats.
+    let eq_terms: Vec<keyable::EqTerm> = field_idents
         .iter()
         .zip(field_types.iter())
-        .map(|(ident, ty)| {
-            let ty_str = quote!(#ty).to_string();
-            let normalized: String = ty_str.split_whitespace().collect();
-            match normalized.as_str() {
-                "f32" => quote! { ::tellur_core::dyn_compare::hash_f32(self.#ident, state); },
-                "f64" => quote! { self.#ident.to_bits().hash(state); },
-                _ => quote! { ::core::hash::Hash::hash(&self.#ident, state); },
-            }
-        })
+        .map(|(id, ty)| ((*ty).clone(), quote!(self.#id), quote!(other.#id)))
         .collect();
+    let hash_terms: Vec<keyable::HashTerm> = field_idents
+        .iter()
+        .zip(field_types.iter())
+        .map(|(id, ty)| ((*ty).clone(), quote!(self.#id)))
+        .collect();
+    let eq_body = keyable::eq_body_from(&eq_terms);
+    let hash_body = keyable::hash_body_from(&hash_terms, &quote!(state));
 
     let glue = emit_glue(&struct_ident, kind, &children, &effect_child);
 
     Ok(quote! {
-        #[derive(::core::clone::Clone, ::core::cmp::PartialEq, ::tellur_core::__bon::Builder)]
+        #[derive(::core::clone::Clone, ::tellur_core::__bon::Builder)]
         #[builder(derive(Into), crate = ::tellur_core::__bon)]
         #vis struct #struct_ident {
             #( #( #field_attrs )* pub #field_idents: #field_types, )*
         }
 
+        impl ::core::cmp::PartialEq for #struct_ident {
+            fn eq(&self, other: &Self) -> bool {
+                #eq_body
+            }
+        }
+
+        impl ::core::cmp::Eq for #struct_ident {}
+
         impl ::core::hash::Hash for #struct_ident {
             fn hash<__H: ::core::hash::Hasher>(&self, state: &mut __H) {
-                use ::core::hash::Hash as _;
-                #( #hash_field_calls )*
+                #hash_body
             }
         }
 

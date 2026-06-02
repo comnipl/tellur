@@ -21,12 +21,12 @@ use lru::LruCache;
 use rustybuzz::{ttf_parser, UnicodeBuffer};
 use thiserror::Error;
 
-use crate::dyn_compare::hash_f32;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::{Positioned, VectorPlacement};
 use crate::vector::{
     Fill, Group, Node, Paint, Path as VPath, PathCommand, VectorComponent, VectorGraphic,
 };
+use crate::Keyable;
 
 #[derive(Debug, Error)]
 pub enum FontError {
@@ -329,6 +329,12 @@ impl PartialEq for Font {
     }
 }
 
+// Pointer-identity equality is reflexive, so `Font` is soundly `Eq`. The
+// explicit marker lets types that contain a `Font` (e.g. `Text`, `TextSpan`)
+// rest their own `Eq` on a compiler-checked guarantee rather than an
+// assumption.
+impl Eq for Font {}
+
 impl Hash for Font {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (Arc::as_ptr(&self.data) as usize).hash(state);
@@ -367,7 +373,7 @@ impl Default for Weight {
 /// Any `None` field inherits the value from the enclosing [`Text`]'s
 /// base. To color a substring, insert a `TextSpan` whose `fill` is
 /// `Some(Paint::Solid(color))` between plain spans.
-#[derive(Default, Clone, bon::Builder)]
+#[derive(Default, Clone, Keyable, bon::Builder)]
 #[builder(derive(Into))]
 pub struct TextSpan {
     #[builder(into)]
@@ -403,49 +409,13 @@ impl From<String> for TextSpan {
     }
 }
 
-impl PartialEq for TextSpan {
-    fn eq(&self, other: &Self) -> bool {
-        self.text == other.text
-            && self.fill == other.fill
-            && match (&self.font, &other.font) {
-                (Some(a), Some(b)) => a == b,
-                (None, None) => true,
-                _ => false,
-            }
-            && self.size.map(f32::to_bits) == other.size.map(f32::to_bits)
-            && self.weight == other.weight
-    }
-}
-
-impl Hash for TextSpan {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.text.hash(state);
-        self.fill.hash(state);
-        match &self.font {
-            None => 0u8.hash(state),
-            Some(f) => {
-                1u8.hash(state);
-                f.as_ref().hash(state);
-            }
-        }
-        match self.size {
-            None => 0u8.hash(state),
-            Some(v) => {
-                1u8.hash(state);
-                hash_f32(v, state);
-            }
-        }
-        self.weight.hash(state);
-    }
-}
-
 /// A single line of styled text.
 ///
 /// `font`, `size`, `weight`, and `fill` are the defaults used by every
 /// `TextSpan` that does not override them; `spans` carries the actual
 /// content and any per-region styling.
 #[crate::component(vector)]
-#[derive(Clone)]
+#[derive(Clone, Keyable)]
 pub struct Text {
     #[children(each = span)]
     pub spans: Vec<TextSpan>,
@@ -455,26 +425,6 @@ pub struct Text {
     pub weight: Weight,
     #[builder(into)]
     pub fill: Paint,
-}
-
-impl PartialEq for Text {
-    fn eq(&self, other: &Self) -> bool {
-        self.spans == other.spans
-            && self.font == other.font
-            && self.size.to_bits() == other.size.to_bits()
-            && self.weight == other.weight
-            && self.fill == other.fill
-    }
-}
-
-impl Hash for Text {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.spans.hash(state);
-        self.font.as_ref().hash(state);
-        hash_f32(self.size, state);
-        self.weight.hash(state);
-        self.fill.hash(state);
-    }
 }
 
 impl Text {

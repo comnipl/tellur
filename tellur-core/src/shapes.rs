@@ -6,11 +6,9 @@
 //! `Circle` placed under tight non-square constraints renders as an
 //! ellipse.
 
-use std::hash::{Hash, Hasher};
-
-use crate::dyn_compare::hash_f32;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::vector::{Fill, Node, Path, PathCommand, Stroke, VectorComponent, VectorGraphic};
+use crate::Keyable;
 
 #[crate::component(vector)]
 #[derive(Debug, Clone, PartialEq, Hash)]
@@ -52,21 +50,13 @@ impl VectorComponent for Rectangle {
 }
 
 #[crate::component(vector)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Keyable)]
 pub struct Circle {
     pub radius: f32,
     #[builder(into)]
     pub fill: Option<Fill>,
     #[builder(into)]
     pub stroke: Option<Stroke>,
-}
-
-impl Hash for Circle {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.radius, state);
-        self.fill.hash(state);
-        self.stroke.hash(state);
-    }
 }
 
 impl VectorComponent for Circle {

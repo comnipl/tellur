@@ -3,20 +3,12 @@
 //! The project uses a coordinate system with **origin at the top-left and Y axis
 //! pointing down**.
 
-use std::hash::{Hash, Hasher};
 use std::ops::{Add, Sub};
 
-use crate::dyn_compare::hash_f32;
+use crate::Keyable;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct Vec2(pub f32, pub f32);
-
-impl Hash for Vec2 {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.0, state);
-        hash_f32(self.1, state);
-    }
-}
 
 impl Vec2 {
     pub const ZERO: Self = Self(0.0, 0.0);
@@ -46,7 +38,7 @@ impl Sub for Vec2 {
 ///
 /// `origin` is the top-left corner (the smaller-coordinate side); `origin + size`
 /// is the bottom-right corner.
-#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rect {
     pub origin: Vec2,
     pub size: Vec2,
@@ -59,7 +51,7 @@ pub struct Rect {
 /// | b d ty |
 /// | 0 0  1 |
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct Transform {
     pub a: f32,
     pub b: f32,
@@ -67,17 +59,6 @@ pub struct Transform {
     pub d: f32,
     pub tx: f32,
     pub ty: f32,
-}
-
-impl Hash for Transform {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.a, state);
-        hash_f32(self.b, state);
-        hash_f32(self.c, state);
-        hash_f32(self.d, state);
-        hash_f32(self.tx, state);
-        hash_f32(self.ty, state);
-    }
 }
 
 impl Transform {
@@ -107,17 +88,10 @@ impl Transform {
 /// `(rx, ry)` are fractions in `[0, 1]`: `(0, 0)` is top-left, `(1, 1)` is
 /// bottom-right, `(0.5, 0.5)` is the center. Values outside `[0, 1]` are
 /// allowed and address points outside the box, which is occasionally useful.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct Anchor {
     pub rx: f32,
     pub ry: f32,
-}
-
-impl Hash for Anchor {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.rx, state);
-        hash_f32(self.ry, state);
-    }
 }
 
 impl Anchor {
@@ -143,7 +117,7 @@ impl Anchor {
 }
 
 /// A size paired with an anchor on that size, produced by [`Vec2::anchored`].
-#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AnchoredSize {
     pub size: Vec2,
     pub anchor: Anchor,
@@ -164,21 +138,12 @@ impl AnchoredSize {
 /// All values are in the same logical units as [`Vec2`]. Negative values
 /// are permitted and produce overhangs (the inner box becomes larger than
 /// the outer one), which can be useful for outset effects.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct EdgeInsets {
     pub left: f32,
     pub top: f32,
     pub right: f32,
     pub bottom: f32,
-}
-
-impl Hash for EdgeInsets {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.left, state);
-        hash_f32(self.top, state);
-        hash_f32(self.right, state);
-        hash_f32(self.bottom, state);
-    }
 }
 
 impl EdgeInsets {
@@ -242,7 +207,7 @@ impl EdgeInsets {
 /// "no upper bound" (the parent does not constrain this axis); `min` is
 /// usually `0.0` for "no lower bound" and equals `max` for fully tight
 /// constraints.
-#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Constraints {
     pub min: Vec2,
     pub max: Vec2,

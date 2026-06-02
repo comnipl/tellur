@@ -23,15 +23,13 @@
 //! `Box<dyn VectorComponent>`. Their raster counterparts share the same
 //! names under [`raster`] and operate on `Box<dyn RasterComponent>`.
 
-use std::hash::{Hash, Hasher};
-
 use crate::color::Color;
-use crate::dyn_compare::hash_f32;
 pub use crate::geometry::Axis;
 use crate::geometry::{Anchor, Constraints, EdgeInsets, Rect, Transform, Vec2};
 use crate::vector::{
     Fill, Group, Node, Paint, Path, PathCommand, Stroke, VectorComponent, VectorGraphic,
 };
+use crate::Keyable;
 
 /// Main-axis distribution of children in a [`Stack`]. The `Space*` variants
 /// override `Stack::spacing` and derive the gap from the leftover space
@@ -60,7 +58,7 @@ pub enum CrossAlign {
 
 /// How a sizing-container picks its size on one axis, given the parent's
 /// constraints and the child's intrinsic size.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub enum SizeMode {
     /// Take the parent's max constraint on this axis (collapse to `0.0`
     /// if the max is unbounded). Equivalent to CSS `width: 100%` or
@@ -71,15 +69,6 @@ pub enum SizeMode {
     Hug,
     /// Use exactly the given number of logical units on this axis.
     Fixed(f32),
-}
-
-impl Hash for SizeMode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        if let SizeMode::Fixed(v) = self {
-            hash_f32(*v, state);
-        }
-    }
 }
 
 pub(crate) fn resolve_size_mode<F: FnOnce(Constraints) -> Vec2>(
@@ -115,23 +104,11 @@ pub(crate) fn finite_axis(v: f32) -> f32 {
 
 /// Wraps a child with empty space on each side.
 #[crate::component(vector)]
+#[derive(Keyable)]
 pub struct Padding {
     pub insets: EdgeInsets,
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
-}
-
-impl PartialEq for Padding {
-    fn eq(&self, other: &Self) -> bool {
-        self.insets == other.insets && *self.child == *other.child
-    }
-}
-
-impl Hash for Padding {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.insets.hash(state);
-        self.child.hash(state);
-    }
 }
 
 impl Padding {
@@ -172,25 +149,12 @@ impl VectorComponent for Padding {
 /// max size, or [`Frame`] when you want sizing and anchored placement
 /// in one container.
 #[crate::component(vector)]
+#[derive(Keyable)]
 pub struct Sized {
     pub width: SizeMode,
     pub height: SizeMode,
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
-}
-
-impl PartialEq for Sized {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && *self.child == *other.child
-    }
-}
-
-impl Hash for Sized {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.width.hash(state);
-        self.height.hash(state);
-        self.child.hash(state);
-    }
 }
 
 impl VectorComponent for Sized {
@@ -220,27 +184,12 @@ impl VectorComponent for Sized {
 /// region, wrap a [`Sized`] inside `Place`, or use [`Frame`] which
 /// combines both in one container.
 #[crate::component(vector)]
+#[derive(Keyable)]
 pub struct Place {
     pub child_anchor: Anchor,
     pub at: Anchor,
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
-}
-
-impl PartialEq for Place {
-    fn eq(&self, other: &Self) -> bool {
-        self.child_anchor == other.child_anchor
-            && self.at == other.at
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for Place {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.child_anchor.hash(state);
-        self.at.hash(state);
-        self.child.hash(state);
-    }
 }
 
 impl VectorComponent for Place {
@@ -276,6 +225,7 @@ impl VectorComponent for Place {
 /// axis with a `SizeMode` and anchors the child inside that box. Pass
 /// `Anchor::TOP_LEFT` for both anchors to get pure top-left placement.
 #[crate::component(vector)]
+#[derive(Keyable)]
 pub struct Frame {
     pub width: SizeMode,
     pub height: SizeMode,
@@ -283,26 +233,6 @@ pub struct Frame {
     pub at: Anchor,
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
-}
-
-impl PartialEq for Frame {
-    fn eq(&self, other: &Self) -> bool {
-        self.width == other.width
-            && self.height == other.height
-            && self.child_anchor == other.child_anchor
-            && self.at == other.at
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for Frame {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.width.hash(state);
-        self.height.hash(state);
-        self.child_anchor.hash(state);
-        self.at.hash(state);
-        self.child.hash(state);
-    }
 }
 
 impl VectorComponent for Frame {
@@ -340,7 +270,7 @@ impl VectorComponent for Frame {
 /// (or collapses to the intrinsic sum if the constraint is unbounded),
 /// and follows the cross-align rule on the cross axis.
 #[crate::component(vector)]
-#[derive(PartialEq)]
+#[derive(Keyable)]
 pub struct Stack {
     // `#[builder(field)]` members (the streamed children) must precede the
     // setter members, per bon's member-ordering rule.
@@ -354,17 +284,6 @@ pub struct Stack {
     pub main_align: MainAlign,
     #[builder(default = CrossAlign::Start)]
     pub cross_align: CrossAlign,
-}
-
-impl Hash for Stack {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.axis.hash(state);
-        self.size.hash(state);
-        hash_f32(self.spacing, state);
-        self.main_align.hash(state);
-        self.cross_align.hash(state);
-        self.children.hash(state);
-    }
 }
 
 pub(crate) struct StackPass {
@@ -557,6 +476,7 @@ impl VectorComponent for Stack {
 /// child's layout size. Combine with [`Padding`] for the typical
 /// CSS-style "padded box with a background".
 #[crate::component(vector)]
+#[derive(Keyable)]
 pub struct DecoratedBox {
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
@@ -564,22 +484,6 @@ pub struct DecoratedBox {
     pub background: Option<Paint>,
     #[builder(into)]
     pub border: Option<Stroke>,
-}
-
-impl PartialEq for DecoratedBox {
-    fn eq(&self, other: &Self) -> bool {
-        *self.child == *other.child
-            && self.background == other.background
-            && self.border == other.border
-    }
-}
-
-impl Hash for DecoratedBox {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.child.hash(state);
-        self.background.hash(state);
-        self.border.hash(state);
-    }
 }
 
 impl VectorComponent for DecoratedBox {
@@ -658,35 +562,22 @@ pub mod raster {
     //! Raster equivalents of the vector layout containers. Same shape
     //! and semantics; operate on `Box<dyn RasterComponent>`.
 
-    use std::hash::{Hash, Hasher};
-
     use super::{
-        compute_stack_pass, hash_f32, resolve_size_mode, Axis, Color, CrossAlign, EdgeInsets,
-        MainAlign, SizeMode, Vec2,
+        compute_stack_pass, resolve_size_mode, Axis, Color, CrossAlign, EdgeInsets, MainAlign,
+        SizeMode, Vec2,
     };
     use crate::geometry::{Anchor, Constraints, Rect};
     use crate::layer::{composite_children, translate_rect, union_rect};
     use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
     use crate::render_context::RenderContext;
+    use crate::Keyable;
 
     #[crate::component(raster)]
+    #[derive(Keyable)]
     pub struct Padding {
         pub insets: EdgeInsets,
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
-    }
-
-    impl PartialEq for Padding {
-        fn eq(&self, other: &Self) -> bool {
-            self.insets == other.insets && *self.child == *other.child
-        }
-    }
-
-    impl Hash for Padding {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.insets.hash(state);
-            self.child.hash(state);
-        }
     }
 
     impl Padding {
@@ -736,25 +627,12 @@ pub mod raster {
     /// Sizes the outer box on each axis (`Fill` / `Hug` / `Fixed`) and
     /// places the child at the outer box's top-left.
     #[crate::component(raster)]
+    #[derive(Keyable)]
     pub struct Sized {
         pub width: SizeMode,
         pub height: SizeMode,
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
-    }
-
-    impl PartialEq for Sized {
-        fn eq(&self, other: &Self) -> bool {
-            self.width == other.width && self.height == other.height && *self.child == *other.child
-        }
-    }
-
-    impl Hash for Sized {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.width.hash(state);
-            self.height.hash(state);
-            self.child.hash(state);
-        }
     }
 
     impl RasterComponent for Sized {
@@ -796,27 +674,12 @@ pub mod raster {
     /// Fills the parent's max constraint and places the child via
     /// anchor snapping.
     #[crate::component(raster)]
+    #[derive(Keyable)]
     pub struct Place {
         pub child_anchor: Anchor,
         pub at: Anchor,
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
-    }
-
-    impl PartialEq for Place {
-        fn eq(&self, other: &Self) -> bool {
-            self.child_anchor == other.child_anchor
-                && self.at == other.at
-                && *self.child == *other.child
-        }
-    }
-
-    impl Hash for Place {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.child_anchor.hash(state);
-            self.at.hash(state);
-            self.child.hash(state);
-        }
     }
 
     impl RasterComponent for Place {
@@ -865,6 +728,7 @@ pub mod raster {
 
     /// Shorthand for `Sized` + `Place` combined.
     #[crate::component(raster)]
+    #[derive(Keyable)]
     pub struct Frame {
         pub width: SizeMode,
         pub height: SizeMode,
@@ -872,26 +736,6 @@ pub mod raster {
         pub at: Anchor,
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
-    }
-
-    impl PartialEq for Frame {
-        fn eq(&self, other: &Self) -> bool {
-            self.width == other.width
-                && self.height == other.height
-                && self.child_anchor == other.child_anchor
-                && self.at == other.at
-                && *self.child == *other.child
-        }
-    }
-
-    impl Hash for Frame {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.width.hash(state);
-            self.height.hash(state);
-            self.child_anchor.hash(state);
-            self.at.hash(state);
-            self.child.hash(state);
-        }
     }
 
     impl RasterComponent for Frame {
@@ -937,7 +781,7 @@ pub mod raster {
     }
 
     #[crate::component(raster)]
-    #[derive(PartialEq)]
+    #[derive(Keyable)]
     pub struct Stack {
         // `#[builder(field)]` members must precede the setter members.
         #[children(each = child)]
@@ -950,17 +794,6 @@ pub mod raster {
         pub main_align: MainAlign,
         #[builder(default = CrossAlign::Start)]
         pub cross_align: CrossAlign,
-    }
-
-    impl Hash for Stack {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.axis.hash(state);
-            self.size.hash(state);
-            hash_f32(self.spacing, state);
-            self.main_align.hash(state);
-            self.cross_align.hash(state);
-            self.children.hash(state);
-        }
     }
 
     impl RasterComponent for Stack {
@@ -1031,24 +864,12 @@ pub mod raster {
     /// now; stroking on raster is left to the vector path. For richer
     /// decoration, decorate on the vector side and rasterize after.
     #[crate::component(raster)]
+    #[derive(Keyable)]
     pub struct DecoratedBox {
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
         #[builder(into)]
         pub background: Option<Color>,
-    }
-
-    impl PartialEq for DecoratedBox {
-        fn eq(&self, other: &Self) -> bool {
-            *self.child == *other.child && self.background == other.background
-        }
-    }
-
-    impl Hash for DecoratedBox {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.child.hash(state);
-            self.background.hash(state);
-        }
     }
 
     impl RasterComponent for DecoratedBox {
