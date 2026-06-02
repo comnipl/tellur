@@ -27,6 +27,12 @@ pub struct GpuRenderer {
     fill_pipeline: wgpu::ComputePipeline,
     vello_renderer: Option<vello::Renderer>,
     stats: GpuRenderStats,
+    // Per-resolution scratch reused across frames instead of reallocated each
+    // call: the vello render-target texture and the readback staging buffer.
+    // Both are fully overwritten on every use, so reuse is byte-identical; only
+    // their size has to match (recreated when the resolution changes).
+    vello_target: Option<(u32, u32, wgpu::Texture)>,
+    readback_staging: Option<wgpu::Buffer>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -195,6 +201,8 @@ impl GpuRenderer {
             queue,
             vello_renderer: None,
             stats: GpuRenderStats::default(),
+            vello_target: None,
+            readback_staging: None,
         })
     }
 
@@ -460,21 +468,33 @@ impl GpuRenderer {
         target: Resolution,
     ) -> Option<Arc<GpuBufferImage>> {
         let scene = build_vello_scene(graphic, target)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("tellur-vello-target"),
-            size: wgpu::Extent3d {
-                width: target.width,
-                height: target.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Reuse a persisted vello render target; the resolution is stable across
+        // frames, so the texture is allocated once. vello overwrites the whole
+        // target each call (base_color TRANSPARENT), so reuse is byte-identical.
+        if self.vello_target.as_ref().map(|(w, h, _)| (*w, *h))
+            != Some((target.width, target.height))
+        {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tellur-vello-target"),
+                size: wgpu::Extent3d {
+                    width: target.width,
+                    height: target.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.vello_target = Some((target.width, target.height, texture));
+        }
+        let view = self
+            .vello_target
+            .as_ref()?
+            .2
+            .create_view(&wgpu::TextureViewDescriptor::default());
         if self.vello_renderer.is_none() {
             self.vello_renderer = Some(create_vello_renderer(&self.device)?);
         }
@@ -755,18 +775,25 @@ impl GpuRasterBackend for GpuRenderer {
             RasterImage::Gpu(surface) if surface.backend() == BACKEND => {
                 let image = Arc::downcast::<GpuBufferImage>(surface.handle_arc()).ok()?;
                 let byte_len = (image.width as usize) * (image.height as usize) * 4;
-                let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("tellur-gpu-readback"),
-                    size: byte_len as u64,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
+                // Reuse a persisted MAP_READ staging buffer across frames (the
+                // resolution is stable), so this allocates once instead of every
+                // readback. The copy below fully overwrites it each time.
+                if self.readback_staging.as_ref().map(wgpu::Buffer::size) != Some(byte_len as u64) {
+                    self.readback_staging =
+                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("tellur-gpu-readback"),
+                            size: byte_len as u64,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        }));
+                }
+                let staging = self.readback_staging.as_ref()?;
                 let mut encoder =
                     self.device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("tellur-gpu-readback"),
                         });
-                encoder.copy_buffer_to_buffer(&image.buffer, 0, &staging, 0, byte_len as u64);
+                encoder.copy_buffer_to_buffer(&image.buffer, 0, staging, 0, byte_len as u64);
                 self.queue.submit(Some(encoder.finish()));
 
                 let slice = staging.slice(..);
