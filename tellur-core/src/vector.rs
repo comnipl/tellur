@@ -2,8 +2,9 @@ use std::any::Any;
 use std::hash::{Hash, Hasher};
 
 use crate::color::Color;
-use crate::dyn_compare::{hash_f32, DynEq, DynHash};
+use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
+use crate::Keyable;
 
 /// A piece of vector content with a paint-bounds rectangle.
 ///
@@ -13,7 +14,7 @@ use crate::geometry::{Constraints, Rect, Transform, Vec2};
 /// spills to the upper-left) or a `size` larger than the layout size.
 /// Place the graphic in a parent coordinate space by composing it
 /// through a `Group` transform or a `VectorLayer`.
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VectorGraphic {
     pub view_box: Rect,
     pub root: Node,
@@ -87,28 +88,20 @@ impl Hash for dyn VectorComponent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
     Group(Group),
     Path(Path),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Keyable)]
 pub struct Group {
     pub transform: Transform,
     pub opacity: f32,
     pub children: Vec<Node>,
 }
 
-impl Hash for Group {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.transform.hash(state);
-        hash_f32(self.opacity, state);
-        self.children.hash(state);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     pub commands: Vec<PathCommand>,
     pub fill: Option<Fill>,
@@ -116,7 +109,7 @@ pub struct Path {
     pub transform: Transform,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PathCommand {
     MoveTo(Vec2),
     LineTo(Vec2),
@@ -125,25 +118,18 @@ pub enum PathCommand {
     Close,
 }
 
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Fill {
     pub paint: Paint,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Keyable)]
 pub struct Stroke {
     pub paint: Paint,
     pub width: f32,
 }
 
-impl Hash for Stroke {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.paint.hash(state);
-        hash_f32(self.width, state);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Paint {
     Solid(Color),
 }

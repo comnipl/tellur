@@ -9,7 +9,7 @@ use thiserror::Error;
 
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Vec2};
-use crate::render_context::RenderContext;
+use crate::render_context::{CachePolicy, RenderContext};
 
 #[derive(Debug, Clone)]
 pub enum RasterImage {
@@ -200,6 +200,15 @@ pub trait RasterComponent: DynEq + DynHash {
     /// target)`) so cross-cutting policies such as memoization can be
     /// applied uniformly across the tree.
     fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage;
+
+    /// Whether this component should occupy its own cache slot. Pure
+    /// pass-through wrappers (e.g. [`Positioned`](crate::placement::raster::Positioned))
+    /// return [`CachePolicy::Transparent`] so the context times them but lets
+    /// the child they delegate to own the cache entry. Defaults to
+    /// [`CachePolicy::Memoize`].
+    fn cache_policy(&self) -> CachePolicy {
+        CachePolicy::Memoize
+    }
 
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `Layer.children` in

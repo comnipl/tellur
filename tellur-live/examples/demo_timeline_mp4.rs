@@ -8,7 +8,7 @@
 //! ```text
 //! cargo run --release --example demo_timeline_mp4 -- /tmp/demo.mp4
 //! ```
-//! The output path argument is optional; it defaults to `./demo_timeline.mp4`.
+//! The output path argument is optional; it defaults to `/tmp/demo_timeline.mp4`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,7 +25,7 @@ fn main() -> ExitCode {
     let output = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("demo_timeline.mp4"));
+        .unwrap_or_else(|| PathBuf::from("/tmp/demo_timeline.mp4"));
 
     let (width, height) = scene::SCENE_RESOLUTION;
     let timeline = scene::build_timeline();

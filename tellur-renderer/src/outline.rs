@@ -8,37 +8,23 @@
 //! pixels; `layout_box` is left unchanged so outlines do not disturb
 //! layout.
 
-use std::hash::{Hash, Hasher};
-
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
-use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{OutlineInput, RenderContext};
+use tellur_core::Keyable;
 
+#[tellur_core::component(raster)]
+#[derive(Keyable)]
 pub struct Outline {
     /// Stroke width on the outside of the child, in logical units.
     pub width: f32,
     /// Stroke color (its alpha is multiplied with the ring alpha).
     pub color: Color,
+    #[effect]
+    #[builder(into)]
     pub child: Box<dyn RasterComponent>,
-}
-
-impl PartialEq for Outline {
-    fn eq(&self, other: &Self) -> bool {
-        self.width.to_bits() == other.width.to_bits()
-            && self.color == other.color
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for Outline {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.width, state);
-        self.color.hash(state);
-        self.child.hash(state);
-    }
 }
 
 impl RasterComponent for Outline {

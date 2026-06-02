@@ -21,19 +21,21 @@
 
 use crate::composite::composite_at;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
-use crate::placement::Placed;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
+#[crate::component(vector)]
 #[derive(PartialEq, Hash)]
 pub struct VectorLayer {
+    // `#[builder(field)]` members must precede the setter members.
+    #[children(each = child)]
+    pub children: Vec<Box<dyn VectorComponent>>,
     /// `Some(size)` for a fixed extent; `None` to auto-fit the
-    /// bounding box of the children's placed paint bounds (the layer's
+    /// bounding box of the children's paint bounds (the layer's
     /// `view_box.origin` then matches that bounding rect's origin, so
-    /// children with negative positions are not clipped).
+    /// children painting at negative positions are not clipped).
     pub size: Option<Vec2>,
-    pub children: Vec<Placed<dyn VectorComponent>>,
 }
 
 impl VectorLayer {
@@ -53,27 +55,9 @@ impl VectorLayer {
         }
     }
 
-    pub fn add(&mut self, child: Placed<dyn VectorComponent>) -> &mut Self {
-        self.children.push(child);
+    pub fn add(&mut self, child: impl Into<Box<dyn VectorComponent>>) -> &mut Self {
+        self.children.push(child.into());
         self
-    }
-
-    /// Bounding rect of all children's placed paint bounds, computed
-    /// with each child laid out under `Constraints::UNBOUNDED`. Returns
-    /// a zero rect when there are no children.
-    fn children_bounds(&self) -> Rect {
-        let mut iter = self.children.iter().map(|placed| {
-            let child_size = placed.child.layout(Constraints::UNBOUNDED);
-            let child_paint = placed.child.paint_bounds(child_size);
-            translate_rect(child_paint, placed.position)
-        });
-        let Some(first) = iter.next() else {
-            return Rect {
-                origin: Vec2::ZERO,
-                size: Vec2::ZERO,
-            };
-        };
-        iter.fold(first, union_rect)
     }
 }
 
@@ -81,7 +65,7 @@ impl VectorComponent for VectorLayer {
     fn layout(&self, constraints: Constraints) -> Vec2 {
         let intrinsic = match self.size {
             Some(s) => s,
-            None => self.children_bounds().size,
+            None => vector_children_bounds(&self.children).size,
         };
         constraints.constrain(intrinsic)
     }
@@ -92,42 +76,73 @@ impl VectorComponent for VectorLayer {
         // are inside the box rather than clipped.
         let view_origin = match self.size {
             Some(_) => Vec2::ZERO,
-            None => self.children_bounds().origin,
+            None => vector_children_bounds(&self.children).origin,
         };
-        let child_constraints = Constraints::loose(size);
-        let children: Vec<Node> = self
-            .children
-            .iter()
-            .map(|placed| {
-                let child_size = placed.child.layout(child_constraints);
-                let child_graphic = placed.child.render(child_size);
-                Node::Group(Group {
-                    transform: Transform::translate(placed.position),
-                    opacity: 1.0,
-                    children: vec![child_graphic.root],
-                })
-            })
-            .collect();
-        VectorGraphic {
-            view_box: Rect {
+        render_vector_children(
+            &self.children,
+            Rect {
                 origin: view_origin,
                 size,
             },
-            root: Node::Group(Group {
-                transform: Transform::IDENTITY,
-                opacity: 1.0,
-                children,
-            }),
-        }
+            Constraints::loose(size),
+        )
     }
 }
 
+/// Bounding rect of all children's paint bounds, each laid out under
+/// `Constraints::UNBOUNDED`. Returns a zero rect when there are no
+/// children. Each child carries its own offset (via
+/// [`Positioned`](crate::placement::Positioned)), so its `paint_bounds`
+/// is already expressed in the parent's coordinate space.
+pub(crate) fn vector_children_bounds(children: &[Box<dyn VectorComponent>]) -> Rect {
+    let mut iter = children.iter().map(|child| {
+        let child_size = child.layout(Constraints::UNBOUNDED);
+        child.paint_bounds(child_size)
+    });
+    let Some(first) = iter.next() else {
+        return Rect {
+            origin: Vec2::ZERO,
+            size: Vec2::ZERO,
+        };
+    };
+    iter.fold(first, union_rect)
+}
+
+/// Overlays `children` into one graphic: each child's root node is placed
+/// directly under a transparent identity group (the child supplies its own
+/// translation when it is a `Positioned`). Shared by [`VectorLayer`] and
+/// [`Fragment`](crate::fragment::Fragment).
+pub(crate) fn render_vector_children(
+    children: &[Box<dyn VectorComponent>],
+    view_box: Rect,
+    child_constraints: Constraints,
+) -> VectorGraphic {
+    let nodes: Vec<Node> = children
+        .iter()
+        .map(|child| {
+            let child_size = child.layout(child_constraints);
+            child.render(child_size).root
+        })
+        .collect();
+    VectorGraphic {
+        view_box,
+        root: Node::Group(Group {
+            transform: Transform::IDENTITY,
+            opacity: 1.0,
+            children: nodes,
+        }),
+    }
+}
+
+#[crate::component(raster)]
 #[derive(PartialEq, Hash)]
 pub struct Layer {
+    // `#[builder(field)]` members must precede the setter members.
+    #[children(each = child)]
+    pub children: Vec<Box<dyn RasterComponent>>,
     /// `Some(size)` for a fixed extent; `None` to auto-fit the
-    /// bounding box of the children's placed paint bounds.
+    /// bounding box of the children's paint bounds.
     pub size: Option<Vec2>,
-    pub children: Vec<Placed<dyn RasterComponent>>,
 }
 
 impl Layer {
@@ -147,26 +162,9 @@ impl Layer {
         }
     }
 
-    pub fn add(&mut self, child: Placed<dyn RasterComponent>) -> &mut Self {
-        self.children.push(child);
+    pub fn add(&mut self, child: impl Into<Box<dyn RasterComponent>>) -> &mut Self {
+        self.children.push(child.into());
         self
-    }
-
-    /// Bounding rect of all children's placed paint bounds, computed
-    /// with each child laid out under `Constraints::UNBOUNDED`.
-    fn children_bounds(&self) -> Rect {
-        let mut iter = self.children.iter().map(|placed| {
-            let child_size = placed.child.layout(Constraints::UNBOUNDED);
-            let child_paint = placed.child.paint_bounds(child_size);
-            translate_rect(child_paint, placed.position)
-        });
-        let Some(first) = iter.next() else {
-            return Rect {
-                origin: Vec2::ZERO,
-                size: Vec2::ZERO,
-            };
-        };
-        iter.fold(first, union_rect)
     }
 }
 
@@ -174,7 +172,7 @@ impl RasterComponent for Layer {
     fn layout(&self, constraints: Constraints) -> Vec2 {
         let intrinsic = match self.size {
             Some(s) => s,
-            None => self.children_bounds().size,
+            None => raster_children_bounds(&self.children).size,
         };
         constraints.constrain(intrinsic)
     }
@@ -185,17 +183,16 @@ impl RasterComponent for Layer {
         // size, start from the `(0,0)..size` rect and grow it to
         // include any children that overflow the box.
         if self.size.is_none() {
-            return self.children_bounds();
+            return raster_children_bounds(&self.children);
         }
         let child_constraints = Constraints::loose(size);
         let mut bounds = Rect {
             origin: Vec2::ZERO,
             size,
         };
-        for placed in &self.children {
-            let child_size = placed.child.layout(child_constraints);
-            let child_paint = placed.child.paint_bounds(child_size);
-            bounds = union_rect(bounds, translate_rect(child_paint, placed.position));
+        for child in &self.children {
+            let child_size = child.layout(child_constraints);
+            bounds = union_rect(bounds, child.paint_bounds(child_size));
         }
         bounds
     }
@@ -206,13 +203,29 @@ impl RasterComponent for Layer {
         let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = self
             .children
             .iter()
-            .map(|p| {
-                let child_size = p.child.layout(child_constraints);
-                (p.position, child_size, p.child.as_ref())
+            .map(|child| {
+                let child_size = child.layout(child_constraints);
+                (Vec2::ZERO, child_size, child.as_ref())
             })
             .collect();
         composite_children(paint_rect, target, &placed, ctx)
     }
+}
+
+/// Raster counterpart of [`vector_children_bounds`]: the bounding rect of all
+/// children's paint bounds, each laid out under `Constraints::UNBOUNDED`.
+pub(crate) fn raster_children_bounds(children: &[Box<dyn RasterComponent>]) -> Rect {
+    let mut iter = children.iter().map(|child| {
+        let child_size = child.layout(Constraints::UNBOUNDED);
+        child.paint_bounds(child_size)
+    });
+    let Some(first) = iter.next() else {
+        return Rect {
+            origin: Vec2::ZERO,
+            size: Vec2::ZERO,
+        };
+    };
+    iter.fold(first, union_rect)
 }
 
 /// Rasterizes a set of placed-and-sized raster components into the
@@ -346,7 +359,7 @@ mod tests {
     fn vector_layer_fit_to_single_child_size() {
         let layer = VectorLayer {
             size: None,
-            children: vec![rect(80.0, 40.0).at(Vec2(10.0, 20.0))],
+            children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0)).into()],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(80.0, 40.0));
     }
@@ -356,8 +369,8 @@ mod tests {
         let layer = VectorLayer {
             size: None,
             children: vec![
-                rect(50.0, 50.0).at(Vec2(0.0, 0.0)),
-                rect(50.0, 50.0).at(Vec2(100.0, 100.0)),
+                rect(50.0, 50.0).place_at(Vec2(0.0, 0.0)).into(),
+                rect(50.0, 50.0).place_at(Vec2(100.0, 100.0)).into(),
             ],
         };
         // bounding (0,0)..(150,150) → size (150, 150)
@@ -369,8 +382,8 @@ mod tests {
         let layer = VectorLayer {
             size: None,
             children: vec![
-                rect(100.0, 100.0).at(Vec2(-30.0, 0.0)),
-                rect(100.0, 100.0).at(Vec2(50.0, 20.0)),
+                rect(100.0, 100.0).place_at(Vec2(-30.0, 0.0)).into(),
+                rect(100.0, 100.0).place_at(Vec2(50.0, 20.0)).into(),
             ],
         };
         // bounding (-30,0)..(150,120) → size (180, 120)
@@ -381,7 +394,7 @@ mod tests {
     fn vector_layer_fixed_size_unchanged() {
         let layer = VectorLayer {
             size: Some(Vec2(500.0, 300.0)),
-            children: vec![rect(80.0, 40.0).at(Vec2(10.0, 20.0))],
+            children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0)).into()],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(500.0, 300.0));
     }

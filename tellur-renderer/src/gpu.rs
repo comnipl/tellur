@@ -24,8 +24,15 @@ pub struct GpuRenderer {
     shadow_pipeline: wgpu::ComputePipeline,
     outline_pipeline: wgpu::ComputePipeline,
     texture_to_buffer_pipeline: wgpu::ComputePipeline,
+    fill_pipeline: wgpu::ComputePipeline,
     vello_renderer: Option<vello::Renderer>,
     stats: GpuRenderStats,
+    // Per-resolution scratch reused across frames instead of reallocated each
+    // call: the vello render-target texture and the readback staging buffer.
+    // Both are fully overwritten on every use, so reuse is byte-identical; only
+    // their size has to match (recreated when the resolution changes).
+    vello_target: Option<(u32, u32, wgpu::Texture)>,
+    readback_staging: Option<wgpu::Buffer>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -34,12 +41,13 @@ pub struct GpuRenderStats {
     pub drop_shadows: u64,
     pub outlines: u64,
     pub rasterizes: u64,
+    pub fills: u64,
     pub readbacks: u64,
 }
 
 impl GpuRenderStats {
     pub fn total_ops(self) -> u64 {
-        self.composites + self.drop_shadows + self.outlines + self.rasterizes
+        self.composites + self.drop_shadows + self.outlines + self.rasterizes + self.fills
     }
 }
 
@@ -126,6 +134,18 @@ struct TextureToBufferParams {
 unsafe impl bytemuck::Zeroable for TextureToBufferParams {}
 unsafe impl bytemuck::Pod for TextureToBufferParams {}
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FillParams {
+    width: u32,
+    height: u32,
+    color: u32,
+    _pad0: u32,
+}
+
+unsafe impl bytemuck::Zeroable for FillParams {}
+unsafe impl bytemuck::Pod for FillParams {}
+
 impl GpuRenderer {
     pub fn new() -> Result<Self, String> {
         pollster::block_on(Self::new_async())
@@ -176,10 +196,13 @@ impl GpuRenderer {
                 "tellur-texture-to-buffer",
                 TEXTURE_TO_BUFFER_SHADER,
             ),
+            fill_pipeline: compute_pipeline(&device, "tellur-solid-fill", FILL_SHADER),
             device,
             queue,
             vello_renderer: None,
             stats: GpuRenderStats::default(),
+            vello_target: None,
+            readback_staging: None,
         })
     }
 
@@ -228,6 +251,17 @@ impl GpuRenderer {
         ))
     }
 
+    /// Allocates a target-sized transparent storage buffer.
+    ///
+    /// wgpu (per the WebGPU spec) zero-initializes a freshly created buffer
+    /// before its first use, so the blend paths (composite / shadow / outline)
+    /// that read-modify-write the destination still start from transparent
+    /// without any explicit fill. This deliberately does **not** issue the
+    /// `vec![0u8; len]` + whole-buffer `write_buffer` it used to: that per-frame
+    /// ~8 MiB CPU alloc + memset + CPU→GPU upload was the dominant CPU cost of
+    /// the GPU render path, and it was entirely redundant (the blend paths get
+    /// transparency from zero-init; the full-overwrite `texture_to_buffer` copy
+    /// never depended on the contents at all).
     fn empty_image(&self, resolution: Resolution) -> Arc<GpuBufferImage> {
         let len = (resolution.width as usize) * (resolution.height as usize) * 4;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -238,7 +272,6 @@ impl GpuRenderer {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        self.queue.write_buffer(&buffer, 0, &vec![0u8; len]);
         Arc::new(GpuBufferImage {
             width: resolution.width,
             height: resolution.height,
@@ -435,21 +468,33 @@ impl GpuRenderer {
         target: Resolution,
     ) -> Option<Arc<GpuBufferImage>> {
         let scene = build_vello_scene(graphic, target)?;
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("tellur-vello-target"),
-            size: wgpu::Extent3d {
-                width: target.width,
-                height: target.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // Reuse a persisted vello render target; the resolution is stable across
+        // frames, so the texture is allocated once. vello overwrites the whole
+        // target each call (base_color TRANSPARENT), so reuse is byte-identical.
+        if self.vello_target.as_ref().map(|(w, h, _)| (*w, *h))
+            != Some((target.width, target.height))
+        {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("tellur-vello-target"),
+                size: wgpu::Extent3d {
+                    width: target.width,
+                    height: target.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.vello_target = Some((target.width, target.height, texture));
+        }
+        let view = self
+            .vello_target
+            .as_ref()?
+            .2
+            .create_view(&wgpu::TextureViewDescriptor::default());
         if self.vello_renderer.is_none() {
             self.vello_renderer = Some(create_vello_renderer(&self.device)?);
         }
@@ -530,6 +575,74 @@ impl GpuRenderer {
             div_ceil(dst.height, WORKGROUP),
             1,
         );
+    }
+
+    fn filled_image(&self, target: Resolution, packed: u32) -> Arc<GpuBufferImage> {
+        let len = (target.width as usize) * (target.height as usize) * 4;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tellur-gpu-fill"),
+            size: len as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let image = Arc::new(GpuBufferImage {
+            width: target.width,
+            height: target.height,
+            format: PixelFormat::Rgba8,
+            buffer,
+        });
+
+        let params = FillParams {
+            width: image.width,
+            height: image.height,
+            color: packed,
+            _pad0: 0,
+        };
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("tellur-gpu-fill-params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let layout = self.fill_pipeline.get_bind_group_layout(0);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tellur-gpu-fill-bind-group"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: image.buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tellur-gpu-fill"),
+            });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("tellur-gpu-fill-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.fill_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(
+                div_ceil(image.width, WORKGROUP),
+                div_ceil(image.height, WORKGROUP),
+                1,
+            );
+        }
+        self.queue.submit(Some(encoder.finish()));
+        image
     }
 }
 
@@ -648,24 +761,39 @@ impl GpuRasterBackend for GpuRenderer {
         Some(self.raster_image(target_image))
     }
 
+    fn solid_fill(&mut self, target: Resolution, color: Color) -> Option<RasterImage> {
+        let [r, g, b, a] = color_u8(color);
+        let packed = r | (g << 8) | (b << 16) | (a << 24);
+        let image = self.filled_image(target, packed);
+        self.stats.fills = self.stats.fills.saturating_add(1);
+        Some(self.raster_image(image))
+    }
+
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage> {
         match image {
             RasterImage::Cpu(image) => Some(image),
             RasterImage::Gpu(surface) if surface.backend() == BACKEND => {
                 let image = Arc::downcast::<GpuBufferImage>(surface.handle_arc()).ok()?;
                 let byte_len = (image.width as usize) * (image.height as usize) * 4;
-                let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("tellur-gpu-readback"),
-                    size: byte_len as u64,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
+                // Reuse a persisted MAP_READ staging buffer across frames (the
+                // resolution is stable), so this allocates once instead of every
+                // readback. The copy below fully overwrites it each time.
+                if self.readback_staging.as_ref().map(wgpu::Buffer::size) != Some(byte_len as u64) {
+                    self.readback_staging =
+                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("tellur-gpu-readback"),
+                            size: byte_len as u64,
+                            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                            mapped_at_creation: false,
+                        }));
+                }
+                let staging = self.readback_staging.as_ref()?;
                 let mut encoder =
                     self.device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("tellur-gpu-readback"),
                         });
-                encoder.copy_buffer_to_buffer(&image.buffer, 0, &staging, 0, byte_len as u64);
+                encoder.copy_buffer_to_buffer(&image.buffer, 0, staging, 0, byte_len as u64);
                 self.queue.submit(Some(encoder.finish()));
 
                 let slice = staging.slice(..);
@@ -1276,6 +1404,28 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+const FILL_SHADER: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    color: u32,
+    pad0: u32,
+}
+
+@group(0) @binding(0) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(1) var<storage, read> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let x = id.x;
+    let y = id.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    dst[y * params.width + x] = params.color;
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1475,5 +1625,22 @@ mod tests {
         let center = &rendered.pixels[center_idx..center_idx + 4];
 
         assert_eq!(center, &[80, 40, 20, 128]);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn solid_fill_writes_every_pixel() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let target = Resolution::new(3, 2);
+        let color = Color::rgba_u8(8, 9, 10, 200);
+
+        let rendered = GpuRasterBackend::solid_fill(&mut gpu, target, color).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+
+        for pixel in rendered.pixels.chunks_exact(4) {
+            assert_eq!(pixel, &[8, 9, 10, 200]);
+        }
     }
 }

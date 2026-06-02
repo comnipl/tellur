@@ -14,9 +14,18 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=TELLUR_SKIP_WEB_BUILD");
-    println!("cargo:rerun-if-changed={}", web_dir.join("package.json").display());
-    println!("cargo:rerun-if-changed={}", web_dir.join("vite.config.ts").display());
-    println!("cargo:rerun-if-changed={}", web_dir.join("index.html").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        web_dir.join("package.json").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        web_dir.join("vite.config.ts").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        web_dir.join("index.html").display()
+    );
     track_dir(&web_dir.join("src"));
 
     if has_required_assets(&dist_dir) {
@@ -40,8 +49,7 @@ fn main() {
 }
 
 fn env_var(name: &str) -> String {
-    std::env::var(name)
-        .unwrap_or_else(|e| panic!("missing required env var {name}: {e}"))
+    std::env::var(name).unwrap_or_else(|e| panic!("missing required env var {name}: {e}"))
 }
 
 fn has_required_assets(dist: &Path) -> bool {
@@ -66,9 +74,8 @@ fn write_if_missing(path: &Path, contents: &str) {
     if path.exists() {
         return;
     }
-    std::fs::write(path, contents).unwrap_or_else(|e| {
-        panic!("failed to write placeholder {}: {e}", path.display())
-    });
+    std::fs::write(path, contents)
+        .unwrap_or_else(|e| panic!("failed to write placeholder {}: {e}", path.display()));
 }
 
 fn build_web(web_dir: &Path) {

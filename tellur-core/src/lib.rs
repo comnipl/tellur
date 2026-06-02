@@ -1,6 +1,8 @@
+pub mod builder;
 pub mod color;
 pub mod composite;
 pub mod dyn_compare;
+pub mod fragment;
 pub mod geometry;
 pub mod interpolate;
 pub mod layer;
@@ -20,4 +22,11 @@ pub mod vector;
 // must be reachable inside this crate too if someone uses them internally.
 extern crate self as tellur_core;
 
-pub use tellur_macros::{raster_component, vector_component};
+pub use tellur_macros::{component, raster_component, vector_component, Keyable};
+
+// Re-export `bon` so downstream crates and the component macro can reach its
+// runtime (and the `Builder` derive) through `tellur_core` without depending
+// on `bon` directly. The component macro emits `::tellur_core::__bon` paths and
+// sets `#[builder(crate = ::tellur_core::__bon)]` so generated code resolves.
+#[doc(hidden)]
+pub use bon as __bon;

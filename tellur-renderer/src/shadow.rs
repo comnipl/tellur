@@ -6,41 +6,26 @@
 //! enough pixels; its `layout_box` is left unchanged so shadows do not
 //! disturb layout.
 
-use std::hash::{Hash, Hasher};
-
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
-use tellur_core::dyn_compare::hash_f32;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{DropShadowInput, RenderContext};
+use tellur_core::Keyable;
 
+#[tellur_core::component(raster)]
+#[derive(Keyable)]
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
+    #[builder(default = Vec2::ZERO)]
     pub offset: Vec2,
     /// Gaussian-equivalent blur radius (logical units).
     pub blur: f32,
     /// Shadow color (the alpha channel is multiplied with the child's).
     pub color: Color,
+    #[effect]
+    #[builder(into)]
     pub child: Box<dyn RasterComponent>,
-}
-
-impl PartialEq for DropShadow {
-    fn eq(&self, other: &Self) -> bool {
-        self.offset == other.offset
-            && self.blur.to_bits() == other.blur.to_bits()
-            && self.color == other.color
-            && *self.child == *other.child
-    }
-}
-
-impl Hash for DropShadow {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.offset.hash(state);
-        hash_f32(self.blur, state);
-        self.color.hash(state);
-        self.child.hash(state);
-    }
 }
 
 /// 3-pass box blur with kernel radius `r` has a total convolution
@@ -262,5 +247,81 @@ fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, radius: usize) {
                 count -= 1;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tellur_core::builder::RasterEffect;
+
+    /// Minimal raster leaf used as the base in effect-stack tests.
+    #[derive(PartialEq, Hash)]
+    struct Stub;
+
+    impl RasterComponent for Stub {
+        fn layout(&self, _constraints: Constraints) -> Vec2 {
+            Vec2::ZERO
+        }
+        fn paint_bounds(&self, _size: Vec2) -> Rect {
+            Rect {
+                origin: Vec2::ZERO,
+                size: Vec2::ZERO,
+            }
+        }
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            blank_image(target)
+        }
+    }
+
+    #[test]
+    fn effect_stack_equals_manual_nesting() {
+        // First `.effect()` is innermost (closest to base); the last is outermost,
+        // so this must equal `dark { child: halo { child: base } }`.
+        let chained = Stub
+            .effect(
+                DropShadow::builder()
+                    .blur(18.0)
+                    .color(Color::rgba_u8(0, 0, 0, 40)),
+            )
+            .effect(
+                DropShadow::builder()
+                    .offset(Vec2(0.0, 22.0))
+                    .blur(26.0)
+                    .color(Color::rgba_u8(0, 0, 0, 170)),
+            );
+
+        let manual = DropShadow {
+            offset: Vec2(0.0, 22.0),
+            blur: 26.0,
+            color: Color::rgba_u8(0, 0, 0, 170),
+            child: Box::new(DropShadow {
+                offset: Vec2::ZERO,
+                blur: 18.0,
+                color: Color::rgba_u8(0, 0, 0, 40),
+                child: Box::new(Stub),
+            }),
+        };
+
+        // `DropShadow` is not `Debug`, so compare with `==` rather than `assert_eq!`.
+        assert!(chained == manual);
+    }
+
+    #[test]
+    fn effect_with_closure_wraps_base() {
+        let wrapped = Stub.effect_with(|child| {
+            DropShadow::builder()
+                .blur(5.0)
+                .color(Color::rgba_u8(0, 0, 0, 10))
+                .child(child)
+                .build()
+        });
+        assert_eq!(wrapped.blur.to_bits(), 5.0f32.to_bits());
+        assert_eq!(wrapped.color, Color::rgba_u8(0, 0, 0, 10));
     }
 }

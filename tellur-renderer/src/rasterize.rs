@@ -47,6 +47,28 @@ pub trait Rasterizable: VectorComponent + Sized {
 
 impl<T: VectorComponent> Rasterizable for T {}
 
+/// Lets a rasterized vector flow into a parent's
+/// `child(impl Into<Box<dyn RasterComponent>>)` slot.
+impl<V: VectorComponent + PartialEq + Hash + 'static> From<Rasterize<V>>
+    for Box<dyn RasterComponent>
+{
+    fn from(r: Rasterize<V>) -> Self {
+        Box::new(r)
+    }
+}
+
+/// Builder-side `.rasterize()`: a complete vector-component *builder*
+/// rasterizes without an explicit `.build()`, mirroring [`Rasterizable`].
+pub trait RasterizableBuilder: tellur_core::builder::VectorBuilder {
+    fn rasterize(self) -> Rasterize<Self::Output> {
+        Rasterize {
+            vector: self.build_component(),
+        }
+    }
+}
+
+impl<B: tellur_core::builder::VectorBuilder> RasterizableBuilder for B {}
+
 fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
     let mut pixmap =
         tiny_skia::Pixmap::new(width, height).expect("pixmap dimensions must be non-zero");

@@ -1,23 +1,12 @@
-use std::hash::{Hash, Hasher};
-
-use crate::dyn_compare::hash_f32;
+use crate::Keyable;
 
 /// sRGB with straight alpha. Each component is in the range `[0.0, 1.0]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Keyable)]
 pub struct Color {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
-}
-
-impl Hash for Color {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        hash_f32(self.r, state);
-        hash_f32(self.g, state);
-        hash_f32(self.b, state);
-        hash_f32(self.a, state);
-    }
 }
 
 impl Color {

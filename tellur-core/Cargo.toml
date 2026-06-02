@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bon = "3.9.1"
 bytes = "1.11.1"
 fontconfig = "0.10"
 fontdb = "0.23"
+lru = "0.12"
 png = "0.18.1"
 rustybuzz = "0.20"
 tellur-macros = { path = "../tellur-macros", version = "0.1.0" }

@@ -10,6 +10,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::interpolate::Interpolate;
+use crate::Keyable;
 
 /// A finite `f32` constrained to the unit interval `[0.0, 1.0]` (both
 /// endpoints included).
@@ -17,7 +18,7 @@ use crate::interpolate::Interpolate;
 /// Construct via [`Phase::new`] (validating) or [`Phase::saturating`]
 /// (clamping). The wrapped value is accessible through [`Phase::get`] and
 /// `Into<f32>`.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialOrd, Keyable)]
 pub struct Phase(f32);
 
 impl Phase {
@@ -29,7 +30,11 @@ impl Phase {
     /// `NaN`, `±inf`, or out-of-range values yield `None`.
     pub fn new(v: f32) -> Option<Self> {
         if v.is_finite() && (0.0..=1.0).contains(&v) {
-            Some(Self(v))
+            // Canonicalize -0.0 to +0.0 (`+ 0.0` is exact for every other
+            // finite value) so the bit-pattern `PartialEq`/`Hash` from
+            // `Keyable` agrees with the derived `PartialOrd`, which treats
+            // the two zeroes as equal.
+            Some(Self(v + 0.0))
         } else {
             None
         }
@@ -40,7 +45,7 @@ impl Phase {
         if v.is_nan() {
             Self::ZERO
         } else {
-            Self(v.clamp(0.0, 1.0))
+            Self(v.clamp(0.0, 1.0) + 0.0)
         }
     }
 
