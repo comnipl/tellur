@@ -20,6 +20,7 @@ const FALLBACK_TIMELINE: TimelineInfo = {
   id: "demo",
   title: "Demo Timeline",
   duration: 150,
+  error: null,
 };
 const INFO_FALLBACK_POLL_MS = 2000;
 const LEGACY_CACHE_RELOAD_KEY = "tellur-live:legacy-cache-reloaded";
