@@ -15,3 +15,7 @@ crate-type = ["cdylib"]
 [[example]]
 name = "demo_timeline_mp4"
 path = "examples/demo_timeline_mp4.rs"
+
+[[example]]
+name = "timeline_showcase"
+crate-type = ["cdylib"]
