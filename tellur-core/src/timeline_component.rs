@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use crate::geometry::Constraints;
 use crate::phase::Phase;
@@ -608,6 +609,25 @@ impl<'a> Clock<'a> {
         }
     }
 
+    /// A neutral, time-zero clock over a shared empty [`TriggerTable`].
+    ///
+    /// Used by the `#[component(timeline)]` macro's clock-less delegators
+    /// (`duration`/`measure`/`resolve`/`cues`/`arrangement`) to build the body
+    /// when there is no per-frame clock to forward. This is sound because a
+    /// component's STRUCTURE must be clock-independent by design (the audit
+    /// model: `frame`/`samples` bake per-frame values into a stable structure,
+    /// so the resolved shape never varies with the clock value). A body that
+    /// branches its structure on `clock` violates that contract.
+    pub fn structural() -> Clock<'static> {
+        static EMPTY: OnceLock<TriggerTable> = OnceLock::new();
+        let triggers = EMPTY.get_or_init(TriggerTable::new);
+        Clock {
+            global: TimelineTime::new(0.0),
+            local: LocalTime::new(0.0),
+            triggers,
+        }
+    }
+
     /// 0 at THIS component's resolved start; survives `Sequence` re-flow.
     /// Self-animation: `clock.local().phase(0.0, 0.4)`.
     pub fn local(&self) -> LocalTime {
@@ -897,5 +917,112 @@ mod tests {
         triggered.resolve(4.0, &mut ctx);
         let table = ctx.into_triggers();
         assert_eq!(table.get(e.id()).seconds(), 4.0);
+    }
+
+    // ── `#[component(timeline)]` macro arm (step 2) ──────────────────────────
+    //
+    // COMPILE-FAIL (no trybuild in this repo — verified manually): `#[clock]` on
+    // a non-timeline arm is rejected by the macro. Uncomment to reproduce; it
+    // fails with "#[clock] is only valid on a #[component(timeline)]":
+    //
+    //     #[crate::component(raster)]
+    //     fn BadClock(#[clock] clock: Clock, x: f32) -> impl RasterComponent {
+    //         let _ = (clock, x);
+    //         unimplemented!()
+    //     }
+
+    use crate::time::Time;
+
+    // A timeline component WITHOUT `#[clock]`: builds a `Placed` and delegates
+    // the full query set to it (audit M3). `start` becomes a builder field.
+    #[crate::component(timeline)]
+    fn Beat(start: f32) -> impl TimelineComponent {
+        Dot.at(start..(start + 2.0))
+    }
+
+    // A timeline component WITH `#[clock]`: the clock is injected (not a field /
+    // cache-key term) and forwarded into the body. The structure (a placed
+    // `Dot`) is clock-independent; only the read value would vary per frame.
+    #[crate::component(timeline)]
+    fn Pulse(#[clock] clock: Clock, start: f32) -> impl TimelineComponent {
+        // Read both axes to prove the real clock threads through `frame`.
+        let _ = clock.local().seconds() + clock.global().seconds();
+        Dot.at(start..(start + 1.0))
+    }
+
+    // Generic acceptors that only hold if the bounds are met — these are the
+    // load-bearing assertions: the generated types implement the right traits.
+    fn assert_timeline_component<T: TimelineComponent>(_: &T) {}
+    fn assert_timeline_builder<B: TimelineBuilder>(_: &B) {}
+    fn assert_boxable<T: TimelineComponent + Send + 'static>(value: T) -> Box<dyn TimelineComponent + Send> {
+        Box::new(value)
+    }
+
+    #[test]
+    fn timeline_component_without_clock_delegates_full_query_set() {
+        let beat = Beat::builder().start(3.0).build();
+        assert_timeline_component(&beat);
+
+        // The clock-less queries build with a structural clock and delegate to
+        // the inner `Placed` (window `3.0..5.0`) — so the wrapper is transparent
+        // to resolve (M3): `duration` = window length, `measure` = window end.
+        assert_eq!(beat.duration(), Some(2.0));
+        assert_eq!(beat.measure(), Some(5.0));
+        assert_eq!(beat.cues(0.0), Vec::new());
+        assert_eq!(beat.arrangement().kind, NodeKind::Caption);
+
+        let mut ctx = ResolveCtx::new();
+        // resolve recurses into the placed child at its relative start.
+        assert_eq!(beat.resolve(0.0, &mut ctx), 2.0);
+
+        // The complete builder is a `TimelineBuilder` and boxes with `+ Send`.
+        let builder = Beat::builder().start(3.0);
+        assert_timeline_builder(&builder);
+        let _boxed: Box<dyn TimelineComponent + Send> = assert_boxable(beat);
+    }
+
+    #[test]
+    fn timeline_component_with_clock_forwards_the_real_clock() {
+        let pulse = Pulse::builder().start(1.0).build();
+        assert_timeline_component(&pulse);
+
+        // `frame` forwards the framework-supplied clock into the body.
+        let table = TriggerTable::new();
+        let clock = Clock::new(TimelineTime::new(0.5), LocalTime::new(0.25), &table);
+        let mut ctx = PassThrough;
+        let frame = pulse.frame(clock, Resolution::new(4, 4), &mut ctx);
+        assert!(frame.is_some());
+
+        // Clock-less queries still resolve via the structural clock.
+        assert_eq!(pulse.duration(), Some(1.0));
+
+        let builder = Pulse::builder().start(1.0);
+        assert_timeline_builder(&builder);
+        let _boxed: Box<dyn TimelineComponent + Send> = assert_boxable(pulse);
+    }
+
+    #[test]
+    fn timeline_clock_is_excluded_from_the_cache_key() {
+        // `#[clock]` is stripped, so two `Pulse`s with equal fields are equal
+        // and hash identically regardless of any clock (mirrors `#[available]`).
+        let a = Pulse::builder().start(1.0).build();
+        let b = Pulse::builder().start(1.0).build();
+        assert!(a == b);
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+    }
+
+    // A complete builder also boxes into `Box<dyn TimelineComponent + Send>`
+    // via the per-builder `From` glue (no explicit `.build()`).
+    #[test]
+    fn timeline_complete_builder_boxes_via_from() {
+        let boxed: Box<dyn TimelineComponent + Send> = Beat::builder().start(0.0).into();
+        assert_eq!(boxed.duration(), Some(2.0));
     }
 }

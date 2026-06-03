@@ -84,10 +84,11 @@ pub fn keyable(input: TokenStream) -> TokenStream {
 }
 
 /// Kind of component the macro targets.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Vector,
     Raster,
+    Timeline,
 }
 
 impl Kind {
@@ -95,6 +96,7 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::vector::VectorComponent),
             Kind::Raster => quote!(::tellur_core::raster::RasterComponent),
+            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineComponent),
         }
     }
 
@@ -102,6 +104,18 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::builder::VectorBuilder),
             Kind::Raster => quote!(::tellur_core::builder::RasterBuilder),
+            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineBuilder),
+        }
+    }
+
+    /// The `Box<dyn _Component>` the glue converts into. The timeline arm adds
+    /// `+ Send` (audit M2: a `TimelineComponent` must be boxable with `+ Send`);
+    /// the raster/vector arms must NOT, or existing `!Send` components break.
+    fn box_dyn(self) -> TokenStream2 {
+        let comp = self.component_trait();
+        match self {
+            Kind::Vector | Kind::Raster => quote!(::std::boxed::Box<dyn #comp>),
+            Kind::Timeline => quote!(::std::boxed::Box<dyn #comp + ::core::marker::Send>),
         }
     }
 
@@ -109,6 +123,9 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::vector::VectorGraphic),
             Kind::Raster => quote!(::tellur_core::raster::RasterImage),
+            // The timeline arm has no single `render` graphic; it emits a full
+            // multi-method trait impl directly (see `expand_fn`).
+            Kind::Timeline => quote!(()),
         }
     }
 
@@ -124,6 +141,8 @@ impl Kind {
                 ),
                 quote!(size, target, ctx),
             ),
+            // Unused for the timeline arm; it builds its own method set.
+            Kind::Timeline => (quote!(), quote!()),
         }
     }
 }
@@ -134,10 +153,11 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     let kind = match syn::parse::<Ident>(attr) {
         Ok(id) if id == "vector" => Kind::Vector,
         Ok(id) if id == "raster" => Kind::Raster,
+        Ok(id) if id == "timeline" => Kind::Timeline,
         _ => {
             return syn::Error::new(
                 Span::call_site(),
-                "expected `#[component(vector)]` or `#[component(raster)]`",
+                "expected `#[component(vector)]`, `#[component(raster)]`, or `#[component(timeline)]`",
             )
             .to_compile_error()
             .into();
@@ -267,6 +287,8 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     let mut field_attrs: Vec<Vec<Attribute>> = Vec::new();
     let mut available_ident: Option<&Ident> = None;
     let mut available_type: Option<&Type> = None;
+    let mut clock_ident: Option<&Ident> = None;
+    let mut clock_type: Option<&Type> = None;
     let mut children: Option<Children> = None;
     let mut effect_child: Option<Ident> = None;
 
@@ -293,6 +315,29 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             }
             available_ident = Some(&pi.ident);
             available_type = Some(ty.as_ref());
+            continue;
+        }
+
+        // `#[clock] clock: Clock`: the temporal twin of `#[available]`. Captured
+        // and stripped here (so it is neither a struct field nor a cache-key
+        // term) and threaded into `__tellur_build` by value; the generated
+        // `frame`/`samples` forward the real framework clock. Only valid on the
+        // timeline arm — there is no clock in the raster/vector render protocol.
+        if attrs.iter().any(|a| a.path().is_ident("clock")) {
+            if kind != Kind::Timeline {
+                return Err(syn::Error::new_spanned(
+                    pi,
+                    "#[clock] is only valid on a #[component(timeline)]",
+                ));
+            }
+            if clock_ident.is_some() {
+                return Err(syn::Error::new_spanned(
+                    pi,
+                    "component fn can have at most one #[clock] argument",
+                ));
+            }
+            clock_ident = Some(&pi.ident);
+            clock_type = Some(ty.as_ref());
             continue;
         }
 
@@ -354,60 +399,91 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     }
 
     let body = &func.block;
-    let (trait_path, graphic_path) = (kind.component_trait(), kind.graphic());
-    let (render_sig, render_args) = kind.render_sig();
+    let trait_path = kind.component_trait();
     let build_method = Ident::new("__tellur_build", fn_ident.span());
 
-    let (build_fn, build_call_layout, build_call_render, build_call_paint_bounds) =
-        if let (Some(av_ident), Some(av_type)) = (available_ident, available_type) {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self, #av_ident: #av_type) -> impl #trait_path + 'static {
-                        let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote! {
-                    let __available = ::tellur_core::geometry::Vec2(
-                        if constraints.max.0.is_finite() { constraints.max.0 } else { 0.0 },
-                        if constraints.max.1.is_finite() { constraints.max.1 } else { 0.0 },
-                    );
-                    let __child = self.#build_method(__available);
-                    #trait_path::layout(&__child, constraints)
-                },
-                quote! {
-                    let __child = self.#build_method(size);
-                    #trait_path::render(&__child, #render_args)
-                },
-                quote! {
-                    let __child = self.#build_method(size);
-                    #trait_path::paint_bounds(&__child, size)
-                },
-            )
-        } else {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self) -> impl #trait_path + 'static {
-                        let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::layout(&__child, constraints)
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::render(&__child, #render_args)
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::paint_bounds(&__child, size)
-                },
-            )
+    // `#[available]` and `#[clock]` are mutually exclusive injection paths —
+    // the former belongs to the raster/vector layout protocol, the latter to
+    // the timeline frame protocol — but they never coexist on one fn (the
+    // timeline arm has no `#[available]` and the others reject `#[clock]`).
+    let (build_fn, trait_impl) = if kind == Kind::Timeline {
+        timeline_codegen(&struct_ident, &trait_path, &build_method, field_idents.iter().copied(), clock_ident, clock_type, body)
+    } else {
+        let (render_sig, render_args) = kind.render_sig();
+        let graphic_path = kind.graphic();
+        let (build_fn, build_call_layout, build_call_render, build_call_paint_bounds) =
+            if let (Some(av_ident), Some(av_type)) = (available_ident, available_type) {
+                (
+                    quote! {
+                        #[doc(hidden)]
+                        fn #build_method(&self, #av_ident: #av_type) -> impl #trait_path + 'static {
+                            let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
+                            #body
+                        }
+                    },
+                    quote! {
+                        let __available = ::tellur_core::geometry::Vec2(
+                            if constraints.max.0.is_finite() { constraints.max.0 } else { 0.0 },
+                            if constraints.max.1.is_finite() { constraints.max.1 } else { 0.0 },
+                        );
+                        let __child = self.#build_method(__available);
+                        #trait_path::layout(&__child, constraints)
+                    },
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #trait_path::render(&__child, #render_args)
+                    },
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #trait_path::paint_bounds(&__child, size)
+                    },
+                )
+            } else {
+                (
+                    quote! {
+                        #[doc(hidden)]
+                        fn #build_method(&self) -> impl #trait_path + 'static {
+                            let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
+                            #body
+                        }
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::layout(&__child, constraints)
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::render(&__child, #render_args)
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::paint_bounds(&__child, size)
+                    },
+                )
+            };
+        let trait_impl = quote! {
+            impl #trait_path for #struct_ident {
+                fn layout(
+                    &self,
+                    constraints: ::tellur_core::geometry::Constraints,
+                ) -> ::tellur_core::geometry::Vec2 {
+                    #build_call_layout
+                }
+
+                fn paint_bounds(
+                    &self,
+                    size: ::tellur_core::geometry::Vec2,
+                ) -> ::tellur_core::geometry::Rect {
+                    #build_call_paint_bounds
+                }
+
+                fn render(&self, #render_sig) -> #graphic_path {
+                    #build_call_render
+                }
+            }
         };
+        (build_fn, trait_impl)
+    };
 
     // Float-aware `PartialEq`/`Eq`/`Hash` so the synthesized component is a
     // consistent cache key even with bare `f32`/`f64` fields (which are neither
@@ -453,28 +529,117 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             #build_fn
         }
 
-        impl #trait_path for #struct_ident {
-            fn layout(
-                &self,
-                constraints: ::tellur_core::geometry::Constraints,
-            ) -> ::tellur_core::geometry::Vec2 {
-                #build_call_layout
-            }
-
-            fn paint_bounds(
-                &self,
-                size: ::tellur_core::geometry::Vec2,
-            ) -> ::tellur_core::geometry::Rect {
-                #build_call_paint_bounds
-            }
-
-            fn render(&self, #render_sig) -> #graphic_path {
-                #build_call_render
-            }
-        }
+        #trait_impl
 
         #glue
     })
+}
+
+/// Emits the `__tellur_build` helper and the full `TimelineComponent` impl for a
+/// `#[component(timeline)]` fn (audit M3): every query
+/// (`duration`/`measure`/`resolve`/`frame`/`samples`/`cues`/`arrangement`)
+/// build-then-delegates to the body, mirroring how the raster arm delegates
+/// `layout`/`render`. Without this, a `#[component(timeline)]` is an opaque leaf
+/// and its inner children's starts never compose.
+///
+/// `frame`/`samples` forward the framework-supplied clock; the clock-less
+/// queries build with [`Clock::structural`] — sound because a component's
+/// resolved STRUCTURE must not depend on the clock value (only its baked
+/// per-frame fields may).
+fn timeline_codegen<'a>(
+    struct_ident: &Ident,
+    trait_path: &TokenStream2,
+    build_method: &Ident,
+    field_idents: impl Iterator<Item = &'a Ident> + Clone,
+    clock_ident: Option<&Ident>,
+    clock_type: Option<&Type>,
+    body: &syn::Block,
+) -> (TokenStream2, TokenStream2) {
+    let destructure_idents: Vec<&Ident> = field_idents.collect();
+
+    // The body is built either with the real clock (when `#[clock]` is present)
+    // or with no clock at all. `__tellur_build` takes a clock by value in the
+    // first case so every delegator forwards exactly the clock it has.
+    let (build_fn, build_with_clock, build_structural) =
+        if let (Some(ck_ident), Some(ck_type)) = (clock_ident, clock_type) {
+            (
+                quote! {
+                    #[doc(hidden)]
+                    fn #build_method(&self, #ck_ident: #ck_type) -> impl #trait_path + 'static {
+                        let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                        #body
+                    }
+                },
+                quote!(self.#build_method(clock)),
+                quote!(self.#build_method(::tellur_core::timeline_component::Clock::structural())),
+            )
+        } else {
+            (
+                quote! {
+                    #[doc(hidden)]
+                    fn #build_method(&self) -> impl #trait_path + 'static {
+                        let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                        #body
+                    }
+                },
+                quote!(self.#build_method()),
+                quote!(self.#build_method()),
+            )
+        };
+
+    let trait_impl = quote! {
+        impl #trait_path for #struct_ident {
+            fn duration(&self) -> ::core::option::Option<f32> {
+                let __child = #build_structural;
+                #trait_path::duration(&__child)
+            }
+
+            fn measure(&self) -> ::core::option::Option<f32> {
+                let __child = #build_structural;
+                #trait_path::measure(&__child)
+            }
+
+            fn resolve(
+                &self,
+                abs_start: f32,
+                out: &mut ::tellur_core::timeline_component::ResolveCtx,
+            ) -> f32 {
+                let __child = #build_structural;
+                #trait_path::resolve(&__child, abs_start, out)
+            }
+
+            fn frame(
+                &self,
+                clock: ::tellur_core::timeline_component::Clock<'_>,
+                target: ::tellur_core::raster::Resolution,
+                ctx: &mut dyn ::tellur_core::render_context::RenderContext,
+            ) -> ::core::option::Option<::tellur_core::raster::RasterImage> {
+                let __child = #build_with_clock;
+                #trait_path::frame(&__child, clock, target, ctx)
+            }
+
+            fn samples(
+                &self,
+                clock: ::tellur_core::timeline_component::Clock<'_>,
+                window: f32,
+            ) -> ::core::option::Option<::tellur_core::timeline_component::AudioBuffer> {
+                let __child = #build_with_clock;
+                #trait_path::samples(&__child, clock, window)
+            }
+
+            fn cues(&self, offset: f32) -> ::std::vec::Vec<::tellur_core::timeline_component::Cue> {
+                let __child = #build_structural;
+                #trait_path::cues(&__child, offset)
+            }
+
+            fn arrangement(&self) -> ::tellur_core::timeline_component::Arrangement {
+                let __child = #build_structural;
+                #trait_path::arrangement(&__child)
+            }
+        }
+    };
+
+    (build_fn, trait_impl)
 }
 
 // ─── shared builder glue ─────────────────────────────────────────────────────
@@ -491,9 +656,11 @@ fn emit_glue(
 ) -> TokenStream2 {
     let builder_ty = format_ident!("{}Builder", ident);
     let state_mod = Ident::new(&pascal_to_snake(&builder_ty.to_string()), ident.span());
-    let comp = kind.component_trait();
     let bld = kind.builder_trait();
-    let box_dyn = quote!(::std::boxed::Box<dyn #comp>);
+    // The timeline arm boxes as `Box<dyn TimelineComponent + Send>` (audit M2);
+    // the raster/vector arms keep their plain `Box<dyn _Component>` (no `+ Send`,
+    // which would break existing `!Send` components).
+    let box_dyn = kind.box_dyn();
 
     // For a raster component whose child field is tagged `#[effect]`, implement
     // `Effect` on the builder *while that child slot is still unset*: `apply`
