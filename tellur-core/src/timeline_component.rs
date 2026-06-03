@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use crate::dyn_compare::{DynEq, DynHash};
-use crate::geometry::Constraints;
+use crate::geometry::Vec2;
 use crate::phase::Phase;
 use crate::raster::{RasterComponent, RasterImage, Resolution};
 use crate::render_context::RenderContext;
@@ -155,11 +155,18 @@ pub trait TimelineComponent: DynEq + DynHash {
         Vec::new()
     }
 
-    /// What the live UI draws: kind + label (+ trim marker for media).
+    /// What the live UI draws: kind + label, plus the node's RESOLVED absolute
+    /// interval and any [`Event`] trigger times.
+    ///
+    /// `offset` is this node's resolved absolute start, threaded top-down exactly
+    /// like [`cues`](Self::cues): a leaf stamps `start = offset`,
+    /// `end = offset + self.duration().unwrap_or(0.0)`; a container places each
+    /// child at `offset + child_relative_start`, mirroring its
+    /// [`resolve`](Self::resolve) / [`cues`](Self::cues) cursor.
     ///
     /// Named `arrangement` (not `outline`) to avoid clashing with the existing
     /// `tellur_renderer::Outline` raster effect (audit hygiene note).
-    fn arrangement(&self) -> Arrangement;
+    fn arrangement(&self, offset: f32) -> Arrangement;
 }
 
 // Compile-time guarantee that `TimelineComponent` is object-safe *and*
@@ -214,8 +221,16 @@ where
         // (`.sketch/02 §11`): the framework caches `&dyn RasterComponent`, not
         // `&dyn TimelineComponent`, so this is the path that earns a cache slot.
         let _ = clock;
-        let size = self.layout(Constraints::UNBOUNDED);
-        Some(ctx.render(self, size, target))
+        // A timeline frame's canvas IS the target: lay the visual out against
+        // the target's logical size (1:1 with the pixel resolution), NOT its
+        // intrinsic box. Sizing against the intrinsic box (`layout(UNBOUNDED)`)
+        // would stretch a wide-short text box to fill the frame (aspect
+        // distortion) and collapse a `Fill` component against the unbounded
+        // axis. Passing the canvas makes anchored/`Fill` placement resolve
+        // against the full frame and renders without distortion (mirrors the
+        // raster root, where `size` aspect matches `target`).
+        let canvas = Vec2(target.width as f32, target.height as f32);
+        Some(ctx.render(self, canvas, target))
     }
 
     fn samples(&self, _clock: Clock<'_>, _window: f32) -> Option<AudioBuffer> {
@@ -226,15 +241,16 @@ where
         Vec::new()
     }
 
-    fn arrangement(&self) -> Arrangement {
-        // A timeless visual surfaces as a Caption-kind node; the resolved
-        // start/end are filled by the placement that wraps it.
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // A timeless visual surfaces as a Caption-kind node. Un-windowed it is
+        // 0-length; the wrapping `Placed` stamps its real window end (mirrors the
+        // `cues` zero-length-point + window-end-stamp pattern).
         Arrangement {
             kind: NodeKind::Caption,
             // TODO(task 6): carry a real label (e.g. the concrete type name).
             label: String::new(),
-            start: 0.0,
-            end: 0.0,
+            start: offset,
+            end: offset + self.duration().unwrap_or(0.0),
             trim: None,
             triggers: Vec::new(),
             children: Vec::new(),
@@ -468,9 +484,20 @@ impl TimelineComponent for Placed {
         cues
     }
 
-    fn arrangement(&self) -> Arrangement {
-        // TODO(task 6): stamp the resolved start/end onto the child's node.
-        self.child.arrangement()
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // Produce the child's node at its absolute start (`offset + relative`).
+        let child_offset = offset + self.placement.start;
+        let mut node = self.child.arrangement(child_offset);
+        // A TIMELESS child (e.g. a `Subtitle` / a bare visual) comes out
+        // 0-length, so the placement WINDOW is what gives it its interval —
+        // stamp the window end (mirrors `Placed::cues`). A timed child already
+        // carries its own end; a fill child's end is supplied by the container.
+        if self.child.duration().is_none() {
+            if let Some(end) = self.placement.end {
+                node.end = offset + end;
+            }
+        }
+        node
     }
 }
 
@@ -709,8 +736,20 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
         self.child.cues(offset)
     }
 
-    fn arrangement(&self) -> Arrangement {
-        self.child.arrangement()
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // Transparent to the structure: build the child's node, then push this
+        // trigger's resolved time onto it (mirrors `resolve`'s trigger table).
+        // The child's resolved interval is `[offset, node.end]`, so its length
+        // is `node.end - offset` — `Start → offset`, `End → offset + len`,
+        // `At(local) → offset + local`. Multiple triggers accumulate.
+        let mut node = self.child.arrangement(offset);
+        let at = match self.kind {
+            TriggerKind::Start => offset,
+            TriggerKind::End => node.end,
+            TriggerKind::At(local) => offset + local,
+        };
+        node.triggers.push(at);
+        node
     }
 }
 
@@ -1251,7 +1290,7 @@ pub enum NodeKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::Vec2;
+    use crate::geometry::{Constraints, Vec2};
     use crate::raster::PixelFormat;
     use crate::render_context::PassThrough;
 
@@ -1277,7 +1316,7 @@ mod tests {
         assert_eq!(boxed.duration(), None);
         assert_eq!(boxed.measure(), None);
         assert_eq!(boxed.cues(0.0), Vec::new());
-        assert_eq!(boxed.arrangement().kind, NodeKind::Caption);
+        assert_eq!(boxed.arrangement(0.0).kind, NodeKind::Caption);
     }
 
     #[test]
@@ -1289,6 +1328,101 @@ mod tests {
         let mut ctx = PassThrough;
         let frame = dot.frame(clock, Resolution::new(4, 4), &mut ctx);
         assert!(frame.is_some());
+    }
+
+    // A FIXED-size visual: its intrinsic box is a WIDE-SHORT rectangle (4:1),
+    // but `render` paints a centered logical SQUARE into whatever `size` /
+    // `target` it is handed, mapping logical→pixels by the per-axis `target /
+    // size` scale (exactly how real components — `Layer`, anchored `Positioned`
+    // — turn a logical box into pixels). The painted square is detectable as a
+    // run of opaque-alpha pixels; its pixel WIDTH vs HEIGHT reveals aspect
+    // distortion. If `frame` lays this out against its intrinsic 4:1 box rather
+    // than the canvas, the square is stretched 4:1 in the 16:9 frame.
+    #[derive(PartialEq, Hash)]
+    struct Square;
+
+    impl Square {
+        // The logical box is 4:1 (deliberately NOT the 16:9 target aspect).
+        const BOX: Vec2 = Vec2(400.0, 100.0);
+        // The painted square's logical side (in `size` units).
+        const SIDE: f32 = 50.0;
+    }
+
+    impl RasterComponent for Square {
+        fn layout(&self, _constraints: Constraints) -> Vec2 {
+            Self::BOX
+        }
+
+        fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+            let scale_x = target.width as f32 / size.0;
+            let scale_y = target.height as f32 / size.1;
+            // A `SIDE`-by-`SIDE` logical square, centered in the logical box.
+            let half = Self::SIDE * 0.5;
+            let cx = size.0 * 0.5;
+            let cy = size.1 * 0.5;
+            let px0 = ((cx - half) * scale_x).round() as i64;
+            let px1 = ((cx + half) * scale_x).round() as i64;
+            let py0 = ((cy - half) * scale_y).round() as i64;
+            let py1 = ((cy + half) * scale_y).round() as i64;
+            let w = target.width as usize;
+            let h = target.height as usize;
+            let mut pixels = vec![0u8; w * h * 4];
+            for y in 0..h as i64 {
+                for x in 0..w as i64 {
+                    if (px0..px1).contains(&x) && (py0..py1).contains(&y) {
+                        let i = ((y as usize) * w + (x as usize)) * 4;
+                        pixels[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                    }
+                }
+            }
+            RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, pixels)
+        }
+    }
+
+    // Width / height (in pixels) of the opaque square painted into `image`.
+    fn opaque_span(image: &crate::raster::CpuRasterImage) -> (u32, u32) {
+        let w = image.width as usize;
+        let h = image.height as usize;
+        let mut min_x = w;
+        let mut max_x = 0usize;
+        let mut min_y = h;
+        let mut max_y = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                if image.pixels[(y * w + x) * 4 + 3] != 0 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
+            }
+        }
+        ((max_x + 1 - min_x) as u32, (max_y + 1 - min_y) as u32)
+    }
+
+    #[test]
+    fn blanket_frame_lays_out_against_the_canvas_not_the_intrinsic_box() {
+        // FIX 1: `frame` must lay a timeless visual out against the CANVAS (the
+        // target's logical size, 1:1 with the pixel resolution), NOT its
+        // intrinsic box. A 16:9 target with a 1:1 logical→pixel mapping keeps a
+        // logical square square; sizing against the 4:1 intrinsic box would
+        // stretch it horizontally ~7.1x (16:9 ÷ 4:1) in pixels.
+        let table = TriggerTable::new();
+        let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+        let mut ctx = PassThrough;
+        let target = Resolution::new(1280, 720); // 16:9
+        let frame = Square
+            .frame(clock, target, &mut ctx)
+            .expect("a visual contributes a frame");
+        let cpu = frame.as_cpu().expect("cpu image");
+        let (span_w, span_h) = opaque_span(cpu);
+        // The square is rendered 1:1 (canvas == target), so its pixel span is
+        // square within rounding. A stretch would make `span_w` ~7x `span_h`.
+        let diff = (span_w as i32 - span_h as i32).abs();
+        assert!(
+            diff <= 2,
+            "square must stay square (no aspect stretch): {span_w}x{span_h}",
+        );
     }
 
     #[test]
@@ -1413,7 +1547,7 @@ mod tests {
         assert_eq!(beat.duration(), Some(2.0));
         assert_eq!(beat.measure(), Some(5.0));
         assert_eq!(beat.cues(0.0), Vec::new());
-        assert_eq!(beat.arrangement().kind, NodeKind::Caption);
+        assert_eq!(beat.arrangement(0.0).kind, NodeKind::Caption);
 
         let mut ctx = ResolveCtx::new();
         // resolve recurses into the placed child at its relative start.
@@ -1757,7 +1891,7 @@ mod event_path_tests {
         // never panic / NaN.
         assert_eq!(reveal.duration(), None, "the baked visual is timeless");
         assert_eq!(reveal.measure(), None);
-        assert_eq!(reveal.arrangement().kind, NodeKind::Caption);
+        assert_eq!(reveal.arrangement(0.0).kind, NodeKind::Caption);
         assert!(reveal.cues(0.0).is_empty());
 
         // `resolve` on the wrapper recurses into the structural visual without

@@ -216,15 +216,34 @@ impl TimelineComponent for Timeline {
         }
     }
 
-    fn arrangement(&self) -> Arrangement {
-        // TODO(task 6): stamp resolved start/end via a resolve walk; the start /
-        // end here are placeholders the live UI fills from the resolved tree.
-        let children = self.children.iter().map(|c| c.arrangement()).collect();
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // Overlay: every child shares the container base `offset`. The resolved
+        // length is the measured length (fill children excluded); a `.fill()`
+        // child spans `[offset, offset + length]`. Mirror `cues`'s classify walk
+        // so each child's node carries its resolved absolute interval.
+        let length = self.measure().unwrap_or(0.0);
+        let mut children = Vec::with_capacity(self.children.len());
+        for view in self.classify() {
+            match view {
+                ChildView::Fill(placed) => {
+                    // A fill child takes the container length; build the INNER
+                    // component at the base and stamp the span end onto a
+                    // timeless inner node (same rule `cues` applies to fill cues).
+                    let mut node = placed.child().arrangement(offset);
+                    if placed.child().duration().is_none() {
+                        node.end = offset + length;
+                    }
+                    children.push(node);
+                }
+                ChildView::PlacedAt(placed) => children.push(placed.arrangement(offset)),
+                ChildView::Bare(child) => children.push(child.arrangement(offset)),
+            }
+        }
         Arrangement {
             kind: NodeKind::Timeline,
             label: String::new(),
-            start: 0.0,
-            end: self.measure().unwrap_or(0.0),
+            start: offset,
+            end: offset + length,
             trim: None,
             triggers: Vec::new(),
             children,
@@ -393,13 +412,29 @@ impl TimelineComponent for Sequence {
         }
     }
 
-    fn arrangement(&self) -> Arrangement {
-        let children = self.children.iter().map(|c| c.arrangement()).collect();
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // Re-flow the cursor exactly as `resolve` / `cues` do so child N's node
+        // lands at its absolute start `offset + Σ prior lengths (+ gaps)`. Fill
+        // children are skipped (an error inside a `Sequence`).
+        let mut children = Vec::with_capacity(self.children.len());
+        let mut cursor = 0.0_f32;
+        let mut placed_any = false;
+        for child in &self.children {
+            if Self::is_fill(child.as_ref()) {
+                continue;
+            }
+            if placed_any {
+                cursor += self.spacing;
+            }
+            children.push(child.arrangement(offset + cursor));
+            cursor += child.measure().unwrap_or(0.0);
+            placed_any = true;
+        }
         Arrangement {
             kind: NodeKind::Sequence,
             label: String::new(),
-            start: 0.0,
-            end: self.measure().unwrap_or(0.0),
+            start: offset,
+            end: offset + cursor,
             trim: None,
             triggers: Vec::new(),
             children,
@@ -496,12 +531,12 @@ impl TimelineComponent for VideoFile {
         crate::video_decode::decode_frame(&self.path, clock.local().seconds(), self.trim, target)
     }
 
-    fn arrangement(&self) -> Arrangement {
+    fn arrangement(&self, offset: f32) -> Arrangement {
         Arrangement {
             kind: NodeKind::Video,
             label: self.path.clone(),
-            start: 0.0,
-            end: self.probe(),
+            start: offset,
+            end: offset + self.probe(),
             trim: self.trim,
             triggers: Vec::new(),
             children: Vec::new(),
@@ -596,12 +631,12 @@ impl TimelineComponent for AudioFile {
         }
     }
 
-    fn arrangement(&self) -> Arrangement {
+    fn arrangement(&self, offset: f32) -> Arrangement {
         Arrangement {
             kind: NodeKind::Audio,
             label: self.path.clone(),
-            start: 0.0,
-            end: self.probe(),
+            start: offset,
+            end: offset + self.probe(),
             trim: self.trim,
             triggers: Vec::new(),
             children: Vec::new(),
@@ -642,12 +677,14 @@ impl TimelineComponent for Subtitle {
         }]
     }
 
-    fn arrangement(&self) -> Arrangement {
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        // Timeless: un-windowed it is a 0-length point at `offset`; the wrapping
+        // `Placed` / `.fill()` container stamps the real end (mirrors `cues`).
         Arrangement {
             kind: NodeKind::Subtitle,
             label: self.text.clone(),
-            start: 0.0,
-            end: 0.0,
+            start: offset,
+            end: offset + self.duration().unwrap_or(0.0),
             trim: None,
             triggers: Vec::new(),
             children: Vec::new(),
@@ -825,6 +862,64 @@ mod tests {
         let line = cues.iter().find(|c| c.text == "a line").expect("subtitle cue");
         assert_eq!(line.start, 0.0);
         assert_eq!(line.end, 4.5);
+    }
+
+    // (g) The `.sketch/01` B.4 arrangement shape: a Sequence of windowed
+    // segments (segment-2 `.trigger_at_start(e)`) under an overlay Timeline with
+    // a `.fill()` subtitle. The resolved arrangement must stamp non-zero
+    // start/end on every inner node, span the fill overlay across the whole, and
+    // surface segment-2's resolved start in its `triggers`.
+    #[test]
+    fn arrangement_stamps_resolved_starts_ends_and_triggers() {
+        use crate::timeline_component::{Event, NodeKind, Triggers};
+
+        let e = Event::new();
+        let root = Timeline::builder()
+            .child(
+                Sequence::builder()
+                    // Three 3s windowed segments → resolved at 0/3/6.
+                    .child(Caption.at(0.0..3.0))
+                    .child(Caption.at(0.0..3.0).trigger_at_start(e))
+                    .child(Caption.at(0.0..3.0))
+                    .build(),
+            )
+            // A timeless subtitle `.fill()` spans the whole 9s timeline.
+            .child(Subtitle::builder().text("overlay").fill())
+            .build();
+
+        let resolved = resolve(root).expect("the sequence gives it a length");
+        assert_eq!(resolved.duration(), 9.0);
+
+        // Walk the resolved arrangement from root offset 0.
+        let arr = resolved.source().arrangement(0.0);
+        assert_eq!(arr.kind, NodeKind::Timeline);
+        assert_eq!(arr.start, 0.0);
+        assert_eq!(arr.end, 9.0);
+
+        // Child 0 is the Sequence spanning the whole 9s.
+        let seq = &arr.children[0];
+        assert_eq!(seq.kind, NodeKind::Sequence);
+        assert_eq!(seq.start, 0.0);
+        assert_eq!(seq.end, 9.0);
+
+        // The three segments are placed by the cursor at 0/3/6, each 3s long.
+        assert_eq!(seq.children.len(), 3);
+        assert_eq!((seq.children[0].start, seq.children[0].end), (0.0, 3.0));
+        assert_eq!((seq.children[1].start, seq.children[1].end), (3.0, 6.0));
+        assert_eq!((seq.children[2].start, seq.children[2].end), (6.0, 9.0));
+
+        // Segment-2's trigger fires at its resolved start (3.0).
+        assert_eq!(seq.children[1].triggers, vec![3.0]);
+        // The untriggered segments carry no triggers.
+        assert!(seq.children[0].triggers.is_empty());
+        assert!(seq.children[2].triggers.is_empty());
+
+        // Child 1 is the `.fill()` subtitle overlay spanning the whole timeline.
+        let overlay = &arr.children[1];
+        assert_eq!(overlay.kind, NodeKind::Subtitle);
+        assert_eq!(overlay.label, "overlay");
+        assert_eq!(overlay.start, 0.0);
+        assert_eq!(overlay.end, 9.0);
     }
 
     // The leaf duration/probe seam: an injected `duration` overrides the stub.
@@ -1020,12 +1115,12 @@ mod tests {
             ))
         }
 
-        fn arrangement(&self) -> Arrangement {
+        fn arrangement(&self, offset: f32) -> Arrangement {
             Arrangement {
                 kind: NodeKind::Video,
                 label: String::new(),
-                start: 0.0,
-                end: self.duration,
+                start: offset,
+                end: offset + self.duration,
                 trim: None,
                 triggers: Vec::new(),
                 children: Vec::new(),

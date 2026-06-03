@@ -137,7 +137,9 @@ impl TimelineCollection for SingleTimeline {
         if id != self.id {
             return None;
         }
-        Some(self.resolved()?.source().arrangement())
+        // Root offset 0: the resolved tree's start coincides with the global
+        // axis, so the walk stamps absolute starts/ends from there.
+        Some(self.resolved()?.source().arrangement(0.0))
     }
 }
 
@@ -196,14 +198,14 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
         Some(self.timeline.build(clock.global(), target, ctx))
     }
 
-    fn arrangement(&self) -> Arrangement {
+    fn arrangement(&self, offset: f32) -> Arrangement {
         // One Video-kind node spanning the whole timeline; no source crop,
         // no triggers, no children — the legacy timeline is opaque.
         Arrangement {
             kind: NodeKind::Video,
             label: String::new(),
-            start: 0.0,
-            end: self.timeline.duration(),
+            start: offset,
+            end: offset + self.timeline.duration(),
             trim: None,
             triggers: Vec::new(),
             children: Vec::new(),

@@ -632,9 +632,9 @@ fn timeline_codegen<'a>(
                 #trait_path::cues(&__child, offset)
             }
 
-            fn arrangement(&self) -> ::tellur_core::timeline_component::Arrangement {
+            fn arrangement(&self, offset: f32) -> ::tellur_core::timeline_component::Arrangement {
                 let __child = #build_structural;
-                #trait_path::arrangement(&__child)
+                #trait_path::arrangement(&__child, offset)
             }
         }
     };
