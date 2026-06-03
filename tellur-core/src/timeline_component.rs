@@ -57,20 +57,42 @@ pub trait TimelineComponent {
     /// Bottom-up intrinsic duration for the resolve pass's measure phase
     /// (`.sketch/02 §5`). Defaults to [`duration`](Self::duration); containers
     /// override to fold over their children.
+    ///
+    /// CONTRACT (the load-bearing invariant, `.sketch/02 §5/§9`): a container's
+    /// `measure` is computed bottom-up from its children and **excludes every
+    /// `.fill()` child**. `.fill()` takes the container's resolved length, so
+    /// measuring a fill child *into* that length would close a cycle; excluding
+    /// it keeps the dependency strictly one-directional (container length →
+    /// fill-child length) and the two-pass solve acyclic and terminating.
+    /// Consequently a non-fill container whose non-fill children are all `None`
+    /// measures as `None`, and an empty / all-fill interior measures as a
+    /// determinate `0.0` (`max(∅)` / `Σ(∅)`); the all-fill case should also
+    /// [`warn`](ResolveCtx::warn) at place time. `None` means *timeless*: the
+    /// length is supplied later by the placement window.
     fn measure(&self) -> Option<f32> {
         self.duration()
     }
 
-    /// Top-down place hook (`.sketch/02 §6`). Walks `self` (and, for a
-    /// container, its children via `&self` recursion) assigning absolute starts
-    /// and recording [`Event`] trigger times into `out`. Returns this node's
-    /// resolved length.
+    /// Top-down place hook (`.sketch/02 §6`). Walks `self` and, for a container,
+    /// recurses over its OWN children via `&self` recursion — assigning each an
+    /// absolute start and recording [`Event`] trigger times into `out` —
+    /// returning this node's resolved length.
+    ///
+    /// CONTRACT: `abs_start` is the absolute start handed down by the parent;
+    /// the return value is the node's resolved length folded back up. A
+    /// container computes each child's absolute start as `abs_start + relative`
+    /// and recurses with it (a `Sequence` advances a cursor; a `Timeline`
+    /// overlays from a common base and resolves `.fill()` children against its
+    /// own measured length in a second sub-pass). The all-fill / empty-interior
+    /// case resolves to a determinate `0.0` and should emit a
+    /// [`warn`](ResolveCtx::warn).
     ///
     /// The default is the leaf behaviour: record nothing and report own length
     /// (falling back to `0.0` for a timeless leaf, whose interval comes from the
     /// placement window instead).
     fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
-        // TODO(task 2+): containers override to recurse and place children.
+        // Leaves record no triggers and report their own (possibly absent)
+        // length; containers (step 4) override to recurse and place children.
         let _ = (abs_start, out);
         self.duration().unwrap_or(0.0)
     }
@@ -698,6 +720,11 @@ pub struct ResolveCtx {
     /// Absolute start of the node currently being resolved. Top-down bookkeeping
     /// the container walk maintains; surfaced for leaves that need it.
     abs_start: f32,
+    /// Non-fatal diagnostics collected during the walk (`.sketch/02 §9`). A
+    /// container (step 4) emits here when, e.g., all of a non-fill container's
+    /// children are `.fill()` — a determinate `0.0` that is almost always an
+    /// authoring mistake, so it warns rather than fails.
+    warnings: Vec<String>,
 }
 
 impl ResolveCtx {
@@ -726,9 +753,27 @@ impl ResolveCtx {
         self.abs_start = abs_start;
     }
 
+    /// Records a non-fatal resolve diagnostic (`.sketch/02 §9`). Containers
+    /// (step 4) call this for the all-fill / empty-interior `0.0` cases.
+    pub fn warn(&mut self, message: impl Into<String>) {
+        self.warnings.push(message.into());
+    }
+
+    /// The diagnostics collected so far.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// Consumes the context, yielding the finished trigger table.
     pub fn into_triggers(self) -> TriggerTable {
         self.triggers
+    }
+
+    /// Consumes the context, yielding both the finished trigger table and the
+    /// collected warnings — the form [`resolve`] uses to assemble a
+    /// [`ResolvedTimeline`].
+    pub fn into_parts(self) -> (TriggerTable, Vec<String>) {
+        (self.triggers, self.warnings)
     }
 }
 
@@ -742,6 +787,121 @@ pub enum ResolveError {
     /// it to `0.0` would silently emit a zero-frame export, so it is an error.
     #[error("root timeline is timeless: place media or an explicit window to give it a length")]
     Timeless,
+}
+
+// ── Resolve entry + resolved output (`.sketch/02 §3/§7`) ─────────────────────
+
+/// The output of the resolve pass (`.sketch/02 §3/§7`). Owns the built source
+/// tree WHOLE (audit M1 — no borrow, no `Rc`, no per-child decomposition) and
+/// the only global metadata the pass produces: the flat [`TriggerTable`] plus
+/// the root's resolved length.
+///
+/// Per-frame SAMPLING (step 5) runs `&self` recursion over [`source`] using the
+/// borrowed [`triggers`] — this type just holds the resolved state.
+///
+/// `Send` because it is stored in the plugin collection later (audit M2); the
+/// guarantee is asserted just below.
+pub struct ResolvedTimeline {
+    /// The built source tree, owned intact. The place pass walks it via `&self`
+    /// recursion; sampling (step 5) walks the same `Box` per frame.
+    source: Box<dyn TimelineComponent + Send>,
+    /// `Event` id → absolute trigger time, built by the place pass. One per
+    /// resolved tree; earliest-wins, absent reads as `+∞`.
+    triggers: TriggerTable,
+    /// The root's resolved length in seconds. Never `None`: a timeless root is
+    /// a [`ResolveError::Timeless`] instead (audit M4), not a coerced `0.0`.
+    duration: f32,
+    /// Non-fatal diagnostics surfaced from the walk (`.sketch/02 §9`), e.g. an
+    /// all-fill container's determinate `0.0`.
+    warnings: Vec<String>,
+}
+
+// Compile-time guarantee that `ResolvedTimeline` is `Send` (audit M2): it is
+// stored in the plugin collection and moved across threads (`server.rs`).
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<ResolvedTimeline>();
+};
+
+impl ResolvedTimeline {
+    /// The owned source tree. Sampling (step 5) drives its channels through this
+    /// borrow.
+    pub fn source(&self) -> &(dyn TimelineComponent + Send) {
+        &*self.source
+    }
+
+    /// The resolved trigger table. Lent to each frame's [`Clock`] so [`Event`]
+    /// queries can resolve their id (`.sketch/02 §8`).
+    pub fn triggers(&self) -> &TriggerTable {
+        &self.triggers
+    }
+
+    /// The root's resolved length in seconds.
+    pub fn duration(&self) -> f32 {
+        self.duration
+    }
+
+    /// Non-fatal diagnostics collected during the resolve walk (`.sketch/02
+    /// §9`).
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
+impl std::fmt::Debug for ResolvedTimeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn TimelineComponent` is not `Debug`; show the resolved metadata.
+        f.debug_struct("ResolvedTimeline")
+            .field("duration", &self.duration)
+            .field("triggers", &self.triggers)
+            .field("warnings", &self.warnings)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Runs the resolve pass over a built timeline tree (`.sketch/02 §2/§3/§7`),
+/// CONSUMING it (audit M1) and producing a [`ResolvedTimeline`] that owns the
+/// tree whole.
+///
+/// The pass is two phases, both pure over the built tree (no pixel resolution):
+///
+/// 1. MEASURE (bottom-up): `root.measure()` folds intrinsic durations, with
+///    every `.fill()` child EXCLUDED (the load-bearing acyclicity invariant,
+///    `.sketch/02 §5`). A `None` here means the root is purely timeless — no
+///    media, no explicit window. Coercing that to `0.0` would silently emit a
+///    zero-frame export, so it is a [`ResolveError::Timeless`] (audit M4), NOT
+///    a `0.0`. (The internal all-fill / empty case stays a determinate `0.0`;
+///    only the ROOT being `None` is fatal.)
+/// 2. PLACE (top-down): `root.resolve(0.0, &mut ResolveCtx)` walks the tree,
+///    assigning absolute starts and recording every [`Triggered`] node's
+///    absolute time into the [`TriggerTable`] (earliest-wins). Containers
+///    (step 4) recurse over their own children via `&self` recursion and may
+///    [`warn`](ResolveCtx::warn) for the all-fill `0.0` case.
+///
+/// Media-leaf duration PROBING (`.sketch/02 §12`, [`ResolveError::Probe`]) is
+/// step 4's concern; no leaves exist yet, so this entry never probes — it only
+/// folds the contract above.
+pub fn resolve(
+    root: impl TimelineComponent + Send + 'static,
+) -> Result<ResolvedTimeline, ResolveError> {
+    // Own the source root intact (audit M1): box it once and keep it whole.
+    let source: Box<dyn TimelineComponent + Send> = Box::new(root);
+
+    // Phase 1 — measure. A `None` root is a timeless tree: error, not 0.0 (M4).
+    let duration = source.measure().ok_or(ResolveError::Timeless)?;
+
+    // Phase 2 — place: drive the top-down walk so every `Triggered` records its
+    // absolute time into the table (earliest-wins) and containers can warn.
+    let mut ctx = ResolveCtx::new();
+    source.resolve(0.0, &mut ctx);
+    let (triggers, warnings) = ctx.into_parts();
+
+    Ok(ResolvedTimeline {
+        source,
+        triggers,
+        duration,
+        warnings,
+    })
 }
 
 // ── Channels / output types (`.sketch/01` A.7) ──────────────────────────────
@@ -1024,5 +1184,74 @@ mod tests {
     fn timeline_complete_builder_boxes_via_from() {
         let boxed: Box<dyn TimelineComponent + Send> = Beat::builder().start(0.0).into();
         assert_eq!(boxed.duration(), Some(2.0));
+    }
+
+    // ── Resolve entry (step 3) ───────────────────────────────────────────────
+
+    #[test]
+    fn resolve_visual_in_a_window_gives_window_duration() {
+        // A timeless visual placed in an explicit window resolves to that
+        // window's length, and the resolved tree owns the source whole.
+        let resolved = resolve(Dot.at(0.0..3.0)).expect("a windowed visual is not timeless");
+        assert_eq!(resolved.duration(), 3.0);
+        // The source is owned intact and still queryable through the accessor.
+        assert_eq!(resolved.source().duration(), Some(3.0));
+        assert!(resolved.warnings().is_empty());
+    }
+
+    #[test]
+    fn resolve_bare_timeless_visual_is_an_error() {
+        // A bare visual (no placement window) is purely timeless: `measure()`
+        // is `None`, so the root resolves to `Err(Timeless)` rather than 0.0
+        // (audit M4).
+        let err = resolve(Dot).expect_err("a bare visual has no intrinsic length");
+        assert!(matches!(err, ResolveError::Timeless));
+    }
+
+    #[test]
+    fn resolve_records_trigger_absolute_start() {
+        // A `Triggered` visual fires `trigger_at_start` at the wrapped node's
+        // absolute start. As the root the start is 0.0, recorded in the
+        // resolved table; the resolved root length is the placement window.
+        let e = Event::new();
+        let resolved =
+            resolve(Dot.at(5.0..8.0).trigger_at_start(e)).expect("windowed, so not timeless");
+        assert_eq!(resolved.triggers().get(e.id()).seconds(), 0.0);
+        assert_eq!(resolved.duration(), 8.0);
+    }
+
+    #[test]
+    fn resolve_records_trigger_at_end_uses_resolved_length() {
+        // `trigger_at_end` fires at the wrapped node's absolute start + its
+        // resolved length. A 3-second window (5.0..8.0) at root start 0.0 fires
+        // at 3.0 — proving the absolute time is folded from the place walk.
+        let e = Event::new();
+        let resolved =
+            resolve(Dot.at(5.0..8.0).trigger_at_end(e)).expect("windowed, so not timeless");
+        assert_eq!(resolved.triggers().get(e.id()).seconds(), 3.0);
+    }
+
+    #[test]
+    fn resolve_trigger_earliest_wins_across_two_writers() {
+        // Two `Triggered` wrappers over the SAME event at different absolute
+        // times: the EARLIEST recorded time wins. A `Sequence` would place
+        // these in a row (step 4); with no containers yet we drive the place
+        // walk directly with distinct `abs_start`s to exercise earliest-wins.
+        let e = Event::new();
+        let mut ctx = ResolveCtx::new();
+        // Later writer first (abs_start 7.0), then the earlier one (abs_start 2.0).
+        Dot.at(0.0..2.0).trigger_at_start(e).resolve(7.0, &mut ctx);
+        Dot.at(0.0..2.0).trigger_at_start(e).resolve(2.0, &mut ctx);
+        let table = ctx.into_triggers();
+        assert_eq!(table.get(e.id()).seconds(), 2.0);
+    }
+
+    #[test]
+    fn resolved_timeline_is_send() {
+        // `ResolvedTimeline` is stored in the plugin collection and moved across
+        // threads (audit M2) — assert it at the value level too.
+        fn assert_send<T: Send>(_: &T) {}
+        let resolved = resolve(Dot.at(0.0..1.0)).unwrap();
+        assert_send(&resolved);
     }
 }
