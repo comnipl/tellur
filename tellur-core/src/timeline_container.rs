@@ -394,7 +394,10 @@ const STUB_PROBE_SECONDS: f32 = 1.0;
 /// `duration` if set, else [`STUB_PROBE_SECONDS`]. `frame` is a `None`
 /// placeholder until the decode backend lands.
 #[crate::component(timeline)]
-#[derive(crate::Keyable)]
+// `Clone` so the leaf can be a field of a `#[component(timeline)]` fn (e.g. the
+// `.sketch/01` `Dialogue(voice: AudioFile)`): the macro clones `self` to
+// destructure the body's fields, so every component field type must be `Clone`.
+#[derive(Clone, crate::Keyable)]
 pub struct VideoFile {
     #[builder(into)]
     pub path: String,
@@ -455,7 +458,9 @@ impl TimelineComponent for VideoFile {
 /// `duration` if set, else [`STUB_PROBE_SECONDS`]. `samples` is a `None`
 /// placeholder until `symphonia` decode lands.
 #[crate::component(timeline)]
-#[derive(crate::Keyable)]
+// `Clone`: see `VideoFile` — a media leaf may be a `#[component(timeline)]`
+// field (the `.sketch/01` `Dialogue(voice: AudioFile)`), which the macro clones.
+#[derive(Clone, crate::Keyable)]
 pub struct AudioFile {
     #[builder(into)]
     pub path: String,
@@ -511,7 +516,9 @@ impl TimelineComponent for AudioFile {
 /// [`cues`](TimelineComponent::cues) emit `Cue { start: offset, end: offset +
 /// resolved_len, text }`. `frame` / `samples` are `None`.
 #[crate::component(timeline)]
-#[derive(crate::Keyable)]
+// `Clone`: see `VideoFile` — a leaf may be a `#[component(timeline)]` field that
+// the macro clones to build the body.
+#[derive(Clone, crate::Keyable)]
 pub struct Subtitle {
     #[builder(into)]
     pub text: String,
