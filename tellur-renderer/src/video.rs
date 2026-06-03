@@ -668,7 +668,7 @@ mod av_mux_tests {
     use tellur_core::geometry::{Constraints, Vec2};
     use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
     use tellur_core::render_context::RenderContext;
-    use tellur_core::timeline_component::{resolve, Timed};
+    use tellur_core::timeline_component::{resolve, Timed, TimedBuilder};
     use tellur_core::timeline_container::{AudioFile, Timeline};
 
     // A solid opaque-color visual that fills the target, so the timeline has a
@@ -710,17 +710,39 @@ mod av_mux_tests {
         path
     }
 
-    // Asserts the encoded mp4 has an audio stream via ffprobe.
-    fn has_audio_stream(path: &Path) -> bool {
+    // Asserts the encoded mp4 has a stream of `kind` ("a" audio / "v" video).
+    fn has_stream(path: &Path, kind: &str) -> bool {
         let out = Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "a"])
+            .args(["-v", "error", "-select_streams", kind])
             .args(["-show_entries", "stream=codec_type"])
             .args(["-of", "csv=p=0"])
             .arg(path)
             .output()
             .expect("run ffprobe");
         let txt = String::from_utf8_lossy(&out.stdout);
-        txt.contains("audio")
+        !txt.trim().is_empty()
+    }
+
+    // Asserts the encoded mp4 has an audio stream via ffprobe.
+    fn has_audio_stream(path: &Path) -> bool {
+        has_stream(path, "a")
+    }
+
+    /// Writes a short `testsrc` mp4 (a moving color pattern) to a temp path —
+    /// the real video BACKGROUND for the end-to-end A/V test.
+    fn write_testsrc_mp4(secs: u32, w: u32, h: u32) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("tellur_av_bg_{}.mp4", std::process::id()));
+        let lavfi = format!("testsrc=size={w}x{h}:rate=30:duration={secs}");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-v", "error"])
+            .args(["-f", "lavfi", "-i", &lavfi])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .expect("spawn ffmpeg testsrc");
+        assert!(status.success(), "testsrc fixture write failed");
+        path
     }
 
     #[test]
@@ -749,6 +771,56 @@ mod av_mux_tests {
         assert!(out.exists(), "output mp4 was written");
         assert!(has_audio_stream(&out), "muxed mp4 has an audio stream");
 
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    // End-to-end A/V: a REAL decoded video background (`testsrc` mp4 via
+    // `VideoFile`) + an `AudioFile` + a burned-in caption overlay + a `Subtitle`
+    // cue, encoded with `encode_timeline` to an mp4 carrying BOTH a video and an
+    // audio stream. This is the full timeline subsystem firing end-to-end.
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH"]
+    fn encode_timeline_real_video_audio_caption() {
+        use tellur_core::timeline_container::{Subtitle, VideoFile};
+
+        let bg = write_testsrc_mp4(1, 128, 96);
+        let src = sine_wav();
+
+        // 1s timeline: the decoded video fills the duration, the sine audio mixes
+        // under it, a solid caption overlay burns in over the top half-second,
+        // and a Subtitle cue spans the whole clip.
+        let tl = Timeline::builder()
+            .child(VideoFile::builder().path(bg.to_str().unwrap()).at(0.0..1.0))
+            .child(AudioFile::builder().path(src.to_str().unwrap()))
+            .child(Solid.at(0.5..1.0))
+            .child(Subtitle::builder().text("caption line").fill())
+            .build();
+        let resolved = resolve(tl).expect("real video + audio + caption resolves");
+
+        // The subtitle cue is collected and spans the clip (the caption channel).
+        let cues = resolved.source().cues(0.0);
+        let cue = cues
+            .iter()
+            .find(|c| c.text == "caption line")
+            .expect("subtitle cue collected");
+        assert!((cue.start - 0.0).abs() < 1e-3 && (cue.end - 1.0).abs() < 0.05);
+
+        let mut out = std::env::temp_dir();
+        out.push(format!("tellur_av_full_{}.mp4", std::process::id()));
+
+        let encoder = FfmpegEncoder::new(Resolution::new(128, 96), 24)
+            .progress(false)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest"]);
+        encoder
+            .encode_timeline(&resolved, &out)
+            .expect("ffmpeg A/V mux of a real-video timeline succeeds");
+
+        assert!(out.exists(), "output mp4 was written");
+        assert!(has_stream(&out, "v"), "muxed mp4 has a video stream");
+        assert!(has_stream(&out, "a"), "muxed mp4 has an audio stream");
+
+        let _ = std::fs::remove_file(&bg);
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&out);
     }

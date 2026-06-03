@@ -409,20 +409,28 @@ impl TimelineComponent for Sequence {
 
 // ── Leaves ───────────────────────────────────────────────────────────────────
 
-/// A placeholder media duration for the stubbed [`probe`](VideoFile::probe)
-/// seam. Real decode (steps 8/9) replaces this with a header read
-/// (`.sketch/02 §12`): video via an `ffmpeg`/`ffprobe` child process, audio via
-/// `symphonia`. Until then both media leaves report this fixed length unless a
-/// test injects one via `duration`.
+/// A last-resort media duration for the [`probe`](VideoFile::probe) seam when no
+/// real length is available (`.sketch/02 §12`): a missing/un-probable file, or a
+/// placeholder test path. Real decode reads the header — video via
+/// `ffprobe`/`ffmpeg` ([`video_decode`](crate::video_decode)), audio via
+/// `symphonia`. A `.trim` or an injected `duration` wins over this.
 const STUB_PROBE_SECONDS: f32 = 1.0;
 
 /// Decoded video — the visual channel. Built with
 /// `VideoFile::builder().path("x.mp4")`.
 ///
-/// Its intrinsic length is the file's, read once by the resolve pass. DECODE IS
-/// STUBBED here (step 9): [`probe`](Self::probe) returns the injected
-/// `duration` if set, else [`STUB_PROBE_SECONDS`]. `frame` is a `None`
-/// placeholder until the decode backend lands.
+/// Its intrinsic length is the file's, read once by the resolve pass via an
+/// `ffprobe` header read ([`probe`](Self::probe)); an injected `duration` (or,
+/// when the file is un-probable, [`STUB_PROBE_SECONDS`]) is the fallback so a
+/// test that names a non-existent path still resolves. A `.trim(a..b)` crops the
+/// SOURCE seconds, shortening the reported duration to `b - a`.
+///
+/// DECODE (step 9): a per-source `ffmpeg` CHILD process emitting raw `rgba`
+/// scaled to the target (`.sketch/01` ZONE C). The mutable decoder state (the
+/// child + frame cache + decode position) lives OUTSIDE this struct in a
+/// process-global pool ([`video_decode`](crate::video_decode)), so `VideoFile`
+/// stays `Clone + Keyable` pure data (`path` + `trim` + injected `duration`) and
+/// the decoder state never enters any cache key.
 #[crate::component(timeline)]
 // `Clone` so the leaf can be a field of a `#[component(timeline)]` fn (e.g. the
 // `.sketch/01` `Dialogue(voice: AudioFile)`): the macro clones `self` to
@@ -431,22 +439,40 @@ const STUB_PROBE_SECONDS: f32 = 1.0;
 pub struct VideoFile {
     #[builder(into)]
     pub path: String,
-    /// TODO(task 9): real probe reads the file header. Until then a test can
-    /// inject the duration so resolve has a determinate length to fold; `None`
-    /// falls back to the stub.
+    /// Optional override for the probed duration. Test-injectable; `None` reads
+    /// the real `ffprobe` length (with the trim length / stub as fallbacks).
     #[builder(into)]
     pub duration: Option<f32>,
+    /// SOURCE-clock crop `(start, end)` set by [`Self::trim`]; `None` plays the
+    /// whole file. The reported [`duration`](TimelineComponent::duration) is
+    /// `end - start` when set, and `frame` offsets the source time by `start`.
+    #[builder(skip)]
+    pub trim: Option<(f32, f32)>,
 }
 
 impl VideoFile {
-    /// Stubbed duration probe (`.sketch/02 §12`).
-    ///
-    /// TODO(task 9): replace with an `ffprobe`/`ffmpeg` header read that can
-    /// fail with [`ResolveError::Probe`](crate::timeline_component::ResolveError::Probe);
-    /// the trim/speed remap a window implies (`.sketch/01 §A.3`) is the leaf's
-    /// `frame`/`samples` concern at the same step. For now it never fails.
+    /// Crops to SOURCE seconds `a..b` (the in/out crop). Shortens
+    /// [`duration`](TimelineComponent::duration) to `b - a`. An inherent method
+    /// so it shadows the generic [`Timed::trim`](crate::timeline_component::Timed::trim)
+    /// no-op for the concrete leaf (`.trim` actually records the crop here).
+    pub fn trim(mut self, r: std::ops::Range<f32>) -> Self {
+        self.trim = Some((r.start, r.end));
+        self
+    }
+
+    /// Duration probe (`.sketch/02 §12`). An injected `duration` wins; otherwise
+    /// the SOURCE length read by `ffprobe`, cropped by a `.trim`. If the file is
+    /// un-probable (e.g. a placeholder test path), falls back to the trim length
+    /// or [`STUB_PROBE_SECONDS`] so resolve still has a determinate length.
     fn probe(&self) -> f32 {
-        self.duration.unwrap_or(STUB_PROBE_SECONDS)
+        if let Some(d) = self.duration {
+            return d;
+        }
+        if let Some((a, b)) = self.trim {
+            // A trim fixes the length regardless of the source (clamped to ≥ 0).
+            return (b - a).max(0.0);
+        }
+        crate::video_decode::probe_duration(&self.path).unwrap_or(STUB_PROBE_SECONDS)
     }
 }
 
@@ -461,9 +487,13 @@ impl TimelineComponent for VideoFile {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // TODO(task 9): decode + return the frame at `clock`.
-        let _ = (clock, target, ctx);
-        None
+        // The `Placed` wrapper has already rebased + speed-scaled `local` to this
+        // clip's source-local axis; the leaf only adds its `.trim` start to reach
+        // the absolute source time, then decodes scaled to `target` via the
+        // per-source ffmpeg child (`video_decode`). `ctx` is unused: decode
+        // spawns its own child and does not touch the render context.
+        let _ = ctx;
+        crate::video_decode::decode_frame(&self.path, clock.local().seconds(), self.trim, target)
     }
 
     fn arrangement(&self) -> Arrangement {
@@ -472,8 +502,7 @@ impl TimelineComponent for VideoFile {
             label: self.path.clone(),
             start: 0.0,
             end: self.probe(),
-            // TODO(task 9): carry the source crop once `.trim` is wired.
-            trim: None,
+            trim: self.trim,
             triggers: Vec::new(),
             children: Vec::new(),
         }
@@ -1235,6 +1264,85 @@ mod tests {
             (stretched_secs - 0.5).abs() < 0.02,
             "stretched buffer ~0.5s, got {stretched_secs}",
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ── Real video decode via the ffmpeg child (step 9) ──────────────────────
+    //
+    // Behind `#[ignore]` (like the GPU + step-8 mux tests): synthesize a tiny
+    // mp4 fixture with `ffmpeg testsrc`, place it as a `VideoFile`, and decode a
+    // few frames asserting non-empty / plausible pixels. Runs for real here
+    // (the dev box has ffmpeg/ffprobe), giving byte-level validation under
+    // `cargo test -- --ignored`.
+
+    /// Writes a short `testsrc` mp4 (a moving color test pattern) to a unique
+    /// temp path via `ffmpeg`. `secs` long at 30 fps, `w`x`h`. Returns the path.
+    fn write_testsrc_mp4(name: &str, secs: u32, w: u32, h: u32) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("tellur_video_{}_{}.mp4", name, std::process::id()));
+        let size = format!("size={w}x{h}:rate=30:duration={secs}");
+        let lavfi = format!("testsrc={size}");
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-v", "error"])
+            .args(["-f", "lavfi", "-i", &lavfi])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&path)
+            .status()
+            .expect("spawn ffmpeg to write testsrc fixture");
+        assert!(status.success(), "ffmpeg testsrc fixture write failed");
+        path
+    }
+
+    /// Whether an RGBA frame has at least one non-transparent, non-black pixel —
+    /// a "plausible decoded picture" check (testsrc is colorful).
+    fn frame_has_color(image: &RasterImage) -> bool {
+        let cpu = image.as_cpu().expect("cpu frame");
+        cpu.pixels
+            .chunks_exact(4)
+            .any(|px| px[3] > 0 && (px[0] > 0 || px[1] > 0 || px[2] > 0))
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH"]
+    fn videofile_probes_real_duration() {
+        // A 2s fixture probes to ~2.0s via ffprobe.
+        let path = write_testsrc_mp4("probe", 2, 64, 48);
+        let vf = VideoFile::builder().path(path.to_str().unwrap()).build();
+        let d = vf.duration().expect("video has a duration");
+        assert!((d - 2.0).abs() < 0.2, "probed ~2.0s, got {d}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH"]
+    fn videofile_decodes_plausible_frames() {
+        // Decode a few frames at 64x48 and assert each is a real, colorful
+        // picture scaled to the requested target. Exercises both the cold seek
+        // (first request) and the forward advance (subsequent requests).
+        let path = write_testsrc_mp4("decode", 2, 320, 240);
+        let target = Resolution::new(64, 48);
+
+        let tl = Timeline::builder()
+            .child(VideoFile::builder().path(path.to_str().unwrap()).at(0.0..2.0))
+            .build();
+        let resolved = resolve_root(tl).expect("media-backed");
+        let mut ctx = crate::render_context::PassThrough;
+
+        for &t in &[0.0_f32, 0.1, 0.2, 1.0] {
+            let frame = resolved
+                .frame(TimelineTime::new(t), target, &mut ctx)
+                .unwrap_or_else(|| panic!("decoded a frame at t={t}"));
+            assert_eq!(frame.width(), 64, "scaled to target width");
+            assert_eq!(frame.height(), 48, "scaled to target height");
+            assert!(frame_has_color(&frame), "frame at t={t} has real pixels");
+        }
+
+        // A backward scrub (t=0.0 after t=1.0) re-seeks and still decodes.
+        let back = resolved
+            .frame(TimelineTime::new(0.0), target, &mut ctx)
+            .expect("backward scrub decodes");
+        assert!(frame_has_color(&back), "scrubbed-back frame has real pixels");
+
         let _ = std::fs::remove_file(&path);
     }
 }
