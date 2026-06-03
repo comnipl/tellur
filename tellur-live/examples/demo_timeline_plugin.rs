@@ -6,4 +6,7 @@
 #[path = "demo_scene/mod.rs"]
 mod scene;
 
-tellur_live::export_timeline!("main", scene::TITLE, scene::build_timeline);
+// The demo scene still builds the OLD closure-based `Timeline`; the legacy
+// adapter macro wraps it so it serves through the migrated v2 collection
+// without touching `demo_scene/mod.rs`.
+tellur_live::export_legacy_timeline!("main", scene::TITLE, scene::build_timeline);

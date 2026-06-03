@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
+use tellur_core::timeline_component::{Arrangement, NodeKind};
 use tellur_renderer::CachingRenderContext;
 
 use crate::build_watch::{
@@ -113,7 +114,7 @@ fn handle_connection(
     match path.as_str() {
         "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
         "/api/events" => handle_event_stream(app, stream),
-        "/api/info" | "/api/frame" | "/api/stream" => {
+        "/api/info" | "/api/frame" | "/api/stream" | "/api/arrangement" => {
             let mut app = app
                 .lock()
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
@@ -244,6 +245,7 @@ impl PreviewApp {
             "/api/info" => self.handle_info(stream),
             "/api/frame" => self.handle_frame(stream, &request.query),
             "/api/stream" => self.handle_stream(stream, &request.query),
+            "/api/arrangement" => self.handle_arrangement(stream, &request.query),
             _ => unreachable!("non-api routes are handled before acquiring the preview lock"),
         }
     }
@@ -271,6 +273,39 @@ impl PreviewApp {
             self.plugin.cache_key().unwrap_or(""),
             &compile,
         ))
+    }
+
+    fn handle_arrangement(
+        &mut self,
+        mut stream: TcpStream,
+        query: &HashMap<String, String>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.reload_plugin_if_changed()?;
+        let collection = self.plugin.collection()?;
+        let timelines = collection.timelines();
+        let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
+            return write_response(
+                &mut stream,
+                404,
+                "Not Found",
+                "application/json; charset=utf-8",
+                b"null",
+            );
+        };
+        let body = match collection.arrangement(&info.id) {
+            Some(arrangement) => arrangement_json(&arrangement),
+            // The collection has not resolved a tree for this id (a failed
+            // resolve, or a not-yet-migrated collection): emit `null` so the UI
+            // can fall back to its flat view.
+            None => "null".to_owned(),
+        };
+        write_response(
+            &mut stream,
+            200,
+            "OK",
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+        )
     }
 
     fn handle_frame(
@@ -1100,11 +1135,16 @@ fn info_json(
     let timelines_json = timelines
         .iter()
         .map(|info| {
+            let error = match info.error.as_deref() {
+                Some(e) => format!("\"{}\"", json_escape(e)),
+                None => "null".to_owned(),
+            };
             format!(
-                "{{\"id\":\"{}\",\"title\":\"{}\",\"duration\":{}}}",
+                "{{\"id\":\"{}\",\"title\":\"{}\",\"duration\":{},\"error\":{}}}",
                 json_escape(&info.id),
                 json_escape(&info.title),
                 finite_json_number(info.duration),
+                error,
             )
         })
         .collect::<Vec<_>>()
@@ -1130,6 +1170,52 @@ fn info_json(
     )
 }
 
+/// The lowercased `NodeKind` discriminant the live UI keys its rendering on.
+/// Kept in lock-step with `web/src/types.ts`'s `NodeKind` union.
+fn node_kind_str(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Video => "video",
+        NodeKind::Audio => "audio",
+        NodeKind::Caption => "caption",
+        NodeKind::Subtitle => "subtitle",
+        NodeKind::Timeline => "timeline",
+        NodeKind::Sequence => "sequence",
+    }
+}
+
+/// Serializes an [`Arrangement`] node and its children into the hand-built JSON
+/// the live UI consumes (audit B.4). Recurses over `children`; every float goes
+/// through [`finite_json_number`]; `trim` is `null` or `[a,b]`. Shape mirrored
+/// in `web/src/types.ts`.
+fn arrangement_json(node: &Arrangement) -> String {
+    let trim = match node.trim {
+        Some((a, b)) => format!("[{},{}]", finite_json_number(a), finite_json_number(b)),
+        None => "null".to_owned(),
+    };
+    let triggers = node
+        .triggers
+        .iter()
+        .map(|t| finite_json_number(*t))
+        .collect::<Vec<_>>()
+        .join(",");
+    let children = node
+        .children
+        .iter()
+        .map(arrangement_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"kind\":\"{}\",\"label\":\"{}\",\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
+        node_kind_str(node.kind),
+        json_escape(&node.label),
+        finite_json_number(node.start),
+        finite_json_number(node.end),
+        trim,
+        triggers,
+        children,
+    )
+}
+
 fn finite_json_number(v: f32) -> String {
     if v.is_finite() {
         v.to_string()
@@ -1152,4 +1238,101 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
+    // overlay timeline with a video child (a source crop) and a sequence of two
+    // captions, one carrying a trigger. Asserts the hand-built emitter matches
+    // the documented JSON exactly (lowercased kinds, `null`/`[a,b]` trim, every
+    // float through `finite_json_number`, recursive children).
+    #[test]
+    fn arrangement_json_matches_the_b4_shape() {
+        let arrangement = Arrangement {
+            kind: NodeKind::Timeline,
+            label: "root".to_owned(),
+            start: 0.0,
+            end: 6.0,
+            trim: None,
+            triggers: Vec::new(),
+            children: vec![
+                Arrangement {
+                    kind: NodeKind::Video,
+                    label: "establishing.mp4".to_owned(),
+                    start: 0.0,
+                    end: 2.0,
+                    trim: Some((1.0, 3.0)),
+                    triggers: Vec::new(),
+                    children: Vec::new(),
+                },
+                Arrangement {
+                    kind: NodeKind::Sequence,
+                    label: String::new(),
+                    start: 0.0,
+                    end: 6.0,
+                    trim: None,
+                    triggers: Vec::new(),
+                    children: vec![
+                        Arrangement {
+                            kind: NodeKind::Caption,
+                            label: "one".to_owned(),
+                            start: 0.0,
+                            end: 3.0,
+                            trim: None,
+                            triggers: Vec::new(),
+                            children: Vec::new(),
+                        },
+                        Arrangement {
+                            kind: NodeKind::Caption,
+                            label: "two".to_owned(),
+                            start: 3.0,
+                            end: 6.0,
+                            trim: None,
+                            triggers: vec![3.0],
+                            children: Vec::new(),
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let expected = concat!(
+            "{\"kind\":\"timeline\",\"label\":\"root\",\"start\":0,\"end\":6,",
+            "\"trim\":null,\"triggers\":[],\"children\":[",
+            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"start\":0,\"end\":2,",
+            "\"trim\":[1,3],\"triggers\":[],\"children\":[]},",
+            "{\"kind\":\"sequence\",\"label\":\"\",\"start\":0,\"end\":6,",
+            "\"trim\":null,\"triggers\":[],\"children\":[",
+            "{\"kind\":\"caption\",\"label\":\"one\",\"start\":0,\"end\":3,",
+            "\"trim\":null,\"triggers\":[],\"children\":[]},",
+            "{\"kind\":\"caption\",\"label\":\"two\",\"start\":3,\"end\":6,",
+            "\"trim\":null,\"triggers\":[3],\"children\":[]}",
+            "]}",
+            "]}"
+        );
+
+        assert_eq!(arrangement_json(&arrangement), expected);
+    }
+
+    #[test]
+    fn arrangement_json_non_finite_floats_become_zero() {
+        // `finite_json_number` guards every float, so an unfired/absent length
+        // (∞ / NaN) never leaks a non-JSON token.
+        let arrangement = Arrangement {
+            kind: NodeKind::Caption,
+            label: String::new(),
+            start: f32::INFINITY,
+            end: f32::NAN,
+            trim: None,
+            triggers: vec![f32::INFINITY],
+            children: Vec::new(),
+        };
+        let json = arrangement_json(&arrangement);
+        assert!(json.contains("\"start\":0"));
+        assert!(json.contains("\"end\":0"));
+        assert!(json.contains("\"triggers\":[0]"));
+    }
 }

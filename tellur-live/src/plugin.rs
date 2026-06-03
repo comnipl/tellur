@@ -8,6 +8,7 @@ use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
@@ -17,8 +18,19 @@ use tellur_core::raster::{RasterImage, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
+use tellur_core::timeline_component::{
+    resolve, Arrangement, NodeKind, Clock, ResolveError, ResolvedTimeline, TimelineComponent,
+};
 
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v1\0";
+/// ABI version carried by the entry symbol.
+///
+/// Bumped to `v2` for the timeline subsystem migration: the collection now
+/// carries the new [`TimelineComponent`] model and gained an `arrangement`
+/// vtable slot. The loader resolves this symbol with an unchecked
+/// `transmute_copy` (see [`DynamicLibrary::symbol`]), so a stale 2-method `v1`
+/// `.so` would dlsym/transmute fine yet hit a vtable-slot UB at call time.
+/// Renaming the symbol makes dlsym fail cleanly on an old plugin instead.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v2\0";
 
 type EntryFn = unsafe extern "Rust" fn() -> Box<dyn TimelineCollection>;
 
@@ -28,6 +40,11 @@ pub struct TimelineInfo {
     pub id: String,
     pub title: String,
     pub duration: f32,
+    /// A resolve-time error for this timeline, if its tree failed to resolve
+    /// (e.g. a media probe failure or a timeless root). Mirrors the
+    /// `last_error` display the server already surfaces for plugin load
+    /// failures; `None` when the timeline resolved cleanly.
+    pub error: Option<String>,
 }
 
 /// A collection of timelines exported by one dynamic library.
@@ -41,33 +58,65 @@ pub trait TimelineCollection: Send {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage>;
-}
 
-/// Wraps a single [`Timeline`] as a one-entry collection.
-pub struct SingleTimeline<T: Timeline + Send> {
-    id: &'static str,
-    title: &'static str,
-    timeline: T,
-}
-
-pub fn single_timeline<T: Timeline + Send>(
-    id: &'static str,
-    title: &'static str,
-    timeline: T,
-) -> SingleTimeline<T> {
-    SingleTimeline {
-        id,
-        title,
-        timeline,
+    /// The resolved arrangement tree for `id`, for the live UI to introspect.
+    ///
+    /// Defaulted to `None` so existing collections can migrate in stages
+    /// (audit B.4): a collection that has not yet built a resolved tree simply
+    /// returns nothing here.
+    fn arrangement(&self, _id: &str) -> Option<Arrangement> {
+        None
     }
 }
 
-impl<T: Timeline + Send> TimelineCollection for SingleTimeline<T> {
+/// Wraps a single resolved [`TimelineComponent`] as a one-entry collection.
+///
+/// The tree is resolved ONCE at collection construction (plugin-side — the host
+/// only sees `Box<dyn TimelineCollection>`, audit B1) and the result is stored
+/// as a [`Result`]: resolving probes media and can fail, but the entry fn
+/// cannot return a `Result` across the dylib boundary and panicking there is
+/// UB-adjacent (audit M5). So the error is stored and surfaced per query —
+/// `build` yields `None`, `timelines` carries the error string, `arrangement`
+/// yields `None`.
+pub struct SingleTimeline {
+    id: &'static str,
+    title: &'static str,
+    resolved: Result<ResolvedTimeline, ResolveError>,
+}
+
+/// Resolves `root` and wraps it as a one-entry [`TimelineCollection`].
+///
+/// `resolve` CONSUMES the tree (audit M1) and can fail; the result is kept
+/// intact so the entry fn stays panic-free.
+pub fn single_timeline<T: TimelineComponent + Send + 'static>(
+    id: &'static str,
+    title: &'static str,
+    root: T,
+) -> SingleTimeline {
+    SingleTimeline {
+        id,
+        title,
+        resolved: resolve(root),
+    }
+}
+
+impl SingleTimeline {
+    fn resolved(&self) -> Option<&ResolvedTimeline> {
+        self.resolved.as_ref().ok()
+    }
+}
+
+impl TimelineCollection for SingleTimeline {
     fn timelines(&self) -> Vec<TimelineInfo> {
+        let (duration, error) = match &self.resolved {
+            Ok(resolved) => (resolved.duration(), None),
+            Err(e) => (0.0, Some(e.to_string())),
+        };
         vec![TimelineInfo {
             id: self.id.to_owned(),
             title: self.title.to_owned(),
-            duration: self.timeline.duration(),
+            duration,
+            error,
         }]
     }
 
@@ -78,23 +127,126 @@ impl<T: Timeline + Send> TimelineCollection for SingleTimeline<T> {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        (id == self.id).then(|| self.timeline.build(t, target, ctx))
+        if id != self.id {
+            return None;
+        }
+        self.resolved()?.frame(t, target, ctx)
+    }
+
+    fn arrangement(&self, id: &str) -> Option<Arrangement> {
+        if id != self.id {
+            return None;
+        }
+        Some(self.resolved()?.source().arrangement())
     }
 }
 
-/// Exports a single timeline builder from a `cdylib`.
+/// Adapts an old closure-based [`Timeline`] to the new [`TimelineComponent`]
+/// model so the existing demo scene (which still builds a `Timeline`) can be
+/// served by the migrated collection without rewriting it.
+///
+/// A `Timeline` is opaque (a closure with a fixed `duration`), so this presents
+/// it as a single timed leaf: its `frame` plays the timeline at the global
+/// clock, its length is the timeline's `duration`, and its `arrangement` is one
+/// Video-kind node spanning `[0, duration]`.
+///
+/// `TimelineComponent` requires `PartialEq + Hash` (via the `DynEq`/`DynHash`
+/// super-traits). A `Timeline` closure is neither, and timeline nodes are never
+/// memoized through `ctx.render` (`.sketch/02 §11`) — this identity is only the
+/// builder-marker key — so the wrapper compares all instances equal and hashes
+/// to a constant. There is exactly one per collection, so that is sound.
+pub struct LegacyTimeline<T: Timeline + Send> {
+    timeline: T,
+}
+
+impl<T: Timeline + Send> LegacyTimeline<T> {
+    /// Wraps `timeline` so it can be placed in the new timeline world.
+    pub fn new(timeline: T) -> Self {
+        Self { timeline }
+    }
+}
+
+impl<T: Timeline + Send> PartialEq for LegacyTimeline<T> {
+    fn eq(&self, _other: &Self) -> bool {
+        // Opaque closure timeline: treat the single wrapped instance as its own
+        // identity. Not used as a per-frame cache key (see the type doc).
+        true
+    }
+}
+
+impl<T: Timeline + Send> Eq for LegacyTimeline<T> {}
+
+impl<T: Timeline + Send> Hash for LegacyTimeline<T> {
+    fn hash<H: Hasher>(&self, _state: &mut H) {
+        // Constant hash: consistent with the all-equal `PartialEq` above.
+    }
+}
+
+impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
+    fn duration(&self) -> Option<f32> {
+        Some(self.timeline.duration())
+    }
+
+    fn frame(
+        &self,
+        clock: Clock<'_>,
+        target: Resolution,
+        ctx: &mut dyn RenderContext,
+    ) -> Option<RasterImage> {
+        Some(self.timeline.build(clock.global(), target, ctx))
+    }
+
+    fn arrangement(&self) -> Arrangement {
+        // One Video-kind node spanning the whole timeline; no source crop,
+        // no triggers, no children — the legacy timeline is opaque.
+        Arrangement {
+            kind: NodeKind::Video,
+            label: String::new(),
+            start: 0.0,
+            end: self.timeline.duration(),
+            trim: None,
+            triggers: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+/// Exports a single [`TimelineComponent`] builder from a `cdylib`.
 ///
 /// ```ignore
-/// fn build() -> impl tellur_core::timeline::Timeline { ... }
+/// fn build() -> impl tellur_core::timeline_component::TimelineComponent + Send { ... }
 /// tellur_live::export_timeline!("main", "Main", build);
 /// ```
 #[macro_export]
 macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v1(
+        pub extern "Rust" fn tellur_timeline_collection_v2(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
+        }
+    };
+}
+
+/// Exports a single OLD closure-based [`tellur_core::timeline::Timeline`]
+/// builder from a `cdylib`, wrapping it in a [`LegacyTimeline`] adapter so it
+/// serves through the migrated collection unchanged.
+///
+/// ```ignore
+/// fn build() -> impl tellur_core::timeline::Timeline + Send { ... }
+/// tellur_live::export_legacy_timeline!("main", "Main", build);
+/// ```
+#[macro_export]
+macro_rules! export_legacy_timeline {
+    ($id:expr, $title:expr, $builder:path) => {
+        #[no_mangle]
+        pub extern "Rust" fn tellur_timeline_collection_v2(
+        ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
+            ::std::boxed::Box::new($crate::single_timeline(
+                $id,
+                $title,
+                $crate::LegacyTimeline::new($builder()),
+            ))
         }
     };
 }
@@ -104,7 +256,7 @@ macro_rules! export_timeline {
 macro_rules! export_timeline_collection {
     ($builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v1(
+        pub extern "Rust" fn tellur_timeline_collection_v2(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
@@ -391,5 +543,101 @@ unsafe fn dlerror_message() -> String {
         "unknown dynamic loader error".to_owned()
     } else {
         CStr::from_ptr(err).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tellur_core::geometry::{Constraints, Vec2};
+    use tellur_core::raster::{PixelFormat, RasterComponent};
+    use tellur_core::timeline_component::Timed;
+    use tellur_core::timeline_container::Timeline as TimelineContainer;
+
+    // A trivial timeless visual so a small NEW-API timeline can be built without
+    // pulling in media decode. Reaches the timeline world via the one-way
+    // blanket over `RasterComponent`.
+    #[derive(PartialEq, Hash)]
+    struct Dot;
+
+    impl RasterComponent for Dot {
+        fn layout(&self, _c: Constraints) -> Vec2 {
+            Vec2(1.0, 1.0)
+        }
+
+        fn render(&self, _s: Vec2, _t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0u8, 0, 0, 0])
+        }
+    }
+
+    // Builds an overlay `Timeline` of two windowed visuals — a small NEW-API
+    // timeline that resolves to a determinate length (no media probe).
+    fn build_new_api_timeline() -> TimelineContainer {
+        TimelineContainer::builder()
+            .child(Dot.at(0.0..2.0))
+            .child(Dot.at(0.0..3.0))
+            .build()
+    }
+
+    #[test]
+    fn single_timeline_surfaces_resolved_duration() {
+        let collection = single_timeline("main", "Main", build_new_api_timeline());
+        let infos = collection.timelines();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].id, "main");
+        assert_eq!(infos[0].title, "Main");
+        // The overlay length is the max child window end (3.0).
+        assert_eq!(infos[0].duration, 3.0);
+        assert_eq!(infos[0].error, None);
+    }
+
+    #[test]
+    fn single_timeline_arrangement_walks_the_resolved_tree() {
+        let collection = single_timeline("main", "Main", build_new_api_timeline());
+
+        // A non-matching id yields nothing.
+        assert!(collection.arrangement("other").is_none());
+
+        let root = collection
+            .arrangement("main")
+            .expect("the resolved tree has an arrangement");
+
+        // The root is the overlay Timeline spanning [0, 3].
+        assert_eq!(root.kind, NodeKind::Timeline);
+        assert_eq!(root.start, 0.0);
+        assert_eq!(root.end, 3.0);
+        assert!(root.trim.is_none());
+
+        // Two children, each a Caption-kind visual leaf (via the blanket).
+        assert_eq!(root.children.len(), 2);
+        for child in &root.children {
+            assert_eq!(child.kind, NodeKind::Caption);
+            assert!(child.children.is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_timeline_adapter_arrangement_is_one_video_span() {
+        // The legacy adapter presents an opaque closure timeline as a single
+        // Video-kind node spanning its whole duration.
+        let legacy = LegacyTimeline::new(tellur_core::timeline::timeline(
+            4.0,
+            |_t, target: Resolution, _ctx| {
+                RasterImage::cpu(
+                    target.width,
+                    target.height,
+                    PixelFormat::Rgba8,
+                    vec![0u8; (target.width * target.height * 4) as usize],
+                )
+            },
+        ));
+        let collection = single_timeline("main", "Main", legacy);
+
+        assert_eq!(collection.timelines()[0].duration, 4.0);
+        let root = collection.arrangement("main").expect("resolves to a span");
+        assert_eq!(root.kind, NodeKind::Video);
+        assert_eq!(root.start, 0.0);
+        assert_eq!(root.end, 4.0);
+        assert!(root.children.is_empty());
     }
 }
