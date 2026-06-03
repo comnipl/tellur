@@ -720,7 +720,7 @@ select option {
 
 .timeline__tracks {
   position: relative;
-  height: 100%;
+  min-height: 100%;
   overflow: hidden;
   background: var(--bg-track);
   transform-origin: left top;
@@ -767,6 +767,30 @@ select option {
   background: var(--timeline-marker);
   pointer-events: none;
   z-index: 3;
+}
+
+/* Event trigger: a marker pinned to the trigger time on its node's lane
+   (e.g. the reveal fired at segment 2's boundary). The diamond head sits at the
+   top of the lane and a hairline drops through the clip. */
+.timeline__trigger {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--timeline-marker);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.timeline__trigger::before {
+  position: absolute;
+  top: 2px;
+  left: -4px;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: var(--timeline-marker);
+  transform: rotate(45deg);
 }
 
 .zoom-bar {

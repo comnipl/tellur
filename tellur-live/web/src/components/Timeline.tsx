@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
   MAX_TIMELINE_ZOOM,
@@ -8,7 +9,7 @@ import {
   type TimelineViewport,
   type TimelineViewportChange,
 } from "../timelineViewport";
-import type { TimelineInfo } from "../types";
+import type { Arrangement, NodeKind, TimelineInfo } from "../types";
 
 interface TimelineProps {
   timeline: TimelineInfo | null;
@@ -18,18 +19,57 @@ interface TimelineProps {
   onViewportChange: (next: TimelineViewportChange) => void;
 }
 
-interface TrackDef {
+// One flattened arrangement node, paired with its depth so the side heads can
+// indent and the lanes can color/position each clip on the shared time axis.
+interface ArrangementRow {
   id: string;
-  name: string;
-  alt: boolean;
-  muteActive?: boolean;
-  color?: string;
+  depth: number;
+  kind: NodeKind;
+  label: string;
+  start: number;
+  end: number;
+  triggers: number[];
 }
 
-const TRACKS: TrackDef[] = [
-  { id: "video-1", name: "Video 1", alt: false, color: "#7292e8" },
-  { id: "extra-1", name: "", alt: true },
-];
+// Per-kind clip color. Containers (timeline/sequence) read as group bands;
+// leaves (caption/subtitle/video/audio) get distinct hues so the hierarchy is
+// legible at a glance.
+const KIND_COLOR: Record<NodeKind, string> = {
+  timeline: "#5c6b8a",
+  sequence: "#7292e8",
+  video: "#4f9d8a",
+  audio: "#c08457",
+  caption: "#b06fd0",
+  subtitle: "#d0a24a",
+};
+
+// Depth-first flatten: root first, then children in order. Stable ids let React
+// keep rows across re-fetches and keep the side heads aligned with the lanes.
+function flattenArrangement(
+  node: Arrangement,
+  depth = 0,
+  path = "0",
+): ArrangementRow[] {
+  const row: ArrangementRow = {
+    id: path,
+    depth,
+    kind: node.kind,
+    label: node.label,
+    start: node.start,
+    end: node.end,
+    triggers: node.triggers,
+  };
+  const rows = [row];
+  node.children.forEach((child, index) => {
+    rows.push(...flattenArrangement(child, depth + 1, `${path}.${index}`));
+  });
+  return rows;
+}
+
+function rowHeadLabel(row: ArrangementRow): string {
+  const kind = row.kind.charAt(0).toUpperCase() + row.kind.slice(1);
+  return row.label ? `${kind} · ${row.label}` : kind;
+}
 
 export function Timeline(props: TimelineProps) {
   const { timeline, seconds, viewport, onSeek, onViewportChange } = props;
@@ -39,6 +79,7 @@ export function Timeline(props: TimelineProps) {
   const draggingSeekRef = useRef(false);
   const [bodyWidth, setBodyWidth] = useState(0);
   const [draggingSeek, setDraggingSeek] = useState(false);
+  const [arrangement, setArrangement] = useState<Arrangement | null>(null);
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -48,6 +89,27 @@ export function Timeline(props: TimelineProps) {
     setBodyWidth(el.clientWidth);
     return () => observer.disconnect();
   }, []);
+
+  // Refetch the resolved tree whenever the active timeline changes. `null`
+  // (failed resolve / legacy adapter) leaves us in the flat fallback below.
+  const timelineId = timeline?.id ?? null;
+  useEffect(() => {
+    if (!timelineId) {
+      setArrangement(null);
+      return;
+    }
+    const controller = new AbortController();
+    fetchArrangement(timelineId, controller.signal)
+      .then((next) => setArrangement(next))
+      .catch((e) => {
+        if (controller.signal.aborted) return;
+        console.warn("tellur-live arrangement fetch failed", e);
+        setArrangement(null);
+      });
+    return () => controller.abort();
+  }, [timelineId]);
+
+  const rows = arrangement ? flattenArrangement(arrangement) : [];
 
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
@@ -168,39 +230,27 @@ export function Timeline(props: TimelineProps) {
   return (
     <section className="timeline">
       <aside className="timeline__side">
-        {TRACKS.map((track) =>
-          track.name ? (
-            <div className="track-head" key={track.id}>
-              <span className="track-head__name">{track.name}</span>
-              <button
-                className={
-                  track.muteActive
-                    ? "track-head__btn track-head__btn--active"
-                    : "track-head__btn"
-                }
-                type="button"
-                title="Mute"
+        {rows.length > 0 ? (
+          rows.map((row) => (
+            <div
+              className="track-head"
+              key={row.id}
+              style={{ paddingLeft: `${10 + row.depth * 12}px` }}
+            >
+              <span
+                className="track-head__name"
+                title={rowHeadLabel(row)}
               >
-                M
-              </button>
-              <button
-                className="track-head__btn"
-                type="button"
-                title="Solo"
-              >
-                S
-              </button>
+                {rowHeadLabel(row)}
+              </span>
               <span
                 className="track-head__color"
-                style={{ background: track.color }}
+                style={{ background: KIND_COLOR[row.kind] }}
               />
             </div>
-          ) : (
-            <div
-              key={track.id}
-              className="track-head track-head--empty"
-            />
-          ),
+          ))
+        ) : (
+          <div className="track-head track-head--empty" />
         )}
       </aside>
       <div
@@ -224,27 +274,54 @@ export function Timeline(props: TimelineProps) {
             transform: `translateX(${-viewportX}px)`,
           }}
         >
-          {TRACKS.map((track) => (
-            <div
-              key={track.id}
-              className={
-                track.alt
-                  ? "timeline__track timeline__track--alt"
-                  : "timeline__track"
-              }
-            >
-              {timeline && track.id === "video-1" ? (
-                <div
-                  className="timeline__clip"
-                  style={{ left: 0, width: `${innerWidth}px` }}
-                >
-                  <span className="timeline__clip-label">
-                    {timeline.title}
-                  </span>
+          {rows.length > 0
+            ? rows.map((row) => {
+                const left = (clamp(row.start, 0, duration) / duration) *
+                  innerWidth;
+                const right = (clamp(row.end, 0, duration) / duration) *
+                  innerWidth;
+                const width = Math.max(right - left, 2);
+                const color = KIND_COLOR[row.kind];
+                return (
+                  <div key={row.id} className="timeline__track">
+                    <div
+                      className="timeline__clip"
+                      style={{
+                        left: `${left}px`,
+                        width: `${width}px`,
+                        background: color,
+                      }}
+                    >
+                      <span className="timeline__clip-label">
+                        {rowHeadLabel(row)}
+                      </span>
+                    </div>
+                    {row.triggers.map((t, index) => (
+                      <div
+                        key={index}
+                        className="timeline__trigger"
+                        title={`Event @ ${t.toFixed(3)}s`}
+                        style={{
+                          left: `${(clamp(t, 0, duration) / duration) *
+                            innerWidth}px`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                );
+              })
+            : timeline ? (
+                <div className="timeline__track">
+                  <div
+                    className="timeline__clip"
+                    style={{ left: 0, width: `${innerWidth}px` }}
+                  >
+                    <span className="timeline__clip-label">
+                      {timeline.title}
+                    </span>
+                  </div>
                 </div>
               ) : null}
-            </div>
-          ))}
           <div
             className="timeline__playhead"
             style={{ left: `${playheadX}px` }}

@@ -1,4 +1,4 @@
-import type { ServerInfo } from "./types";
+import type { Arrangement, ServerInfo } from "./types";
 
 export async function fetchInfo(signal?: AbortSignal): Promise<ServerInfo> {
   const response = await fetch("/api/info", { cache: "no-store", signal });
@@ -6,6 +6,25 @@ export async function fetchInfo(signal?: AbortSignal): Promise<ServerInfo> {
     throw new Error(`/api/info failed: ${response.status}`);
   }
   return (await response.json()) as ServerInfo;
+}
+
+// Fetches the resolved arrangement tree for `timelineId`. The server returns
+// `null` (200 or 404) when no tree resolved — a failed resolve or a not-yet
+// migrated collection — in which case the UI falls back to a flat view.
+export async function fetchArrangement(
+  timelineId: string,
+  signal?: AbortSignal,
+): Promise<Arrangement | null> {
+  const query = new URLSearchParams({ timeline: timelineId });
+  const response = await fetch(`/api/arrangement?${query}`, {
+    cache: "no-store",
+    signal,
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`/api/arrangement failed: ${response.status}`);
+  }
+  return (await response.json()) as Arrangement | null;
 }
 
 export interface FrameRequestParams {
