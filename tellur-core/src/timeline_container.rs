@@ -20,8 +20,10 @@
 //! [`probe`](VideoFile::probe) seam (a caller-injectable `duration`), and
 //! `frame` / `samples` stay `None` placeholders.
 
+use crate::composite::composite_frame_over;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
+use crate::time::{LocalTime, Time};
 use crate::timeline_component::{
     Arrangement, AudioBuffer, Clock, Cue, NodeKind, Placed, ResolveCtx, TimelineComponent,
 };
@@ -181,16 +183,20 @@ impl TimelineComponent for Timeline {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // TODO(task 5): composite children source-over at the image layer
-        // (`.sketch/02 §8`). For now forward to the topmost contributing child so
-        // the structure is in place; real compositing lands with sampling.
-        let mut last = None;
+        // Overlay: every child shares the container's base, so each sees the
+        // SAME clock (relative offset 0). A `.at(start..)` child is a `Placed`
+        // whose own `frame` rebases by its relative start; a `.fill()` child
+        // spans the whole container (relative start 0, local unchanged); a bare
+        // child is at 0 too. Recurse each child and source-over composite the
+        // resulting frames at the IMAGE layer (`.sketch/02 §8`), in child order
+        // so later children land on top. `None` frames are dropped.
+        let mut acc: Option<RasterImage> = None;
         for child in &self.children {
             if let Some(img) = child.frame(clock, target, ctx) {
-                last = Some(img);
+                acc = Some(composite_frame_over(acc, img, target, ctx));
             }
         }
-        last
+        acc
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -322,9 +328,33 @@ impl TimelineComponent for Sequence {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // TODO(task 5): rebase the clock per child by the cursor and composite.
-        let _ = (clock, target, ctx);
-        None
+        // Re-flow the cursor exactly as `resolve` / `cues` do, then hand child N
+        // a clock rebased to its slot: `local = clock.local() - cursorN`
+        // (`.sketch/02 §8`). Each child's own `local` starts at 0 at the moment
+        // it begins, so a clip after a 2s clip sees `local ≈ 0` at global t=2.0.
+        // Composite the recursed frames source-over at the image layer (in a row
+        // usually only the active child contributes, but composite generally).
+        let mut cursor = 0.0_f32;
+        let mut placed_any = false;
+        let mut acc: Option<RasterImage> = None;
+        for child in &self.children {
+            if Self::is_fill(child.as_ref()) {
+                // `.fill()` inside a Sequence is a resolve error; a valid
+                // sampled tree never reaches here, but skip it defensively so
+                // it neither shifts the cursor nor draws.
+                continue;
+            }
+            if placed_any {
+                cursor += self.spacing;
+            }
+            let child_clock = clock.with_local(LocalTime::new(clock.local().seconds() - cursor));
+            if let Some(img) = child.frame(child_clock, target, ctx) {
+                acc = Some(composite_frame_over(acc, img, target, ctx));
+            }
+            cursor += child.measure().unwrap_or(0.0);
+            placed_any = true;
+        }
+        acc
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -713,6 +743,236 @@ mod tests {
             Timeline::builder().child(Caption.at(0.0..1.0)).into();
         let _boxed2: Box<dyn TimelineComponent + Send> =
             VideoFile::builder().path("x.mp4").into();
+    }
+
+    // ── Per-frame sampling (step 5) ──────────────────────────────────────────
+    //
+    // These exercise the VIDEO-ONLY sampling path with SYNTHETIC colored
+    // visuals (no real media): container `frame` rebases each child's clock and
+    // composites the recursed frames source-over at the image layer.
+
+    use crate::time::{LocalTime, Time, TimelineTime};
+    use crate::timeline_component::{resolve as resolve_root, Clock, TriggerTable};
+    use std::sync::{Arc, Mutex};
+
+    /// A synthetic solid-color visual that fills the whole `target` with one
+    /// opaque RGBA color. A timeless `RasterComponent`, so it reaches the
+    /// timeline world through the one-way blanket and renders via `ctx.render`.
+    #[derive(PartialEq, Hash)]
+    struct SolidColor {
+        rgba: [u8; 4],
+    }
+
+    impl RasterComponent for SolidColor {
+        fn layout(&self, _c: Constraints) -> Vec2 {
+            Vec2(1.0, 1.0)
+        }
+        fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+            let count = (t.width as usize) * (t.height as usize);
+            let mut pixels = Vec::with_capacity(count * 4);
+            for _ in 0..count {
+                pixels.extend_from_slice(&self.rgba);
+            }
+            RasterImage::cpu(t.width, t.height, PixelFormat::Rgba8, pixels)
+        }
+    }
+
+    fn first_pixel(image: &RasterImage) -> [u8; 4] {
+        let cpu = image.as_cpu().expect("cpu image");
+        [cpu.pixels[0], cpu.pixels[1], cpu.pixels[2], cpu.pixels[3]]
+    }
+
+    // (a) A Timeline overlaying two solid-color visuals composites BOTH: the
+    // later child (added second) lands on top via source-over.
+    #[test]
+    fn timeline_overlays_two_solids_source_over() {
+        // Bottom is fully opaque red; top is semi-transparent green over it.
+        let tl = Timeline::builder()
+            .child(SolidColor { rgba: [255, 0, 0, 255] }.fill())
+            .child(SolidColor { rgba: [0, 255, 0, 128] }.fill())
+            // A bare windowed solid gives the timeline a non-fill length so the
+            // two fills have something to span.
+            .child(SolidColor { rgba: [0, 0, 255, 0] }.at(0.0..2.0))
+            .build();
+        let resolved = resolve_root(tl).expect("windowed, not timeless");
+
+        let mut ctx = crate::render_context::PassThrough;
+        let frame = resolved
+            .frame(TimelineTime::new(0.5), Resolution::new(4, 4), &mut ctx)
+            .expect("two visible solids contribute a frame");
+
+        // Source-over of green(a=128) over opaque red:
+        //   out_a = 128 + 255*(255-128)/255 ≈ 255 (opaque)
+        //   out_r ≈ red * (1 - 128/255)  (red bleeds through ~half)
+        //   out_g ≈ 255 * (128/255)      (green ~half)
+        let px = first_pixel(&frame);
+        assert!(px[3] >= 254, "result is opaque, got alpha {}", px[3]);
+        assert!(px[0] > 100 && px[0] < 160, "red ~half, got {}", px[0]);
+        assert!(px[1] > 100 && px[1] < 160, "green ~half, got {}", px[1]);
+        assert_eq!(px[2], 0, "no blue contributes");
+    }
+
+    // A `#[component(timeline)]` with `#[clock]` that bakes `clock.local()`
+    // (seconds, quantized to an integer) into the red channel — proving the
+    // rebased local clock reaches the visual through `frame`.
+    #[crate::component(timeline)]
+    fn LocalProbe(#[clock] clock: Clock) -> impl TimelineComponent {
+        let secs = clock.local().seconds().round().clamp(0.0, 255.0) as u8;
+        SolidColor { rgba: [secs, 0, 0, 255] }
+    }
+
+    // (b) Clock rebasing: a visual placed `.at(2.0..)` sees `local ≈ 0` at
+    // global t = 2.0. The probe bakes its local seconds into red.
+    #[test]
+    fn placed_at_rebases_local_clock_to_zero_at_its_start() {
+        let probe = LocalProbe::builder().build().at(2.0..5.0);
+        let resolved = resolve_root(probe).expect("windowed, not timeless");
+
+        let mut ctx = crate::render_context::PassThrough;
+        // At global 2.0, the placed child's local is 0 → red channel 0.
+        let f0 = resolved
+            .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+            .expect("contributes");
+        assert_eq!(first_pixel(&f0)[0], 0, "local ≈ 0 at its start");
+
+        // `.at(2.0..5.0)` over a timeless child has speed 1.0, so at global 5.0
+        // the child's local is ≈ 3.0 → red channel 3.
+        let f3 = resolved
+            .frame(TimelineTime::new(5.0), Resolution::new(2, 2), &mut ctx)
+            .expect("contributes");
+        assert_eq!(first_pixel(&f3)[0], 3, "local advances 1:1 with global");
+    }
+
+    // (b') Clock rebasing through a Sequence: a probe after a 2s clip sees
+    // `local ≈ 0` at global t = 2.0.
+    #[test]
+    fn sequence_rebases_second_child_local_clock() {
+        let seq = Sequence::builder()
+            // First slot: a 2s window (the probe is timeless, the window sizes it).
+            .child(SolidColor { rgba: [0, 0, 0, 0] }.at(0.0..2.0))
+            // Second slot: the probe, which starts at the cursor (2.0).
+            .child(LocalProbe::builder().build().at(0.0..3.0))
+            .build();
+        let resolved = resolve_root(seq).expect("windowed, not timeless");
+
+        let mut ctx = crate::render_context::PassThrough;
+        // At global 2.0 the second child's local is ≈ 0 → red 0.
+        let f = resolved
+            .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+            .expect("contributes");
+        assert_eq!(first_pixel(&f)[0], 0, "second child's local ≈ 0 at the cursor");
+
+        // At global 4.0 the second child's local is ≈ 2.0 → red 2.
+        let f2 = resolved
+            .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
+            .expect("contributes");
+        assert_eq!(first_pixel(&f2)[0], 2, "local tracks the cursor offset");
+    }
+
+    /// A test leaf with a DIRECT `impl TimelineComponent` (not via the blanket)
+    /// so its `frame` receives the clock. It records every local time it is
+    /// sampled at into a shared log and emits a 1×1 opaque frame so the walk
+    /// treats it as a contributing visual.
+    #[derive(Clone)]
+    struct RecordingLeaf {
+        // Excluded from eq/hash (interior, per-frame state — like `#[clock]`).
+        log: Arc<Mutex<Vec<f32>>>,
+        // An intrinsic length so it is a TIMED leaf (a window over it stretches).
+        duration: f32,
+    }
+
+    impl PartialEq for RecordingLeaf {
+        fn eq(&self, other: &Self) -> bool {
+            self.duration == other.duration
+        }
+    }
+    impl std::hash::Hash for RecordingLeaf {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.duration.to_bits().hash(state);
+        }
+    }
+
+    impl TimelineComponent for RecordingLeaf {
+        fn duration(&self) -> Option<f32> {
+            Some(self.duration)
+        }
+
+        fn frame(
+            &self,
+            clock: Clock<'_>,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> Option<RasterImage> {
+            self.log.lock().unwrap().push(clock.local().seconds());
+            Some(RasterImage::cpu(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                vec![255u8; (target.width as usize) * (target.height as usize) * 4],
+            ))
+        }
+
+        fn arrangement(&self) -> Arrangement {
+            Arrangement {
+                kind: NodeKind::Video,
+                label: String::new(),
+                start: 0.0,
+                end: self.duration,
+                trim: None,
+                triggers: Vec::new(),
+                children: Vec::new(),
+            }
+        }
+    }
+
+    // (c) `.at(window)` speed: a 2s source placed in a 1s window plays at 2×,
+    // so at parent-local `t` the source is sampled at ≈ `2 * t`.
+    #[test]
+    fn placement_window_stretch_reaches_the_leaf() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let leaf = RecordingLeaf {
+            log: Arc::clone(&log),
+            duration: 2.0,
+        };
+        // 2s source into a 1s window → speed = 2.0.
+        let placed = leaf.at(0.0..1.0);
+        assert_eq!(placed.speed(), 2.0);
+        let resolved = resolve_root(placed).expect("windowed, not timeless");
+
+        let mut ctx = crate::render_context::PassThrough;
+        // At global 0.5 the leaf should be sampled at source-local ≈ 1.0.
+        resolved.frame(TimelineTime::new(0.5), Resolution::new(1, 1), &mut ctx);
+        let recorded = *log.lock().unwrap().last().expect("leaf was sampled");
+        assert!(
+            (recorded - 1.0).abs() < 1e-5,
+            "2× stretch: parent-local 0.5 → source-local {recorded} (want 1.0)",
+        );
+
+        // And at global 0.25 → source-local ≈ 0.5.
+        resolved.frame(TimelineTime::new(0.25), Resolution::new(1, 1), &mut ctx);
+        let recorded = *log.lock().unwrap().last().expect("leaf was sampled");
+        assert!((recorded - 0.5).abs() < 1e-5, "source-local {recorded} (want 0.5)");
+    }
+
+    // The timeless-visual path: a bare `RasterComponent` reached through the
+    // blanket renders via `ctx.render` (no clock dependence), and a
+    // `#[component(timeline)]` body that builds a timeless visual returns that
+    // visual's frame.
+    #[test]
+    fn timeless_visual_frame_routes_through_ctx_render() {
+        let table = TriggerTable::new();
+        let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+        let mut ctx = crate::render_context::PassThrough;
+
+        // Bare RasterComponent via the blanket.
+        let solid = SolidColor { rgba: [10, 20, 30, 255] };
+        let f = solid.frame(clock, Resolution::new(2, 2), &mut ctx).expect("renders");
+        assert_eq!(first_pixel(&f), [10, 20, 30, 255]);
+
+        // A timeline component whose body builds a timeless visual.
+        let probe = LocalProbe::builder().build();
+        let f = probe.frame(clock, Resolution::new(2, 2), &mut ctx).expect("renders");
+        assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
     }
 }
 

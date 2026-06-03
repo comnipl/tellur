@@ -407,8 +407,15 @@ impl TimelineComponent for Placed {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // TODO(task 4): rebase the clock by the resolved start and apply speed.
-        self.child.frame(clock, target, ctx)
+        // Rebase + stretch (`.sketch/02 §8`, `.sketch/01 §A.3`): shift the
+        // child's local axis to its relative start, then time-scale by the
+        // window's implied `speed()`. A `.at(0.0..1.0)` over a 2s source has
+        // `speed = 2.0`, so source-local advances twice as fast — at parent
+        // local `0.5` the child sees `1.0`. `global` / `triggers` are unchanged
+        // (the trigger axis is global, never remapped).
+        let rebased = (clock.local().seconds() - self.placement.start) * self.speed();
+        let child_clock = clock.with_local(LocalTime::new(rebased));
+        self.child.frame(child_clock, target, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -786,6 +793,20 @@ impl<'a> Clock<'a> {
         self.local
     }
 
+    /// Hands a child a clock with the same `global` axis and trigger table but
+    /// a new `local` axis (`.sketch/02 §8`). This is the rebase primitive a
+    /// container uses while compositing: it shifts the child's local clock to
+    /// the child's relative offset (`local = parent_local - child_offset`)
+    /// without touching the global / trigger axes, which are never remapped.
+    /// It keeps the borrowed `&TriggerTable` private to this module.
+    pub fn with_local(&self, local: LocalTime) -> Clock<'a> {
+        Clock {
+            global: self.global,
+            local,
+            triggers: self.triggers,
+        }
+    }
+
     /// Absolute frame time — the SAME axis as [`Event`] triggers.
     pub fn global(&self) -> TimelineTime {
         self.global
@@ -998,6 +1019,37 @@ impl ResolvedTimeline {
     /// §9`).
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    /// Samples the visual channel at global time `t` (`.sketch/02 §8`).
+    ///
+    /// Builds the ROOT clock — `global = t`, `local = t` (the root's resolved
+    /// start is `0.0`, so its local axis coincides with the global one) — over
+    /// the resolved [`triggers`](Self::triggers), then drives `&self` recursion
+    /// through [`source`](Self::source). `None` ⇒ the timeline contributes
+    /// nothing at `t` (a fully transparent / empty frame).
+    pub fn frame(
+        &self,
+        t: TimelineTime,
+        target: Resolution,
+        ctx: &mut dyn RenderContext,
+    ) -> Option<RasterImage> {
+        let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
+        self.source().frame(clock, target, ctx)
+    }
+
+    /// Samples the audio channel for `[t, t + window)`.
+    ///
+    /// STUB until step 7: audio mixing is not implemented here, so this builds
+    /// the root clock the same way [`frame`](Self::frame) does and forwards to
+    /// the source's (still-stubbed) `samples`, which returns `None`.
+    pub fn samples(
+        &self,
+        t: TimelineTime,
+        window: f32,
+    ) -> Option<AudioBuffer> {
+        let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
+        self.source().samples(clock, window)
     }
 }
 
