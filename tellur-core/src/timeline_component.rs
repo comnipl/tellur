@@ -124,9 +124,27 @@ pub trait TimelineComponent: DynEq + DynHash {
 
     /// Audio channel for `[clock, clock + window)`. `None` ⇒ silent.
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // TODO(task 7): audio leaves produce real sample windows.
+        // The eager mix-down (step 8) uses [`mix_into`](Self::mix_into) instead
+        // of this per-window pull; this stays the (unused) per-window seam.
         let _ = (clock, window);
         None
+    }
+
+    /// Eager mix-down hook (step 8, B4 v1 — `.sketch/01` ZONE C / `.sketch/02
+    /// §15`). Contributes this node's audio into `mix` (a fixed rate / channel
+    /// layout buffer for `[0, duration]`), placing it at the absolute
+    /// `start_secs` and accounting for the accumulated placement `speed`.
+    ///
+    /// CONTRACT: mirrors [`resolve`](Self::resolve) / [`frame`](Self::frame)
+    /// placement — a container recurses over its own children, advancing
+    /// `start_secs` exactly as it advances absolute starts (a [`Sequence`]
+    /// cursor sums prior lengths; a [`Timeline`] overlays at the same base), and
+    /// a [`Placed`] shifts by its relative start and folds its window
+    /// `speed()` in. A leaf decodes / conforms / sums via
+    /// [`AudioMix::add`](crate::audio::AudioMix::add). The default is the
+    /// timeless / silent behaviour: contribute nothing.
+    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
+        let _ = (mix, start_secs, speed);
     }
 
     /// Subtitle channel: cues made absolute by adding `offset` (this
@@ -419,8 +437,16 @@ impl TimelineComponent for Placed {
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // TODO(task 7): rebase + resample for the placement speed.
+        // The mix-down uses `mix_into`; this per-window seam just forwards.
         self.child.samples(clock, window)
+    }
+
+    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
+        // Shift the child to its relative start and fold the window stretch into
+        // the speed — exactly the rebase + time-scale `frame` applies, but on
+        // the sample axis (`.sketch/02 §8`). A fill child has relative start 0.
+        self.child
+            .mix_into(mix, start_secs + self.placement.start, speed * self.speed());
     }
 
     fn cues(&self, offset: f32) -> Vec<Cue> {
@@ -671,6 +697,12 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
         self.child.samples(clock, window)
+    }
+
+    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
+        // A trigger wrapper is transparent to the mix-down: contribute the
+        // child unchanged at the same offset / speed.
+        self.child.mix_into(mix, start_secs, speed);
     }
 
     fn cues(&self, offset: f32) -> Vec<Cue> {
@@ -1063,9 +1095,9 @@ impl ResolvedTimeline {
 
     /// Samples the audio channel for `[t, t + window)`.
     ///
-    /// STUB until step 7: audio mixing is not implemented here, so this builds
-    /// the root clock the same way [`frame`](Self::frame) does and forwards to
-    /// the source's (still-stubbed) `samples`, which returns `None`.
+    /// The eager mix-down ([`render_audio`](Self::render_audio)) is the path the
+    /// encoder uses; this per-window pull is the (unused) `samples(Clock,
+    /// window)` seam, which forwards to the source's still-`None` `samples`.
     pub fn samples(
         &self,
         t: TimelineTime,
@@ -1073,6 +1105,23 @@ impl ResolvedTimeline {
     ) -> Option<AudioBuffer> {
         let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
         self.source().samples(clock, window)
+    }
+
+    /// EAGER MIX-DOWN of the whole audio track (step 8, B4 v1 — `.sketch/01`
+    /// ZONE C / `.sketch/02 §15`).
+    ///
+    /// Allocates one interleaved f32 buffer of the resolved
+    /// [`duration`](Self::duration) at the encoder's fixed `rate` / `channels`,
+    /// then walks the source tree via [`mix_into`](TimelineComponent::mix_into):
+    /// each [`AudioFile`](crate::timeline_container::AudioFile) decodes (honoring
+    /// its `.trim`), resamples / re-channels / gain-scales into the fixed layout
+    /// at the placement speed, and SUMS into the mix at its resolved start
+    /// (clamping on overflow). The encoder feeds the result to ffmpeg as a temp
+    /// WAV second input.
+    pub fn render_audio(&self, rate: u32, channels: u16) -> AudioBuffer {
+        let mut mix = crate::audio::AudioMix::new(self.duration, rate, channels);
+        self.source().mix_into(&mut mix, 0.0, 1.0);
+        mix.into_buffer()
     }
 }
 

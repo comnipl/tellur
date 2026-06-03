@@ -20,6 +20,7 @@
 //! [`probe`](VideoFile::probe) seam (a caller-injectable `duration`), and
 //! `frame` / `samples` stay `None` placeholders.
 
+use crate::audio::{self, AudioMix};
 use crate::composite::composite_frame_over;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
@@ -200,9 +201,19 @@ impl TimelineComponent for Timeline {
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // TODO(task 7): mix children. Placeholder: no audio yet.
+        // The eager mix-down uses `mix_into`; this per-window seam is unused.
         let _ = (clock, window);
         None
+    }
+
+    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
+        // Overlay: every child shares the container's base start, so each is
+        // mixed at the SAME `start_secs` (a `.at(start..)` child is a `Placed`
+        // that adds its own relative start; a `.fill()` child spans from 0).
+        // Summing all children into one mix IS the audio overlay.
+        for child in &self.children {
+            child.mix_into(mix, start_secs, speed);
+        }
     }
 
     fn arrangement(&self) -> Arrangement {
@@ -358,9 +369,28 @@ impl TimelineComponent for Sequence {
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // TODO(task 7): concat children audio along the cursor.
+        // The eager mix-down uses `mix_into`; this per-window seam is unused.
         let _ = (clock, window);
         None
+    }
+
+    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
+        // Re-flow the cursor exactly as `resolve` / `frame` / `cues` do: child N
+        // is mixed at `start_secs + Σ prior lengths (+ gaps)`. A `.fill()` child
+        // is a resolve error (skipped here defensively, matching `frame`).
+        let mut cursor = 0.0_f32;
+        let mut placed_any = false;
+        for child in &self.children {
+            if Self::is_fill(child.as_ref()) {
+                continue;
+            }
+            if placed_any {
+                cursor += self.spacing;
+            }
+            child.mix_into(mix, start_secs + cursor, speed);
+            cursor += child.measure().unwrap_or(0.0);
+            placed_any = true;
+        }
     }
 
     fn arrangement(&self) -> Arrangement {
@@ -453,10 +483,11 @@ impl TimelineComponent for VideoFile {
 /// Decoded audio — the audio channel. Built with
 /// `AudioFile::builder().path("v.wav").gain(0.25)`.
 ///
-/// Its intrinsic length is the file's, read once by the resolve pass. DECODE IS
-/// STUBBED here (step 8): [`probe`](Self::probe) returns the injected
-/// `duration` if set, else [`STUB_PROBE_SECONDS`]. `samples` is a `None`
-/// placeholder until `symphonia` decode lands.
+/// Its intrinsic length is the file's, read once by the resolve pass via a
+/// `symphonia` decode ([`probe`](Self::probe)). An injected `duration` (or, if
+/// decode fails, [`STUB_PROBE_SECONDS`]) is the fallback so tests that name a
+/// non-existent path still resolve. A `.trim(a..b)` crops the SOURCE seconds,
+/// shortening the reported duration to `b - a`.
 #[crate::component(timeline)]
 // `Clone`: see `VideoFile` — a media leaf may be a `#[component(timeline)]`
 // field (the `.sketch/01` `Dialogue(voice: AudioFile)`), which the macro clones.
@@ -467,20 +498,50 @@ pub struct AudioFile {
     /// Linear gain applied to the decoded samples (`1.0` = unity).
     #[builder(default = 1.0)]
     pub gain: f32,
-    /// TODO(task 8): real probe reads the file header. Test-injectable; `None`
-    /// falls back to the stub.
+    /// Optional override for the probed duration. Test-injectable; `None` reads
+    /// the real decoded length (with the stub as a last-resort fallback).
     #[builder(into)]
     pub duration: Option<f32>,
+    /// SOURCE-clock crop `(start, end)` set by [`Self::trim`]; `None` plays the
+    /// whole file. The reported [`duration`](TimelineComponent::duration) is
+    /// `end - start` when set.
+    #[builder(skip)]
+    pub trim: Option<(f32, f32)>,
 }
 
 impl AudioFile {
-    /// Stubbed duration probe (`.sketch/02 §12`).
-    ///
-    /// TODO(task 8): replace with a `symphonia` header read that can fail with
-    /// [`ResolveError::Probe`](crate::timeline_component::ResolveError::Probe).
-    /// For now it never fails.
+    /// Crops to SOURCE seconds `a..b` (the in/out crop). Shortens
+    /// [`duration`](TimelineComponent::duration) to `b - a`. An inherent method
+    /// so it shadows the generic [`Timed::trim`](crate::timeline_component::Timed::trim)
+    /// no-op for the concrete leaf (`.trim` actually records the crop here).
+    pub fn trim(mut self, r: std::ops::Range<f32>) -> Self {
+        self.trim = Some((r.start, r.end));
+        self
+    }
+
+    /// Duration probe (`.sketch/02 §12`). An injected `duration` wins; otherwise
+    /// the SOURCE length read by decoding the file via `symphonia`, cropped by a
+    /// `.trim`. If decode fails (e.g. a placeholder test path), falls back to
+    /// the trim length or [`STUB_PROBE_SECONDS`] so resolve still has a
+    /// determinate length.
     fn probe(&self) -> f32 {
-        self.duration.unwrap_or(STUB_PROBE_SECONDS)
+        if let Some(d) = self.duration {
+            return d;
+        }
+        // A trim fixes the length regardless of the source, as long as the
+        // source is at least that long — but we still need the source length to
+        // clamp. Decode to read the true length; fall back gracefully.
+        match audio::decode_file(&self.path, self.trim) {
+            Ok(buf) => {
+                let ch = buf.channels.max(1) as usize;
+                let frames = buf.samples.len() / ch;
+                frames as f32 / buf.rate.max(1) as f32
+            }
+            Err(_) => self
+                .trim
+                .map(|(a, b)| (b - a).max(0.0))
+                .unwrap_or(STUB_PROBE_SECONDS),
+        }
     }
 }
 
@@ -490,9 +551,20 @@ impl TimelineComponent for AudioFile {
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // TODO(task 8): decode `[clock, clock + window)` and apply `gain`.
+        // The eager mix-down uses `mix_into`; this per-window seam is unused.
         let _ = (clock, window);
         None
+    }
+
+    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
+        // Decode the whole (trimmed) source, conform it to the mix's fixed
+        // rate / channel layout (applying gain + the placement speed), and sum
+        // it in at the resolved start. Decode failure ⇒ contribute silence.
+        if let Ok(buf) = audio::decode_file(&self.path, self.trim) {
+            let conformed =
+                audio::conform(buf, mix.rate(), mix.channels(), self.gain, speed);
+            mix.add(&conformed, start_secs);
+        }
     }
 
     fn arrangement(&self) -> Arrangement {
@@ -501,7 +573,7 @@ impl TimelineComponent for AudioFile {
             label: self.path.clone(),
             start: 0.0,
             end: self.probe(),
-            trim: None,
+            trim: self.trim,
             triggers: Vec::new(),
             children: Vec::new(),
         }
@@ -980,6 +1052,190 @@ mod tests {
         let probe = LocalProbe::builder().build();
         let f = probe.frame(clock, Resolution::new(2, 2), &mut ctx).expect("renders");
         assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
+    }
+
+    // ── Audio decode + eager mix-down (step 8) ───────────────────────────────
+    //
+    // These exercise the REAL `symphonia` decode path by synthesizing a tiny
+    // mono s16le WAV fixture to a temp file, then driving `render_audio` over
+    // timelines built from `AudioFile`s. The output layout is fixed (mono here
+    // for easy assertions; the encoder uses stereo @ 48 kHz).
+
+    use crate::timeline_component::resolve as resolve_audio;
+
+    /// Output rate the audio tests mix into (matches the encoder boundary).
+    const TEST_RATE: u32 = 48_000;
+
+    /// Writes a canonical 44-byte-header mono s16le WAV of `samples` at `rate`
+    /// to a unique temp path and returns it. The caller removes it when done.
+    fn write_wav_fixture(name: &str, rate: u32, samples: &[i16]) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        // Disambiguate per-test + per-process so parallel tests don't collide.
+        path.push(format!("tellur_audio_{}_{}.wav", name, std::process::id()));
+
+        let channels: u16 = 1;
+        let bits: u16 = 16;
+        let byte_rate = rate * channels as u32 * (bits as u32 / 8);
+        let block_align = channels * (bits / 8);
+        let data_bytes = (samples.len() * 2) as u32;
+
+        let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        for s in samples {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).expect("write wav fixture");
+        path
+    }
+
+    /// A constant-amplitude mono fixture: `frames` samples all at `level`.
+    fn const_wav(name: &str, rate: u32, frames: usize, level: i16) -> std::path::PathBuf {
+        write_wav_fixture(name, rate, &vec![level; frames])
+    }
+
+    // Decode reads the real source length: a 1.0s fixture probes to ~1.0s.
+    #[test]
+    fn audiofile_probes_real_decoded_duration() {
+        let path = const_wav("probe", TEST_RATE, TEST_RATE as usize, 10_000);
+        let af = AudioFile::builder().path(path.to_str().unwrap()).build();
+        let d = af.duration().expect("audio has a duration");
+        assert!((d - 1.0).abs() < 1e-3, "decoded ~1.0s, got {d}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // `.trim(a..b)` crops the SOURCE seconds and shortens the duration to b - a.
+    #[test]
+    fn audiofile_trim_crops_source_seconds() {
+        // 2s of audio; trim to the middle 0.5s.
+        let path = const_wav("trim", TEST_RATE, (TEST_RATE * 2) as usize, 8_000);
+        let af = AudioFile::builder()
+            .path(path.to_str().unwrap())
+            .build()
+            .trim(0.5..1.0);
+        let d = af.duration().expect("trimmed duration");
+        assert!((d - 0.5).abs() < 1e-3, "trim to 0.5s, got {d}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // (mix) Two AudioFiles overlapping in a Timeline SUM where they overlap.
+    #[test]
+    fn timeline_overlapping_audio_sums() {
+        // Two 0.5s half-amplitude (+0.5) mono tones, both placed at start 0.0 in
+        // a Timeline ⇒ they overlap fully and the mix is +1.0 in that region.
+        let half = (0.5 * i16::MAX as f32) as i16;
+        let frames = (TEST_RATE / 2) as usize; // 0.5s
+        let a = const_wav("mix_a", TEST_RATE, frames, half);
+        let b = const_wav("mix_b", TEST_RATE, frames, half);
+
+        let tl = Timeline::builder()
+            .child(AudioFile::builder().path(a.to_str().unwrap()))
+            .child(AudioFile::builder().path(b.to_str().unwrap()))
+            .build();
+        let resolved = resolve_audio(tl).expect("media-backed");
+        let mixed = resolved.render_audio(TEST_RATE, 1);
+
+        // In the overlap, each source is ~+0.5, summed to ~+1.0.
+        let mid = mixed.samples[frames / 2];
+        assert!((mid - 1.0).abs() < 0.02, "two +0.5 tones sum to ~1.0, got {mid}");
+        assert_eq!(mixed.rate, TEST_RATE);
+        assert_eq!(mixed.channels, 1);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    // (mix) A Sequence CONCATENATES audio along the cursor: child 2 starts at
+    // child 1's end, so the two regions are disjoint.
+    #[test]
+    fn sequence_concatenates_audio() {
+        let frames = (TEST_RATE / 2) as usize; // 0.5s each
+        let lo = (0.3 * i16::MAX as f32) as i16;
+        let hi = (0.6 * i16::MAX as f32) as i16;
+        let a = const_wav("seq_a", TEST_RATE, frames, lo);
+        let b = const_wav("seq_b", TEST_RATE, frames, hi);
+
+        let seq = Sequence::builder()
+            .child(AudioFile::builder().path(a.to_str().unwrap()))
+            .child(AudioFile::builder().path(b.to_str().unwrap()))
+            .build();
+        let resolved = resolve_audio(seq).expect("media-backed");
+        let mixed = resolved.render_audio(TEST_RATE, 1);
+
+        // First half ≈ 0.3 (child 1), second half ≈ 0.6 (child 2 at the cursor).
+        let first = mixed.samples[frames / 2];
+        let second = mixed.samples[frames + frames / 2];
+        assert!((first - 0.3).abs() < 0.02, "child 1 region ~0.3, got {first}");
+        assert!((second - 0.6).abs() < 0.02, "child 2 region ~0.6, got {second}");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    // (mix) `gain` scales the decoded samples linearly.
+    #[test]
+    fn gain_scales_audio() {
+        let frames = (TEST_RATE / 2) as usize;
+        let level = (0.8 * i16::MAX as f32) as i16;
+        let path = const_wav("gain", TEST_RATE, frames, level);
+
+        let tl = Timeline::builder()
+            .child(AudioFile::builder().path(path.to_str().unwrap()).gain(0.5))
+            .build();
+        let resolved = resolve_audio(tl).expect("media-backed");
+        let mixed = resolved.render_audio(TEST_RATE, 1);
+
+        // 0.8 source at gain 0.5 ⇒ ~0.4.
+        let mid = mixed.samples[frames / 2];
+        assert!((mid - 0.4).abs() < 0.02, "gain 0.5 over 0.8 ⇒ ~0.4, got {mid}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // (mix) `.at(window)` speed changes the SAMPLE COUNT: a 1.0s source placed
+    // into a 0.5s window plays at 2× (half as many output frames for that clip).
+    #[test]
+    fn placement_speed_changes_sample_count() {
+        let src_frames = TEST_RATE as usize; // 1.0s source
+        let level = (0.5 * i16::MAX as f32) as i16;
+        let path = const_wav("speed", TEST_RATE, src_frames, level);
+
+        // Native (1.0s): the mix is ~1.0s long.
+        let native = AudioFile::builder().path(path.to_str().unwrap());
+        let r_native = resolve_audio(Timeline::builder().child(native).build())
+            .expect("media-backed");
+        let mix_native = r_native.render_audio(TEST_RATE, 1);
+
+        // Stretched into a 0.5s window ⇒ speed 2.0 ⇒ the resolved length is 0.5s,
+        // so the mixed buffer holds about half the frames of the native one.
+        let stretched = AudioFile::builder()
+            .path(path.to_str().unwrap())
+            .build()
+            .at(0.0..0.5);
+        let r_stretched = resolve_audio(stretched).expect("windowed, not timeless");
+        let mix_stretched = r_stretched.render_audio(TEST_RATE, 1);
+
+        assert!(
+            mix_native.samples.len() > mix_stretched.samples.len() * 3 / 2,
+            "2x speed ⇒ ~half the frames: native {} vs stretched {}",
+            mix_native.samples.len(),
+            mix_stretched.samples.len(),
+        );
+        // And the stretched buffer is ~0.5s.
+        let stretched_secs = mix_stretched.samples.len() as f32 / TEST_RATE as f32;
+        assert!(
+            (stretched_secs - 0.5).abs() < 0.02,
+            "stretched buffer ~0.5s, got {stretched_secs}",
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
 

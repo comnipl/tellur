@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod builder;
 pub mod color;
 pub mod composite;
