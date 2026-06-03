@@ -16,6 +16,7 @@ pub mod text;
 pub mod time;
 pub mod timeline;
 pub mod timeline_component;
+pub mod timeline_container;
 pub mod vector;
 
 // Re-export the component macros so users only need to depend on `tellur-core`.

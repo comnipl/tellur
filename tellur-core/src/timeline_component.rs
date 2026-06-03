@@ -24,6 +24,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
+use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::Constraints;
 use crate::phase::Phase;
 use crate::raster::{RasterComponent, RasterImage, Resolution};
@@ -42,7 +43,18 @@ use crate::time::{LocalTime, Time, TimelineTime};
 ///
 /// The trait must be usable as `Box<dyn TimelineComponent + Send>` (audit M2),
 /// so it is object-safe and every implementor is expected to be `Send`.
-pub trait TimelineComponent {
+///
+/// The [`DynEq`] / [`DynHash`] super-traits mirror
+/// [`RasterComponent`](crate::raster::RasterComponent): they give
+/// `dyn TimelineComponent` an object-safe `PartialEq` / `Hash` (see the manual
+/// impls below `Box<dyn TimelineComponent + Send>`), so a container that holds
+/// `Vec<Box<dyn TimelineComponent + Send>>` (e.g. [`Timeline`] / [`Sequence`])
+/// can satisfy the `TimelineBuilder::Output: PartialEq + Hash` marker bound the
+/// same way the raster [`Stack`](crate::layout::raster::Stack) does — by
+/// deriving over a comparable child vec. Timeline nodes are never memoized
+/// through `ctx.render` (`.sketch/02 §11`), so this identity is purely the
+/// builder-marker key, not a per-frame cache key.
+pub trait TimelineComponent: DynEq + DynHash {
     /// Intrinsic length in seconds, or `None` for a *timeless* component (a
     /// visual / 字幕) whose length is given by the window it is placed into.
     ///
@@ -136,6 +148,26 @@ pub trait TimelineComponent {
 // spellable with `+ Send` (audit M2).
 const _: Option<&(dyn TimelineComponent + Send)> = None;
 
+// `dyn TimelineComponent + Send` gets object-safe `PartialEq` / `Hash` through
+// the `DynEq` / `DynHash` super-traits, exactly as `dyn RasterComponent` does
+// (`raster.rs`). This is what makes `Box<dyn TimelineComponent + Send>` and a
+// container's `Vec<Box<dyn TimelineComponent + Send>>` comparable, so the
+// containers can derive the `PartialEq + Hash` the `TimelineBuilder` marker
+// requires.
+impl PartialEq for dyn TimelineComponent + Send {
+    fn eq(&self, other: &Self) -> bool {
+        DynEq::dyn_eq(self, other.as_any())
+    }
+}
+
+impl Eq for dyn TimelineComponent + Send {}
+
+impl Hash for dyn TimelineComponent + Send {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        DynHash::dyn_hash(self, state);
+    }
+}
+
 /// Any [`RasterComponent`] IS a timeless visual [`TimelineComponent`] — ONE
 /// direction only. This is what lets a styled `Text` (a "Caption") be placed in
 /// time with `.at(0.0..dur)`; its [`duration`](TimelineComponent::duration) is
@@ -220,13 +252,19 @@ pub trait TimelineBuilder: Sized {
 /// `speed = content_duration / (b - a)` (decided semantics, `.sketch/01` A.3).
 /// There is no separate `.speed()` — to merely truncate, [`Timed::trim`] the
 /// source.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, crate::Keyable)]
 pub struct Placement {
     /// Relative start on the parent clock.
     start: f32,
     /// Explicit window end (exclusive); `None` for a bare start point, whose
     /// end is the inner component's own duration.
     end: Option<f32>,
+    /// Whether this placement is a [`fill`](Timed::fill): it takes the
+    /// CONTAINER's resolved length (set by the overlay `Timeline` in its
+    /// second sub-pass) and is EXCLUDED from the container's length measure
+    /// (the load-bearing acyclicity invariant, `.sketch/02 §5/§9`). A fill
+    /// child inside a `Sequence` is a resolve error (ZONE C #1).
+    fill: bool,
 }
 
 impl Placement {
@@ -239,11 +277,32 @@ impl Placement {
     pub fn end(&self) -> Option<f32> {
         self.end
     }
+
+    /// Whether this is a [`fill`](Timed::fill) placement (stretches to the
+    /// container's resolved length).
+    pub fn is_fill(&self) -> bool {
+        self.fill
+    }
+
+    /// A fill placement — takes the container's resolved length. Constructed by
+    /// [`Timed::fill`]; not reachable through the `From` conversions (a window /
+    /// point is never implicitly a fill).
+    fn fill() -> Self {
+        Self {
+            start: 0.0,
+            end: None,
+            fill: true,
+        }
+    }
 }
 
 impl From<f32> for Placement {
     fn from(start: f32) -> Self {
-        Self { start, end: None }
+        Self {
+            start,
+            end: None,
+            fill: false,
+        }
     }
 }
 
@@ -252,6 +311,7 @@ impl From<Range<f32>> for Placement {
         Self {
             start: window.start,
             end: Some(window.end),
+            fill: false,
         }
     }
 }
@@ -262,6 +322,7 @@ impl From<Range<f32>> for Placement {
 ///
 /// Per the DECIDED stretch semantics (`.sketch/01` A.3): `.at(a..b)` footprint
 /// is the window; the implied speed factor is recorded for later sampling.
+#[derive(crate::Keyable)]
 pub struct Placed {
     /// Where on the parent clock this sits.
     placement: Placement,
@@ -278,6 +339,19 @@ impl Placed {
     /// Where this sits on the parent clock.
     pub fn placement(&self) -> Placement {
         self.placement
+    }
+
+    /// Whether this is a [`fill`](Timed::fill) placement. Containers read this
+    /// to exclude fill children from their length measure and resolve them
+    /// against the container's resolved length (`.sketch/02 §5/§6`).
+    pub fn is_fill(&self) -> bool {
+        self.placement.fill
+    }
+
+    /// The placed child, borrowed. Lets a container drive the child's own
+    /// `resolve` against the container's resolved length for a fill child.
+    pub fn child(&self) -> &(dyn TimelineComponent + Send) {
+        &*self.child
     }
 
     /// Speed factor implied by a stretch window over a timed child, i.e.
@@ -343,12 +417,36 @@ impl TimelineComponent for Placed {
     }
 
     fn cues(&self, offset: f32) -> Vec<Cue> {
-        self.child.cues(offset + self.placement.start)
+        let child_offset = offset + self.placement.start;
+        let mut cues = self.child.cues(child_offset);
+        // A TIMELESS child (e.g. a `Subtitle`) has no intrinsic length, so its
+        // cues come out as zero-length points; the placement WINDOW is what
+        // gives the cue its interval (`.sketch/02 §10`). Stamp the window end
+        // onto those cues. A timed child already carries its own ends, and a
+        // fill child's length is supplied by the container's own `cues` walk.
+        if self.child.duration().is_none() {
+            if let Some(end) = self.placement.end {
+                let abs_end = offset + end;
+                for cue in &mut cues {
+                    cue.end = abs_end;
+                }
+            }
+        }
+        cues
     }
 
     fn arrangement(&self) -> Arrangement {
         // TODO(task 6): stamp the resolved start/end onto the child's node.
         self.child.arrangement()
+    }
+}
+
+/// A `.at(..)` / `.fill()` result drops straight into a container's
+/// `child(impl Into<Box<dyn TimelineComponent + Send>>)` setter, mirroring
+/// raster `Positioned`'s `From<Positioned> for Box<dyn RasterComponent>`.
+impl From<Placed> for Box<dyn TimelineComponent + Send> {
+    fn from(placed: Placed) -> Self {
+        Box::new(placed)
     }
 }
 
@@ -377,9 +475,10 @@ pub trait Timed: TimelineComponent + Sized + Send + 'static {
     /// compile/resolve error). Fill children are excluded from the container's
     /// length measure (the load-bearing invariant), so this never forms a cycle.
     fn fill(self) -> Placed {
-        // TODO(task 3): mark this placement as fill so the container resolves it
-        // against its own length; for now it is a bare start at 0.0.
-        Placed::new(Placement::from(0.0), Box::new(self))
+        // A fill placement: the overlay `Timeline` resolves it against its own
+        // length in its second sub-pass, and excludes it from the length
+        // measure (`.sketch/02 §5/§6`). A `Sequence` rejects it at resolve time.
+        Placed::new(Placement::fill(), Box::new(self))
     }
 
     /// Use only SOURCE seconds `a..b` (the in/out crop). Shortens
@@ -490,8 +589,28 @@ pub struct Triggered<T> {
     kind: TriggerKind,
 }
 
+// Hand-written so the `T: PartialEq + Hash` bound is attached (the `Keyable`
+// derive copies the declared generics verbatim and would not add it). Backs the
+// `DynEq` / `DynHash` super-traits a `Triggered<T>` needs as a
+// `TimelineComponent`.
+impl<T: PartialEq> PartialEq for Triggered<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.child == other.child && self.event == other.event && self.kind == other.kind
+    }
+}
+
+impl<T: Eq> Eq for Triggered<T> {}
+
+impl<T: Hash> Hash for Triggered<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.child.hash(state);
+        self.event.hash(state);
+        self.kind.hash(state);
+    }
+}
+
 /// Where in the child's interval a [`Triggered`] fires its [`Event`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, crate::Keyable)]
 enum TriggerKind {
     /// At the child's resolved start (`abs_start`).
     Start,
@@ -513,7 +632,7 @@ impl<T> Triggered<T> {
     }
 }
 
-impl<T: TimelineComponent> TimelineComponent for Triggered<T> {
+impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Triggered<T> {
     fn duration(&self) -> Option<f32> {
         self.child.duration()
     }
@@ -553,6 +672,17 @@ impl<T: TimelineComponent> TimelineComponent for Triggered<T> {
 
     fn arrangement(&self) -> Arrangement {
         self.child.arrangement()
+    }
+}
+
+/// A `.trigger_*` result drops straight into a container's child setter, like
+/// [`Placed`] does.
+impl<T> From<Triggered<T>> for Box<dyn TimelineComponent + Send>
+where
+    T: TimelineComponent + PartialEq + Hash + Send + 'static,
+{
+    fn from(triggered: Triggered<T>) -> Self {
+        Box::new(triggered)
     }
 }
 
@@ -725,6 +855,12 @@ pub struct ResolveCtx {
     /// children are `.fill()` — a determinate `0.0` that is almost always an
     /// authoring mistake, so it warns rather than fails.
     warnings: Vec<String>,
+    /// FATAL diagnostics collected during the walk (`.sketch/02 §6`, ZONE C #1).
+    /// A `Sequence` (in `timeline_container`) pushes here when it sees a
+    /// `.fill()` child — illegal in an in-a-row container (a `.fill()` needs a
+    /// container length, which a `Sequence` does not impose). The entry
+    /// [`resolve`] turns any collected error into a [`ResolveError::Invalid`].
+    errors: Vec<String>,
 }
 
 impl ResolveCtx {
@@ -764,16 +900,28 @@ impl ResolveCtx {
         &self.warnings
     }
 
+    /// Records a FATAL resolve diagnostic (`.sketch/02 §6`, ZONE C #1). A
+    /// `Sequence` calls this when it sees a `.fill()` child; the entry
+    /// [`resolve`] fails with a [`ResolveError::Invalid`] if any error landed.
+    pub fn error(&mut self, message: impl Into<String>) {
+        self.errors.push(message.into());
+    }
+
+    /// The fatal diagnostics collected so far.
+    pub fn errors(&self) -> &[String] {
+        &self.errors
+    }
+
     /// Consumes the context, yielding the finished trigger table.
     pub fn into_triggers(self) -> TriggerTable {
         self.triggers
     }
 
-    /// Consumes the context, yielding both the finished trigger table and the
-    /// collected warnings — the form [`resolve`] uses to assemble a
-    /// [`ResolvedTimeline`].
-    pub fn into_parts(self) -> (TriggerTable, Vec<String>) {
-        (self.triggers, self.warnings)
+    /// Consumes the context, yielding the finished trigger table, the collected
+    /// warnings, and the collected fatal errors — the form [`resolve`] uses to
+    /// assemble a [`ResolvedTimeline`] (or to fail on the first error).
+    pub fn into_parts(self) -> (TriggerTable, Vec<String>, Vec<String>) {
+        (self.triggers, self.warnings, self.errors)
     }
 }
 
@@ -787,6 +935,11 @@ pub enum ResolveError {
     /// it to `0.0` would silently emit a zero-frame export, so it is an error.
     #[error("root timeline is timeless: place media or an explicit window to give it a length")]
     Timeless,
+    /// An invalid arrangement caught during the place pass (`.sketch/02 §6`),
+    /// e.g. a `.fill()` child inside a `Sequence` (ZONE C #1). Carries the
+    /// human-readable reason collected via [`ResolveCtx::error`].
+    #[error("invalid timeline arrangement: {0}")]
+    Invalid(String),
 }
 
 // ── Resolve entry + resolved output (`.sketch/02 §3/§7`) ─────────────────────
@@ -891,10 +1044,17 @@ pub fn resolve(
     let duration = source.measure().ok_or(ResolveError::Timeless)?;
 
     // Phase 2 — place: drive the top-down walk so every `Triggered` records its
-    // absolute time into the table (earliest-wins) and containers can warn.
+    // absolute time into the table (earliest-wins) and containers can warn /
+    // error. A `Sequence` with a `.fill()` child records a fatal error here.
     let mut ctx = ResolveCtx::new();
     source.resolve(0.0, &mut ctx);
-    let (triggers, warnings) = ctx.into_parts();
+    let (triggers, warnings, errors) = ctx.into_parts();
+
+    // A collected error (e.g. `.fill()` in a `Sequence`) fails the whole pass;
+    // report the first, mirroring how `measure` fails fast on a timeless root.
+    if let Some(first) = errors.into_iter().next() {
+        return Err(ResolveError::Invalid(first));
+    }
 
     Ok(ResolvedTimeline {
         source,
