@@ -117,14 +117,17 @@ fn Backdrop(#[clock] clock: Clock) -> impl TimelineComponent {
         .rasterize()
 }
 
-// ── FadingCaption: a self-animated caption (SELF / local axis) ───────────────
+// ── FadingCaption: a self-animated caption that eases IN and OUT ─────────────
 //
-// `clock.local()` is 0 at THIS component's own resolved start, so the fade-in
-// survives the `Sequence` cursor with no time arithmetic. The opacity is a
-// declarative expression of the local phase over the first 0.4s of the slot.
+// `clock.local()` is 0 at this component's resolved start; `clock.window()` (the
+// length of the `.at(0.0..secs)` slot it is placed into) is its end. `envelope`
+// ramps opacity 0→1 over the first 0.4s and 1→0 over the last 0.4s, so the telop
+// appears and then DISAPPEARS within its slot instead of staying painted through
+// later segments — the fade-out term is exactly 0 once local ≥ window (`phase`
+// clamps), and the frame path additionally gates the clip off past its window.
 #[tellur_core::component(timeline)]
 fn FadingCaption(#[clock] clock: Clock, #[builder(into)] line: String) -> impl TimelineComponent {
-    let appear = clock.local().phase(0.0, 0.4);
+    let appear = clock.envelope(0.4, 0.4);
     Caption::builder().line(line).opacity(appear.get()).build()
 }
 
