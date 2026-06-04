@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AnimatePresence,
   animate,
   motion,
   useMotionValue,
   useReducedMotion,
+  useSpring,
+  useTransform,
 } from "motion/react";
 import { CornerUpRight, SquareMenu } from "lucide-react";
 import { formatTimelineStart, formatTimecode } from "../formatTime";
@@ -127,11 +128,48 @@ export function TabsRow(props: TabsRowProps) {
   const x = ((seconds - animStart) / animVisibleDuration) * width;
   const playheadVisible = x >= 0 && x <= width;
   const frame = Math.max(0, Math.round(seconds * fps));
-  // Left-edge readout shows the TARGET start (not the per-frame tween value), so
-  // the time/frame text cross-fades to the final value instead of flickering
-  // through every intermediate during the tween.
-  const viewportStartFrame = Math.max(0, Math.round(targetStart * fps));
-  const viewportStartLabel = formatTimelineStart(targetStart, fps);
+
+  // Ruler ticks. The STEP (seconds between ticks) is chosen from the TARGET
+  // projection so the tick COUNT stays stable through the pan/zoom tween (only
+  // their positions glide); deriving it from the animated value would make ticks
+  // pop in/out mid-tween. Each tick's x then reads the ANIMATED projection so the
+  // ruler eases in lock-step with the body + cursor strip.
+  const ticks =
+    width > 0
+      ? buildRulerTicks(
+          animStart,
+          animVisibleDuration,
+          targetVisibleDuration,
+          width,
+          duration,
+        )
+      : [];
+  // Left-edge readout: an odometer-style rolling number. `useSpring` must follow
+  // a MOTION VALUE source to react to changes — passing the bare `targetStart`
+  // number only seeds the initial value, so it would freeze at 0. So we hold
+  // `targetStart` in a motion value and update it in an effect; the spring then
+  // glides toward it on every pan/scroll. It tracks the TARGET (final viewport
+  // start), not the per-frame geometry tween, so the digits settle smoothly
+  // instead of jittering. Two transforms format it as the timecode and frame
+  // count; the motion values are rendered by passing them straight into spans.
+  // Under reduced-motion the spring uses duration 0, so it snaps with no roll.
+  const targetStartMV = useMotionValue(targetStart);
+  useEffect(() => {
+    targetStartMV.set(targetStart);
+  }, [targetStart, targetStartMV]);
+  const rolledStart = useSpring(
+    targetStartMV,
+    reduceMotion
+      ? { duration: 0 }
+      : { stiffness: 220, damping: 30, restDelta: 0.001 },
+  );
+  const viewportStartLabel = useTransform(rolledStart, (v) =>
+    formatTimelineStart(Math.max(0, v), fps),
+  );
+  const viewportStartFrame = useTransform(
+    rolledStart,
+    (v) => `${Math.max(0, Math.round(v * fps))}F`,
+  );
 
   const seekFromClientX = useCallback(
     (clientX: number) => {
@@ -219,36 +257,17 @@ export function TabsRow(props: TabsRowProps) {
               size={18}
               strokeWidth={1.8}
             />
-            {/* The time/frame readout cross-fades when its value changes, so the
-                number swaps smoothly instead of snapping. `mode="popLayout"`
-                lets the outgoing copy fade out atop the incoming one in place;
-                keying on the value drives the swap. Under reduced-motion the
-                durations collapse to 0 (an instant swap). */}
+            {/* Odometer-style readout: the time and frame strings are derived
+                from a spring-driven motion value (rolledStart) and passed
+                straight into motion.spans, so the digits roll continuously to
+                the final value. Tabular numerals keep the width steady as the
+                digits change. The formatted string carries its own colons / "F"
+                suffix, so nothing else needs to be appended here. */}
             <span className="tabsrow__viewport-start-text">
-              <AnimatePresence mode="popLayout" initial={false}>
-                <motion.span
-                  key={viewportStartLabel}
-                  initial={{ opacity: reduceMotion ? 1 : 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: reduceMotion ? 0 : 0.18 }}
-                >
-                  {viewportStartLabel}
-                </motion.span>
-              </AnimatePresence>
-              <span className="tabsrow__viewport-start-frame">
-                <AnimatePresence mode="popLayout" initial={false}>
-                  <motion.span
-                    key={viewportStartFrame}
-                    initial={{ opacity: reduceMotion ? 1 : 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: reduceMotion ? 0 : 0.18 }}
-                  >
-                    {viewportStartFrame}F
-                  </motion.span>
-                </AnimatePresence>
-              </span>
+              <motion.span>{viewportStartLabel}</motion.span>
+              <motion.span className="tabsrow__viewport-start-frame">
+                {viewportStartFrame}
+              </motion.span>
             </span>
           </span>
           {cacheRanges.map((range, i) => {
@@ -270,16 +289,40 @@ export function TabsRow(props: TabsRowProps) {
               />
             );
           })}
+          {/* Ruler: a tick per chosen interval, each labeled with time (main)
+              and frame number (sub), sharing the row with the pinned left-edge
+              readout. Positions read the animated projection so the ruler eases
+              in lock-step. A moving tick whose x falls under the pinned readout
+              is dropped so the two don't visually collide. */}
+          {ticks.map((tick) => {
+            const left =
+              ((tick.time - animStart) / animVisibleDuration) * width;
+            if (left < LEFT_READOUT_RESERVE) return null;
+            return (
+              <div
+                className="tabsrow__tick"
+                key={tick.time}
+                style={{ left: `${left}px` }}
+              >
+                <span className="tabsrow__tick-line" />
+                <span className="tabsrow__tick-label">
+                  <span className="tabsrow__tick-time">
+                    {formatTimelineStart(tick.time, fps)}
+                  </span>
+                  <span className="tabsrow__tick-frame">
+                    {Math.round(tick.time * fps)}F
+                  </span>
+                </span>
+              </div>
+            );
+          })}
           {playheadVisible ? (
             <>
               <span
                 className="tabsrow__playhead-line"
                 style={{ left: `${x}px` }}
               />
-              <span
-                className="tabsrow__chip"
-                style={{ left: `${x}px` }}
-              >
+              <span className="tabsrow__chip" style={{ left: `${x}px` }}>
                 <span>{formatTimecode(seconds, fps)}</span>
                 <span className="tabsrow__chip-sub">{frame}F</span>
               </span>
@@ -289,4 +332,60 @@ export function TabsRow(props: TabsRowProps) {
       </div>
     </div>
   );
+}
+
+// Pick a tick interval from a 1-2-5 series (…0.1, 0.2, 0.5, 1, 2, 5, 10…s) such
+// that adjacent ticks are at least MIN_TICK_PX apart, then emit one tick per
+// interval boundary across the visible window (plus a small margin so ticks
+// entering from the edges aren't missing during a pan). `pxVisibleDuration` is
+// the TARGET visible duration used to size the step (stable through the tween);
+// the caller positions each tick with the ANIMATED projection.
+interface RulerTick {
+  time: number;
+}
+
+const MIN_TICK_PX = 64;
+const TICK_STEPS_PER_DECADE = [1, 2, 5];
+// Horizontal span (px) reserved at the left for the pinned viewport-start
+// readout. Moving ticks landing inside this band are dropped so they don't
+// collide with the fixed leading entry.
+const LEFT_READOUT_RESERVE = 72;
+
+function buildRulerTicks(
+  animStart: number,
+  animVisibleDuration: number,
+  pxVisibleDuration: number,
+  width: number,
+  duration: number,
+): RulerTick[] {
+  if (width <= 0 || pxVisibleDuration <= 0) return [];
+
+  // Minimum interval (seconds) that keeps labels MIN_TICK_PX apart.
+  const minStep = (MIN_TICK_PX / width) * pxVisibleDuration;
+  const step = niceStep(minStep);
+  if (!Number.isFinite(step) || step <= 0) return [];
+
+  // Visible window from the ANIMATED projection, padded by one step so ticks
+  // sliding in at the edges are present mid-tween.
+  const windowStart = animStart - step;
+  const windowEnd = animStart + animVisibleDuration + step;
+  const first = Math.max(0, Math.ceil(windowStart / step) * step);
+  const last = Math.min(duration, windowEnd);
+
+  const ticks: RulerTick[] = [];
+  // Guard against pathological counts (e.g. a degenerate width during layout).
+  for (let t = first, guard = 0; t <= last && guard < 2000; t += step, guard++) {
+    // Snap to the step grid to avoid floating-point drift accumulating.
+    ticks.push({ time: Math.round(t / step) * step });
+  }
+  return ticks;
+}
+
+function niceStep(minStep: number): number {
+  const decade = Math.pow(10, Math.floor(Math.log10(minStep)));
+  for (const mult of TICK_STEPS_PER_DECADE) {
+    const candidate = mult * decade;
+    if (candidate >= minStep) return candidate;
+  }
+  return 10 * decade;
 }

@@ -29,7 +29,7 @@
   --viewer-h: 448px;
   --scrubber-h: 18px;
   --transport-h: 46px;
-  --tabs-h: 56px;
+  --tabs-h: 50px;
   --track-h: 28px;
   --footer-h: 34px;
   --side-w: 220px;
@@ -685,15 +685,23 @@ select option {
   height: 100%;
 }
 
+/* Left-edge readout = the ruler's "pinned tick" at the viewport start. It shares
+   the SAME band and SAME baseline as the moving ticks (bottom-anchored, two-line
+   time-over-frame), so the row reads as one ruler with a fixed leading entry. A
+   higher z-index + an opaque panel backing keep it legible when a moving tick
+   would otherwise slide under it. */
 .tabsrow__viewport-start {
   position: absolute;
-  top: 6px;
+  bottom: 0;
   left: 0;
-  z-index: 1;
+  z-index: 2;
   display: inline-flex;
-  align-items: flex-start;
-  gap: 2px;
-  color: var(--text-muted);
+  align-items: flex-end;
+  gap: 1px;
+  height: 26px;
+  padding-right: 6px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -701,20 +709,21 @@ select option {
 .tabsrow__viewport-start-text {
   display: inline-flex;
   flex-direction: column;
-  font-size: 10px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   letter-spacing: 0;
-  line-height: 1.08;
+  line-height: 1.15;
 }
 
 .tabsrow__viewport-start-frame {
-  margin-top: 2px;
+  color: #8a8a90;
 }
 
 .tabsrow__viewport-start-icon {
   flex: 0 0 auto;
-  margin-top: 10px;
+  align-self: flex-end;
+  margin-bottom: 1px;
   color: #66666c;
   transform: translateX(-3px);
 }
@@ -722,7 +731,8 @@ select option {
 .tabsrow__cache {
   position: absolute;
   right: auto;
-  bottom: 7px;
+  /* Sit just above the ruler band (the bottom ~26px of the shared row). */
+  bottom: 28px;
   height: 2px;
   background: var(--accent-cache);
   border-radius: 2px;
@@ -731,17 +741,19 @@ select option {
 
 .tabsrow__playhead-line {
   position: absolute;
-  top: 40px;
+  /* Span the full shared row so the playhead crosses both the cache line and the
+     ruler ticks; it overlays everything (z above ticks/readout). */
+  top: 0;
   bottom: 0;
   width: 1px;
   background: var(--timeline-marker);
-  z-index: 2;
+  z-index: 4;
 }
 
 .tabsrow__chip {
   position: absolute;
-  top: 8px;
-  z-index: 3;
+  top: 2px;
+  z-index: 5;
   display: inline-flex;
   flex-direction: column;
   justify-content: center;
@@ -788,6 +800,53 @@ select option {
   font-size: 10px;
   font-weight: 800;
   line-height: 1.05;
+}
+
+/* Ruler tick: a short vertical hairline at the tick's x with a two-line label
+   (time over frame number) to its right. The band lives at the bottom of the
+   cursor strip; ticks are click-through so the seek/scrub drag still works. The
+   line tone is a muted grey, deliberately distinct from the cyan event lines
+   and the pink playhead. */
+.tabsrow__tick {
+  position: absolute;
+  bottom: 0;
+  height: 26px;
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.tabsrow__tick-line {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 8px;
+  background: #4a4a4f;
+}
+
+.tabsrow__tick-label {
+  display: inline-flex;
+  flex-direction: column;
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  letter-spacing: 0;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tabsrow__tick-time {
+  font-weight: 700;
+}
+
+.tabsrow__tick-frame {
+  color: #66666c;
+  font-weight: 600;
 }
 
 .timeline {
