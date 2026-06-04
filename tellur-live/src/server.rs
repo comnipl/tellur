@@ -1186,8 +1186,8 @@ fn node_kind_str(kind: NodeKind) -> &'static str {
 /// Serializes an [`Arrangement`] node and its children into the hand-built JSON
 /// the live UI consumes (audit B.4). Recurses over `children`; every float goes
 /// through [`finite_json_number`]; `trim` is `null` or `[a,b]`; each trigger is
-/// an object `{"time":<num>,"name":<null|string>}`. Shape mirrored in
-/// `web/src/types.ts`.
+/// an object `{"time":<num>,"name":<null|string>}`; `source` is `null` or
+/// `{"file":<string>,"line":<num>}`. Shape mirrored in `web/src/types.ts`.
 fn arrangement_json(node: &Arrangement) -> String {
     let trim = match node.trim {
         Some((a, b)) => format!("[{},{}]", finite_json_number(a), finite_json_number(b)),
@@ -1219,11 +1219,20 @@ fn arrangement_json(node: &Arrangement) -> String {
         Some(n) => format!("\"{}\"", json_escape(n)),
         None => "null".to_owned(),
     };
+    let source = match &node.source {
+        Some(s) => format!(
+            "{{\"file\":\"{}\",\"line\":{}}}",
+            json_escape(&s.file),
+            s.line,
+        ),
+        None => "null".to_owned(),
+    };
     format!(
-        "{{\"kind\":\"{}\",\"label\":\"{}\",\"name\":{},\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
+        "{{\"kind\":\"{}\",\"label\":\"{}\",\"name\":{},\"source\":{},\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
         node_kind_str(node.kind),
         json_escape(&node.label),
         name,
+        source,
         finite_json_number(node.start),
         finite_json_number(node.end),
         trim,
@@ -1259,7 +1268,7 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tellur_core::timeline_component::TriggerMark;
+    use tellur_core::timeline_component::{SourceLoc, TriggerMark};
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
     // overlay timeline with a video child (a source crop) and a sequence of two
@@ -1274,6 +1283,7 @@ mod tests {
             // A non-null `name` exercises the escaped-string branch; the rest stay
             // `null` to cover the absent-name branch.
             name: Some("Dialogue · \"hi\"".to_owned()),
+            source: None,
             start: 0.0,
             end: 6.0,
             trim: None,
@@ -1283,6 +1293,12 @@ mod tests {
                     kind: NodeKind::Video,
                     label: "establishing.mp4".to_owned(),
                     name: None,
+                    // A non-null `source` exercises the object branch (note the
+                    // backslash escaping in the file path); the rest stay `null`.
+                    source: Some(SourceLoc {
+                        file: "scenes\\intro.rs".to_owned(),
+                        line: 42,
+                    }),
                     start: 0.0,
                     end: 2.0,
                     trim: Some((1.0, 3.0)),
@@ -1293,6 +1309,7 @@ mod tests {
                     kind: NodeKind::Sequence,
                     label: String::new(),
                     name: None,
+                    source: None,
                     start: 0.0,
                     end: 6.0,
                     trim: None,
@@ -1302,6 +1319,7 @@ mod tests {
                             kind: NodeKind::Caption,
                             label: "one".to_owned(),
                             name: None,
+                            source: None,
                             start: 0.0,
                             end: 3.0,
                             trim: None,
@@ -1312,6 +1330,7 @@ mod tests {
                             kind: NodeKind::Caption,
                             label: "two".to_owned(),
                             name: None,
+                            source: None,
                             start: 3.0,
                             end: 6.0,
                             trim: None,
@@ -1335,15 +1354,15 @@ mod tests {
         };
 
         let expected = concat!(
-            "{\"kind\":\"timeline\",\"label\":\"root\",\"name\":\"Dialogue · \\\"hi\\\"\",\"start\":0,\"end\":6,",
+            "{\"kind\":\"timeline\",\"label\":\"root\",\"name\":\"Dialogue · \\\"hi\\\"\",\"source\":null,\"start\":0,\"end\":6,",
             "\"trim\":null,\"triggers\":[],\"children\":[",
-            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"name\":null,\"start\":0,\"end\":2,",
+            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"name\":null,\"source\":{\"file\":\"scenes\\\\intro.rs\",\"line\":42},\"start\":0,\"end\":2,",
             "\"trim\":[1,3],\"triggers\":[],\"children\":[]},",
-            "{\"kind\":\"sequence\",\"label\":\"\",\"name\":null,\"start\":0,\"end\":6,",
+            "{\"kind\":\"sequence\",\"label\":\"\",\"name\":null,\"source\":null,\"start\":0,\"end\":6,",
             "\"trim\":null,\"triggers\":[],\"children\":[",
-            "{\"kind\":\"caption\",\"label\":\"one\",\"name\":null,\"start\":0,\"end\":3,",
+            "{\"kind\":\"caption\",\"label\":\"one\",\"name\":null,\"source\":null,\"start\":0,\"end\":3,",
             "\"trim\":null,\"triggers\":[],\"children\":[]},",
-            "{\"kind\":\"caption\",\"label\":\"two\",\"name\":null,\"start\":3,\"end\":6,",
+            "{\"kind\":\"caption\",\"label\":\"two\",\"name\":null,\"source\":null,\"start\":3,\"end\":6,",
             "\"trim\":null,\"triggers\":[",
             "{\"time\":3,\"name\":\"reveal\"},",
             "{\"time\":4,\"name\":null}",
@@ -1363,6 +1382,7 @@ mod tests {
             kind: NodeKind::Caption,
             label: String::new(),
             name: None,
+            source: None,
             start: f32::INFINITY,
             end: f32::NAN,
             trim: None,
@@ -1376,5 +1396,6 @@ mod tests {
         assert!(json.contains("\"start\":0"));
         assert!(json.contains("\"end\":0"));
         assert!(json.contains("\"triggers\":[{\"time\":0,\"name\":null}]"));
+        assert!(json.contains("\"source\":null"));
     }
 }

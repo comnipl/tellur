@@ -27,7 +27,8 @@ use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time};
 use crate::timeline_component::{
-    Arrangement, AudioBuffer, Clock, Cue, NodeKind, Placed, ResolveCtx, TimelineComponent,
+    peel_source, Arrangement, AudioBuffer, Clock, Cue, NodeKind, Placed, ResolveCtx, SourceLoc,
+    TimelineComponent,
 };
 
 // ── Containers ───────────────────────────────────────────────────────────────
@@ -59,28 +60,33 @@ impl Timeline {
     /// component) is treated as a non-fill, start-0.0 child.
     fn classify(&self) -> impl Iterator<Item = ChildView<'_>> {
         self.children.iter().map(|child| {
-            // Downcast THROUGH the trait object (`child.as_ref()`), not the
-            // `Box` itself: `Box<dyn TimelineComponent + Send>` is *itself*
-            // `DynEq` (it is `PartialEq + Any`), so `box.as_any()` would erase
-            // the box, not the inner `Placed`. Dispatching `as_any` on the
-            // `dyn` object routes through the vtable to the concrete leaf.
+            // Peel any wrapping `Sourced` (the call-site decorator the generated
+            // `.child(...)` setter adds) so we see the real `Placed`/leaf, AND
+            // capture its source so `arrangement` can re-stamp it — this path
+            // builds the child node from the peeled component and would otherwise
+            // bypass the wrapper's own stamping.
             let obj: &(dyn TimelineComponent + Send) = child.as_ref();
-            match obj.as_any().downcast_ref::<Placed>() {
-                Some(placed) if placed.is_fill() => ChildView::Fill(placed),
-                Some(placed) => ChildView::PlacedAt(placed),
+            let (source, inner) = peel_source(obj);
+            match inner.as_any().downcast_ref::<Placed>() {
+                Some(placed) if placed.is_fill() => ChildView::Fill(placed, source),
+                Some(placed) => ChildView::PlacedAt(placed, source),
                 None => ChildView::Bare(obj),
             }
         })
     }
 }
 
-/// How a [`Timeline`] sees one child during measure / place.
+/// How a [`Timeline`] sees one child during measure / place. The placement
+/// variants carry the peeled call-site [`SourceLoc`] (if any) so `arrangement`,
+/// which builds the node from the inner `Placed`, can re-stamp it. The `Bare`
+/// variant keeps the ORIGINAL child (wrapper included) so its own `arrangement`
+/// (through any `Sourced`) stamps the source.
 enum ChildView<'a> {
     /// A `.fill()` placement — excluded from the length measure; resolved to the
     /// container length in the second sub-pass.
-    Fill(&'a Placed),
+    Fill(&'a Placed, Option<SourceLoc>),
     /// A `.at(..)` placement — measured / placed at its relative start.
-    PlacedAt(&'a Placed),
+    PlacedAt(&'a Placed, Option<SourceLoc>),
     /// A non-placement child (a bare visual etc.) — start 0.0, its own measure.
     Bare(&'a (dyn TimelineComponent + Send)),
 }
@@ -94,8 +100,8 @@ impl TimelineComponent for Timeline {
         let mut acc: Option<f32> = None;
         for view in self.classify() {
             let m = match view {
-                ChildView::Fill(_) => continue,
-                ChildView::PlacedAt(placed) => placed.measure(),
+                ChildView::Fill(..) => continue,
+                ChildView::PlacedAt(placed, _) => placed.measure(),
                 ChildView::Bare(child) => child.measure(),
             };
             if let Some(end) = m {
@@ -113,10 +119,10 @@ impl TimelineComponent for Timeline {
         let mut saw_fill = false;
         for view in self.classify() {
             match view {
-                ChildView::Fill(_) => {
+                ChildView::Fill(..) => {
                     saw_fill = true;
                 }
-                ChildView::PlacedAt(placed) => {
+                ChildView::PlacedAt(placed, _) => {
                     saw_non_fill = true;
                     // `Placed::resolve` recurses at the relative start and
                     // returns the placed length; its footprint end is
@@ -145,7 +151,7 @@ impl TimelineComponent for Timeline {
         // into the INNER component (the fill `Placed` is a start-0.0 wrapper) so
         // its triggers / cues compose at the container base.
         for view in self.classify() {
-            if let ChildView::Fill(placed) = view {
+            if let ChildView::Fill(placed, _) = view {
                 placed.child().resolve(abs_start, out);
             }
         }
@@ -162,7 +168,7 @@ impl TimelineComponent for Timeline {
         let mut cues = Vec::new();
         for view in self.classify() {
             match view {
-                ChildView::Fill(placed) => {
+                ChildView::Fill(placed, _) => {
                     let mut child_cues = placed.child().cues(offset);
                     if placed.child().duration().is_none() {
                         let abs_end = offset + fill_len;
@@ -172,7 +178,7 @@ impl TimelineComponent for Timeline {
                     }
                     cues.extend(child_cues);
                 }
-                ChildView::PlacedAt(placed) => cues.extend(placed.cues(offset)),
+                ChildView::PlacedAt(placed, _) => cues.extend(placed.cues(offset)),
                 ChildView::Bare(child) => cues.extend(child.cues(offset)),
             }
         }
@@ -243,7 +249,7 @@ impl TimelineComponent for Timeline {
         let mut children = Vec::with_capacity(self.children.len());
         for view in self.classify() {
             match view {
-                ChildView::Fill(placed) => {
+                ChildView::Fill(placed, source) => {
                     // A fill child takes the container length; build the INNER
                     // component at the base and stamp the span end onto a
                     // timeless inner node (same rule `cues` applies to fill cues).
@@ -251,9 +257,19 @@ impl TimelineComponent for Timeline {
                     if placed.child().duration().is_none() {
                         node.end = offset + length;
                     }
+                    // Re-stamp the call site the peeled-away `Sourced` carried.
+                    if node.source.is_none() {
+                        node.source = source;
+                    }
                     children.push(node);
                 }
-                ChildView::PlacedAt(placed) => children.push(placed.arrangement(offset)),
+                ChildView::PlacedAt(placed, source) => {
+                    let mut node = placed.arrangement(offset);
+                    if node.source.is_none() {
+                        node.source = source;
+                    }
+                    children.push(node);
+                }
                 ChildView::Bare(child) => children.push(child.arrangement(offset)),
             }
         }
@@ -261,6 +277,7 @@ impl TimelineComponent for Timeline {
             kind: NodeKind::Timeline,
             label: String::new(),
             name: None,
+            source: None,
             start: offset,
             end: offset + length,
             trim: None,
@@ -294,9 +311,11 @@ pub struct Sequence {
 
 impl Sequence {
     /// Whether `child` is a `.fill()` placement (rejected inside a `Sequence`).
+    /// Peels any wrapping `Sourced` (the call-site decorator) before downcasting
+    /// so the structural check sees the real `Placed`.
     fn is_fill(child: &(dyn TimelineComponent + Send)) -> bool {
         child
-            .as_any()
+            .structural_any()
             .downcast_ref::<Placed>()
             .is_some_and(Placed::is_fill)
     }
@@ -462,6 +481,7 @@ impl TimelineComponent for Sequence {
             kind: NodeKind::Sequence,
             label: String::new(),
             name: None,
+            source: None,
             start: offset,
             end: offset + cursor,
             trim: None,
@@ -569,6 +589,7 @@ impl TimelineComponent for VideoFile {
             kind: NodeKind::Video,
             label: self.path.clone(),
             name: None,
+            source: None,
             start: offset,
             end: offset + self.probe(),
             trim: self.trim,
@@ -670,6 +691,7 @@ impl TimelineComponent for AudioFile {
             kind: NodeKind::Audio,
             label: self.path.clone(),
             name: None,
+            source: None,
             start: offset,
             end: offset + self.probe(),
             trim: self.trim,
@@ -719,6 +741,7 @@ impl TimelineComponent for Subtitle {
             kind: NodeKind::Subtitle,
             label: self.text.clone(),
             name: None,
+            source: None,
             start: offset,
             end: offset + self.duration().unwrap_or(0.0),
             trim: None,
@@ -963,6 +986,54 @@ mod tests {
         assert_eq!(overlay.label, "overlay");
         assert_eq!(overlay.start, 0.0);
         assert_eq!(overlay.end, 9.0);
+    }
+
+    // (g.2) The generated `.child(...)` setter is `#[track_caller]` and wraps
+    // each child in a `Sourced`, so every arrangement node carries the `file:line`
+    // of its `.child(...)` call — for a bare placement, a placed segment under a
+    // nested container, and a `.fill()` overlay alike.
+    #[test]
+    fn arrangement_captures_child_call_site_source() {
+        use crate::timeline_component::NodeKind;
+
+        // Capture the exact lines of the three `.child(...)` calls below so the
+        // assertion does not hard-code a brittle absolute line number.
+        // `#[track_caller]` reports the line where `.child(` appears.
+        let seq_line = line!() + 3; // the `.child(` of the Sequence
+        let fill_line = line!() + 7; // the `.child(` of the `.fill()` subtitle
+        let root = Timeline::builder()
+            .child(
+                Sequence::builder()
+                    .child(Caption.at(0.0..3.0))
+                    .build(),
+            )
+            .child(Subtitle::builder().text("overlay").fill())
+            .build();
+
+        let resolved = resolve(root).expect("the sequence gives it a length");
+        let arr = resolved.source().arrangement(0.0);
+
+        // The root itself has no enclosing `.child(...)` — no source.
+        assert_eq!(arr.source, None);
+
+        // Child 0 (the Sequence) is stamped with its `.child(...)` line.
+        let seq = &arr.children[0];
+        assert_eq!(seq.kind, NodeKind::Sequence);
+        let seq_src = seq.source.as_ref().expect("sequence child has a source");
+        assert!(seq_src.file.ends_with("timeline_container.rs"), "{}", seq_src.file);
+        assert_eq!(seq_src.line, seq_line);
+
+        // The nested placed caption is stamped with ITS own `.child(...)` line
+        // (inside the `Sequence::builder()` block), not the Sequence's.
+        let inner = &seq.children[0];
+        let inner_src = inner.source.as_ref().expect("placed caption has a source");
+        assert_eq!(inner_src.line, seq_line + 2);
+
+        // Child 1 (the `.fill()` subtitle) is stamped with its `.child(...)` line.
+        let overlay = &arr.children[1];
+        assert_eq!(overlay.kind, NodeKind::Subtitle);
+        let overlay_src = overlay.source.as_ref().expect("fill overlay has a source");
+        assert_eq!(overlay_src.line, fill_line);
     }
 
     // The leaf duration/probe seam: an injected `duration` overrides the stub.
@@ -1221,6 +1292,7 @@ mod tests {
                 kind: NodeKind::Video,
                 label: String::new(),
                 name: None,
+                source: None,
                 start: offset,
                 end: offset + self.duration,
                 trim: None,
@@ -1322,6 +1394,7 @@ mod tests {
                 kind: NodeKind::Video,
                 label: String::new(),
                 name: None,
+                source: None,
                 start: offset,
                 end: offset + self.duration,
                 trim: None,

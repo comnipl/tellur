@@ -22,6 +22,7 @@ export interface Arrangement {
   kind: NodeKind;
   label: string;
   name?: string | null;
+  source: { file: string; line: number } | null;
   start: number;
   end: number;
   trim: [number, number] | null;

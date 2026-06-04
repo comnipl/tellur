@@ -170,6 +170,17 @@ pub trait TimelineComponent: DynEq + DynHash {
     /// Named `arrangement` (not `outline`) to avoid clashing with the existing
     /// `tellur_renderer::Outline` raster effect (audit hygiene note).
     fn arrangement(&self, offset: f32) -> Arrangement;
+
+    /// The STRUCTURAL `&dyn Any` behind this component, peeling any transparent
+    /// decorator. A container inspecting a child's concrete type (e.g.
+    /// downcasting to [`Placed`] to detect a `.fill()`) must go through this, not
+    /// [`DynEq::as_any`](crate::dyn_compare::DynEq::as_any), so a wrapping
+    /// [`Sourced`] (which the generated `.child(...)` setter adds to capture the
+    /// call site) does not hide the real child. Defaults to `self` — only a
+    /// decorator like `Sourced` overrides it to forward to its inner component.
+    fn structural_any(&self) -> &dyn std::any::Any {
+        self.as_any()
+    }
 }
 
 // Compile-time guarantee that `TimelineComponent` is object-safe *and*
@@ -257,6 +268,9 @@ where
             // A `#[component(raster)]` overrides `arrangement_name` to surface
             // its display name here; plain raster primitives leave it `None`.
             name: self.arrangement_name(),
+            // The wrapping `Sourced` (from the container setter) stamps the
+            // call site; a bare visual has none of its own.
+            source: None,
             start: offset,
             end: offset + self.duration().unwrap_or(0.0),
             trim: None,
@@ -847,6 +861,146 @@ where
     }
 }
 
+/// A transparent decorator that stamps a CALL-SITE source location onto its
+/// child's arrangement node and otherwise plays the child unchanged.
+///
+/// The generated container `.child(...)` setter (a `#[track_caller]` method)
+/// wraps every child in a `Sourced` carrying `Location::caller()`, so each node
+/// in the arrangement tree can be traced back to the authoring `.child(...)`
+/// line. Every query EXCEPT [`arrangement`](TimelineComponent::arrangement) is
+/// forwarded verbatim to `inner`; `arrangement` stamps the location onto the
+/// returned node (only if it is not already set — the innermost wrapper wins,
+/// which is the most specific call site).
+pub struct Sourced {
+    source: &'static ::core::panic::Location<'static>,
+    inner: Box<dyn TimelineComponent + Send>,
+}
+
+impl Sourced {
+    /// Wraps `inner`, recording the `source` call site for its arrangement node.
+    pub fn new(
+        source: &'static ::core::panic::Location<'static>,
+        inner: Box<dyn TimelineComponent + Send>,
+    ) -> Self {
+        Self { source, inner }
+    }
+
+    /// The captured call site as a [`SourceLoc`].
+    pub fn source_loc(&self) -> SourceLoc {
+        SourceLoc {
+            file: self.source.file().to_owned(),
+            line: self.source.line(),
+        }
+    }
+}
+
+/// Peels any wrapping [`Sourced`] decorators off a boxed child, returning the
+/// INNERMOST call site (matching [`Sourced::arrangement`], where the innermost
+/// stamp wins) and the structural inner component.
+///
+/// A container that bypasses a child's own `arrangement` (e.g. [`Timeline`],
+/// which builds the node from the peeled [`Placed`]) uses this to re-stamp the
+/// source the wrapper would otherwise have applied.
+pub fn peel_source(
+    child: &(dyn TimelineComponent + Send),
+) -> (Option<SourceLoc>, &(dyn TimelineComponent + Send)) {
+    let mut source = None;
+    let mut cur = child;
+    // Walk inward, keeping the LAST (innermost) source seen.
+    while let Some(sourced) = cur.as_any().downcast_ref::<Sourced>() {
+        source = Some(sourced.source_loc());
+        cur = sourced.inner.as_ref();
+    }
+    (source, cur)
+}
+
+// IDENTITY DELEGATES TO `inner`, IGNORING `source`: the call-site location is a
+// display annotation, NOT part of component identity / a cache-key term (same
+// contract as `Event::name`). These hand-written impls back the `DynEq` /
+// `DynHash` super-traits a `TimelineComponent` needs, and let `Sourced` be a
+// comparable `Box<dyn TimelineComponent + Send>` child like any other.
+impl PartialEq for Sourced {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare the boxed children through `dyn TimelineComponent + Send`'s
+        // own `PartialEq` (the `DynEq` downcast), ignoring `source`.
+        *self.inner == *other.inner
+    }
+}
+
+impl Eq for Sourced {}
+
+impl Hash for Sourced {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash through the boxed child's `dyn TimelineComponent + Send` `Hash`
+        // (the `DynHash` path), ignoring `source`.
+        self.inner.hash(state);
+    }
+}
+
+impl TimelineComponent for Sourced {
+    fn duration(&self) -> Option<f32> {
+        self.inner.duration()
+    }
+
+    fn measure(&self) -> Option<f32> {
+        self.inner.measure()
+    }
+
+    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+        self.inner.resolve(abs_start, out)
+    }
+
+    fn frame(
+        &self,
+        clock: Clock<'_>,
+        canvas: Vec2,
+        target: Resolution,
+        ctx: &mut dyn RenderContext,
+    ) -> Option<RasterImage> {
+        self.inner.frame(clock, canvas, target, ctx)
+    }
+
+    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
+        self.inner.samples(clock, window)
+    }
+
+    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
+        self.inner.mix_into(mix, start_secs, speed);
+    }
+
+    fn cues(&self, offset: f32) -> Vec<Cue> {
+        self.inner.cues(offset)
+    }
+
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        let mut node = self.inner.arrangement(offset);
+        // Only the innermost (most specific) call site stamps the node; an outer
+        // wrapper leaves an already-set `source` untouched.
+        if node.source.is_none() {
+            node.source = Some(SourceLoc {
+                file: self.source.file().to_owned(),
+                line: self.source.line(),
+            });
+        }
+        node
+    }
+
+    fn structural_any(&self) -> &dyn std::any::Any {
+        // Transparent to structural inspection: a container downcasting a child
+        // must see the real component, not this decorator. Recurses so nested
+        // wrappers peel fully.
+        self.inner.structural_any()
+    }
+}
+
+/// A `Sourced` drops straight into a container's child setter as a boxed
+/// `TimelineComponent`, like [`Placed`] / [`Triggered`] do.
+impl From<Sourced> for Box<dyn TimelineComponent + Send> {
+    fn from(sourced: Sourced) -> Self {
+        Box::new(sourced)
+    }
+}
+
 /// Trigger verbs on a built [`TimelineComponent`]. Blanket-implemented for every
 /// `T: TimelineComponent`. Multiple writers to one [`Event`] ⇒ EARLIEST wins
 /// (resolved in the place pass).
@@ -1430,12 +1584,23 @@ pub struct TriggerMark {
     pub name: Option<String>,
 }
 
+/// The CALL-SITE source location of a node: the `file:line` of the `.child(...)`
+/// call that placed the component into its container. Surfaced so the live UI
+/// can jump a clicked node back to its authoring line. Owned (`String`) so the
+/// arrangement is a self-contained, serializable snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLoc {
+    pub file: String,
+    pub line: u32,
+}
+
 /// What the live UI draws — the resolved arrangement of a node and its
 /// children. Built by walking the RESOLVED tree (`.sketch/01` A.7 / B.4).
 ///
 /// `trim` carries the source crop separately so the UI can show both the placed
 /// bar and the source crop; `triggers` surfaces where [`Event`]s fire (each a
-/// [`TriggerMark`] carrying the time and the event's optional name).
+/// [`TriggerMark`] carrying the time and the event's optional name); `source` is
+/// the `.child(...)` call site that placed the node (see [`SourceLoc`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arrangement {
     pub kind: NodeKind,
@@ -1446,6 +1611,10 @@ pub struct Arrangement {
     /// PascalCase name, or set from an explicit `name = "..."` template; `None`
     /// for nodes that have no enclosing named component.
     pub name: Option<String>,
+    /// The `.child(...)` CALL SITE that placed this node, captured by the
+    /// generated container setter via `#[track_caller]`; `None` for the root and
+    /// for nodes built outside a tracked setter.
+    pub source: Option<SourceLoc>,
     pub start: f32,
     pub end: f32,
     pub trim: Option<(f32, f32)>,

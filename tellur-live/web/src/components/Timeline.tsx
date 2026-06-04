@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ChevronDown, ChevronRight, Component, Flag } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Component,
+  FileCode,
+  Flag,
+} from "lucide-react";
 import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
@@ -56,6 +62,9 @@ interface Clip {
   // True when the node has children. Distinguishes container components (green)
   // from single-raster leaf components (blue).
   hasChildren: boolean;
+  // The node's authoring call site (file + line), or null (e.g. the root).
+  // Shown in the top-right readout when the clip is selected.
+  source: { file: string; line: number } | null;
 }
 
 // One horizontal row in the timeline. A "header lane" carries `header` (the
@@ -141,6 +150,13 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// Last path segment of a source file path (handles both `/` and `\` separators),
+// e.g. ".../timeline_showcase.rs" -> "timeline_showcase.rs".
+function basename(file: string): string {
+  const segments = file.split(/[\\/]/);
+  return segments[segments.length - 1] || file;
+}
+
 // Display label for a node: explicit `name`, else its `label`, else the
 // capitalized kind. Used for both rail headers and clip labels.
 function displayName(node: Arrangement): string {
@@ -174,6 +190,7 @@ function leafClip(node: Arrangement, path: string): Clip {
     frameOwner: null,
     isComponent: node.name != null,
     hasChildren: node.children.length > 0,
+    source: node.source,
   };
 }
 
@@ -195,6 +212,7 @@ function titleClip(node: Arrangement, path: string): Clip {
     frameOwner: null,
     isComponent: node.name != null,
     hasChildren: node.children.length > 0,
+    source: node.source,
   };
 }
 
@@ -237,6 +255,7 @@ function layout(
           frameOwner: null,
           isComponent: node.name != null,
           hasChildren: node.children.length > 0,
+          source: node.source,
         }
       : titleClip(node, path);
     return [
@@ -488,6 +507,9 @@ export function Timeline(props: TimelineProps) {
   // container when an arrangement loads (windows default to COLLAPSED); grouping
   // containers stay expanded. A user's manual toggle persists until refetch.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // The clip id (dotted DFS path) currently selected by click, or null. Drives
+  // the highlight ring and the top-right source readout. Local to this panel.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Honor the OS "reduce motion" preference: when set, expand/collapse snaps
   // instead of tweening (zero-duration transitions, no enter/exit offset).
@@ -549,6 +571,15 @@ export function Timeline(props: TimelineProps) {
 
   // Distinct trigger times → one deduped full-height reference line each.
   const eventTimes = eventLineTimes(lanes);
+
+  // The currently-selected clip (if its lane is still rendered), used for the
+  // top-right source readout. A selection whose node collapsed away simply
+  // yields no readout until re-selected.
+  const selectedClip = selectedId
+    ? lanes
+        .flatMap((lane) => lane.clips)
+        .find((clip) => clip.id === selectedId) ?? null
+    : null;
 
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
@@ -813,6 +844,8 @@ export function Timeline(props: TimelineProps) {
                         else if (toggles)
                           classes.push("timeline__clip--summary");
                         if (nested) classes.push("timeline__clip--nested");
+                        if (clip.id === selectedId)
+                          classes.push("timeline__clip--selected");
                         // Sticky label: the track is translated by -viewportX, so
                         // a clip at inline `left` shows at screen-x `left -
                         // viewportX`. When its start is scrolled off the left
@@ -852,31 +885,41 @@ export function Timeline(props: TimelineProps) {
                                 ? { ...fadeIn, delay: nestedDelay(laneIndex) }
                                 : fadeIn,
                             }}
-                            onPointerDown={
-                              toggles ? (e) => e.stopPropagation() : undefined
-                            }
-                            onClick={
-                              toggles
-                                ? (e) => {
-                                    e.stopPropagation();
-                                    toggleCollapsed(clip.collapsedNode!);
-                                  }
-                                : undefined
-                            }
+                            // Clicking a clip SELECTS it (not seek): stop the
+                            // pointer so the body's seek/scrub handler doesn't
+                            // fire, and select on click. The collapse chevron
+                            // below stops propagation itself, so chevron clicks
+                            // toggle without bubbling up to select here.
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedId(clip.id);
+                            }}
                           >
                             {/* Container bars get a toggle handle + a component
-                                type icon; plain leaf clips get neither. */}
+                                type icon; plain leaf clips get neither. The
+                                handle is its own button that toggles collapse and
+                                stops propagation, so clicking it does NOT bubble
+                                up to select the clip (or seek). */}
                             {toggles ? (
-                              <span
+                              <button
+                                type="button"
                                 className="timeline__clip-toggle"
-                                aria-hidden="true"
+                                aria-label={
+                                  clipCollapsed ? "Expand" : "Collapse"
+                                }
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleCollapsed(clip.collapsedNode!);
+                                }}
                               >
                                 {clipCollapsed ? (
                                   <ChevronRight size={13} strokeWidth={2} />
                                 ) : (
                                   <ChevronDown size={13} strokeWidth={2} />
                                 )}
-                              </span>
+                              </button>
                             ) : null}
                             {toggles ? (
                               <span
@@ -1018,6 +1061,19 @@ export function Timeline(props: TimelineProps) {
             style={{ left: `${playheadX}px` }}
           />
         </div>
+        {/* Top-right source readout: a floating pill (over the tracks, fixed to
+            the body's top-right corner — NOT inside the panned tracks layer) that
+            shows the selected clip's call site as `basename:line`. Hidden when
+            nothing is selected or the selection has no source (e.g. the root). */}
+        {selectedClip && selectedClip.source ? (
+          <div className="timeline__source">
+            <FileCode size={12} strokeWidth={2} />
+            <span className="timeline__source-loc">
+              {basename(selectedClip.source.file)}:{selectedClip.source.line}
+            </span>
+            <span className="timeline__source-name">{selectedClip.name}</span>
+          </div>
+        ) : null}
       </div>
     </section>
   );

@@ -892,21 +892,75 @@ fn emit_glue(
         let field = &c.field;
         let item_ty = &c.item_ty;
         let maybe_field = format_ident!("maybe_{}", field);
+
+        // TIMELINE kind only: the child setter captures its `.child(...)` call
+        // site (`#[track_caller]` + `Location::caller()`) and wraps the boxed
+        // child in a `Sourced` so each arrangement node can be traced back to its
+        // authoring line. Raster/vector kinds keep the plain push UNCHANGED —
+        // `Sourced` is a `TimelineComponent`-only decorator.
+        let push_one = |child: TokenStream2| {
+            if kind == Kind::Timeline {
+                quote! {
+                    self.#field.push(::std::boxed::Box::new(
+                        ::tellur_core::timeline_component::Sourced::new(
+                            ::core::panic::Location::caller(),
+                            ::core::convert::Into::into(#child),
+                        ),
+                    ));
+                }
+            } else {
+                quote! {
+                    self.#field.push(::core::convert::Into::into(#child));
+                }
+            }
+        };
+        // `#[track_caller]` so `Location::caller()` resolves to the user's
+        // `.child(...)` line; harmless (and omitted) for non-timeline kinds.
+        let track_caller = if kind == Kind::Timeline {
+            quote!(#[track_caller])
+        } else {
+            quote!()
+        };
+        let push_each = push_one(quote!(child));
+        // The plural extend setters share ONE call line for every item; the
+        // timeline kind wraps each item with that same location.
+        let extend_field = if kind == Kind::Timeline {
+            quote! {
+                let __loc = ::core::panic::Location::caller();
+                self.#field.extend(children.into_iter().map(|__c| {
+                    let __boxed: #box_dyn = ::std::boxed::Box::new(
+                        ::tellur_core::timeline_component::Sourced::new(
+                            __loc,
+                            ::core::convert::Into::into(__c),
+                        ),
+                    );
+                    __boxed
+                }));
+            }
+        } else {
+            quote! {
+                self.#field
+                    .extend(children.into_iter().map(::core::convert::Into::into));
+            }
+        };
+
         let each_method = c.each.as_ref().map(|each| {
             let maybe_each = format_ident!("maybe_{}", each);
             quote! {
+                #track_caller
                 pub fn #each(mut self, child: impl ::core::convert::Into<#item_ty>) -> Self {
-                    self.#field.push(::core::convert::Into::into(child));
+                    #push_each
                     self
                 }
 
                 /// Pushes one child, or nothing when `child` is `None`.
+                #track_caller
                 pub fn #maybe_each(
                     mut self,
                     child: ::core::option::Option<impl ::core::convert::Into<#item_ty>>,
                 ) -> Self {
                     if let ::core::option::Option::Some(child) = child {
-                        self.#field.push(::core::convert::Into::into(child));
+                        #push_each
                     }
                     self
                 }
@@ -916,17 +970,18 @@ fn emit_glue(
             impl<__S: #state_mod::State> #builder_ty<__S> {
                 #each_method
 
+                #track_caller
                 pub fn #field<__I, __T>(mut self, children: __I) -> Self
                 where
                     __I: ::core::iter::IntoIterator<Item = __T>,
                     __T: ::core::convert::Into<#item_ty>,
                 {
-                    self.#field
-                        .extend(children.into_iter().map(::core::convert::Into::into));
+                    #extend_field
                     self
                 }
 
                 /// Extends with the iterator, or nothing when `children` is `None`.
+                #track_caller
                 pub fn #maybe_field<__I, __T>(
                     mut self,
                     children: ::core::option::Option<__I>,
@@ -936,8 +991,7 @@ fn emit_glue(
                     __T: ::core::convert::Into<#item_ty>,
                 {
                     if let ::core::option::Option::Some(children) = children {
-                        self.#field
-                            .extend(children.into_iter().map(::core::convert::Into::into));
+                        #extend_field
                     }
                     self
                 }

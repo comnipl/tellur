@@ -799,10 +799,26 @@ select option {
   border-radius: 4px;
 }
 
-/* Collapsed grouping-container summary bar: pointer cursor signals it re-expands
-   on click (its fill comes inline from the container's kind color). */
+/* All clips are clickable (click selects the node); the pointer cursor signals
+   that. Title/summary bars additionally toggle via their chevron. */
+.timeline__clip {
+  cursor: pointer;
+}
+
+/* Collapsed grouping-container summary bar (its fill comes inline from the
+   container's kind color). */
 .timeline__clip--summary {
   cursor: pointer;
+}
+
+/* Selected clip: a bright neutral ring drawn just outside the bar (outline so it
+   doesn't affect layout / the time projection), clearly marking the picked node
+   regardless of its kind fill. */
+.timeline__clip--selected {
+  z-index: 5;
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
 }
 
 /* Legacy/unresolved-arrangement fallback: a single neutral full-width bar with
@@ -850,6 +866,11 @@ select option {
 
 .timeline__clip-toggle {
   opacity: 0.9;
+  cursor: pointer;
+}
+
+.timeline__clip-toggle:hover {
+  opacity: 1;
 }
 
 .timeline__clip-label {
@@ -948,6 +969,49 @@ select option {
 
 .timeline__event-name {
   line-height: 1;
+}
+
+/* Top-right source readout: a compact floating pill over the tracks, pinned to
+   the body's top-right corner (above clips and the playhead), shown only for a
+   selected clip that has a source. Subtle dark background for readability. */
+.timeline__source {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 7;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: calc(100% - 16px);
+  height: 20px;
+  padding: 0 8px;
+  color: var(--text-secondary);
+  background: rgba(10, 10, 12, 0.86);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.timeline__source svg {
+  flex: 0 0 auto;
+  color: var(--accent-cache);
+}
+
+.timeline__source-loc {
+  color: var(--text-primary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Secondary: the selected node's name, dimmed and ellipsized if long. */
+.timeline__source-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
 }
 
 .zoom-bar {

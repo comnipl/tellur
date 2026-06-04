@@ -225,6 +225,7 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
             kind: NodeKind::Video,
             label: String::new(),
             name: None,
+            source: None,
             start: offset,
             end: offset + self.timeline.duration(),
             trim: None,
