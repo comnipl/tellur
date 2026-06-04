@@ -611,11 +611,12 @@ fn timeline_codegen<'a>(
             fn frame(
                 &self,
                 clock: ::tellur_core::timeline_component::Clock<'_>,
+                canvas: ::tellur_core::geometry::Vec2,
                 target: ::tellur_core::raster::Resolution,
                 ctx: &mut dyn ::tellur_core::render_context::RenderContext,
             ) -> ::core::option::Option<::tellur_core::raster::RasterImage> {
                 let __child = #build_with_clock;
-                #trait_path::frame(&__child, clock, target, ctx)
+                #trait_path::frame(&__child, clock, canvas, target, ctx)
             }
 
             fn samples(

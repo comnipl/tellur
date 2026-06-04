@@ -226,4 +226,4 @@ pub fn build() -> impl TimelineComponent + Send {
         .build()
 }
 
-tellur_live::export_timeline!("main", "Timeline Showcase", build);
+tellur_live::export_timeline!("main", "Timeline Showcase", build, canvas = (CANVAS_W, CANVAS_H));

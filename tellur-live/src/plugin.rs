@@ -14,12 +14,14 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tellur_core::geometry::Vec2;
 use tellur_core::raster::{RasterImage, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::{
-    resolve, Arrangement, NodeKind, Clock, ResolveError, ResolvedTimeline, TimelineComponent,
+    resolve, resolve_with_canvas, Arrangement, NodeKind, Clock, ResolveError, ResolvedTimeline,
+    TimelineComponent,
 };
 
 /// ABI version carried by the entry symbol.
@@ -97,6 +99,20 @@ pub fn single_timeline<T: TimelineComponent + Send + 'static>(
         id,
         title,
         resolved: resolve(root),
+    }
+}
+
+/// Like [`single_timeline`] but resolves against an explicit logical `canvas`.
+pub fn single_timeline_with_canvas<T: TimelineComponent + Send + 'static>(
+    id: &'static str,
+    title: &'static str,
+    root: T,
+    canvas: Vec2,
+) -> SingleTimeline {
+    SingleTimeline {
+        id,
+        title,
+        resolved: resolve_with_canvas(root, canvas),
     }
 }
 
@@ -192,9 +208,13 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
+        // The legacy closure handles its own SCENE_SIZE internally; the logical
+        // `canvas` is not threaded into it.
+        let _ = canvas;
         Some(self.timeline.build(clock.global(), target, ctx))
     }
 
@@ -226,6 +246,16 @@ macro_rules! export_timeline {
         pub extern "Rust" fn tellur_timeline_collection_v2(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
+        }
+    };
+    ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
+        #[no_mangle]
+        pub extern "Rust" fn tellur_timeline_collection_v2(
+        ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
+            ::std::boxed::Box::new($crate::single_timeline_with_canvas(
+                $id, $title, $builder(),
+                ::tellur_core::geometry::Vec2($w, $h),
+            ))
         }
     };
 }

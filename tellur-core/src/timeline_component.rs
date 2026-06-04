@@ -110,15 +110,18 @@ pub trait TimelineComponent: DynEq + DynHash {
     }
 
     /// Visual channel for this frame. `clock` carries both time axes (see
-    /// [`Clock`]). `None` ⇒ contributes nothing visually.
+    /// [`Clock`]); `canvas` is the composition's fixed LOGICAL layout space
+    /// (resolution-independent), which the pixel `target` scales. `None` ⇒
+    /// contributes nothing visually.
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // TODO(task 4): leaves/containers produce real frames.
-        let _ = (clock, target, ctx);
+        let _ = (clock, canvas, target, ctx);
         None
     }
 
@@ -214,6 +217,7 @@ where
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
@@ -221,15 +225,16 @@ where
         // (`.sketch/02 §11`): the framework caches `&dyn RasterComponent`, not
         // `&dyn TimelineComponent`, so this is the path that earns a cache slot.
         let _ = clock;
-        // A timeline frame's canvas IS the target: lay the visual out against
-        // the target's logical size (1:1 with the pixel resolution), NOT its
-        // intrinsic box. Sizing against the intrinsic box (`layout(UNBOUNDED)`)
-        // would stretch a wide-short text box to fill the frame (aspect
-        // distortion) and collapse a `Fill` component against the unbounded
-        // axis. Passing the canvas makes anchored/`Fill` placement resolve
-        // against the full frame and renders without distortion (mirrors the
-        // raster root, where `size` aspect matches `target`).
-        let canvas = Vec2(target.width as f32, target.height as f32);
+        // `canvas` is the composition's FIXED logical layout space, passed in
+        // and decoupled from the pixel `target` (resolution-independent). Lay
+        // the visual out against the canvas — NOT its intrinsic box. Sizing
+        // against the intrinsic box (`layout(UNBOUNDED)`) would stretch a
+        // wide-short text box to fill the frame (aspect distortion) and collapse
+        // a `Fill` component against the unbounded axis. The canvas makes
+        // anchored/`Fill` placement resolve against the full frame, and
+        // `ctx.render` scales that logical canvas to the pixel target with no
+        // distortion (mirrors the raster root, where `size` aspect matches
+        // `target`).
         Some(ctx.render(self, canvas, target))
     }
 
@@ -438,6 +443,7 @@ impl TimelineComponent for Placed {
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
@@ -481,7 +487,7 @@ impl TimelineComponent for Placed {
             }
         };
         let child_clock = clock.with_local_window(LocalTime::new(rebased), window);
-        self.child.frame(child_clock, target, ctx)
+        self.child.frame(child_clock, canvas, target, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -748,10 +754,11 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        self.child.frame(clock, target, ctx)
+        self.child.frame(clock, canvas, target, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -1166,6 +1173,10 @@ pub struct ResolvedTimeline {
     /// Non-fatal diagnostics surfaced from the walk (`.sketch/02 §9`), e.g. an
     /// all-fill container's determinate `0.0`.
     warnings: Vec<String>,
+    /// The composition's fixed LOGICAL layout space (resolution-independent).
+    /// The pixel `target` passed to `frame` scales this canvas; layout never
+    /// depends on the target's magnitude.
+    canvas: Vec2,
 }
 
 // Compile-time guarantee that `ResolvedTimeline` is `Send` (audit M2): it is
@@ -1193,6 +1204,12 @@ impl ResolvedTimeline {
         self.duration
     }
 
+    /// The composition's fixed LOGICAL layout space (resolution-independent).
+    /// The pixel `target` passed to [`frame`](Self::frame) scales this canvas.
+    pub fn canvas(&self) -> Vec2 {
+        self.canvas
+    }
+
     /// Non-fatal diagnostics collected during the resolve walk (`.sketch/02
     /// §9`).
     pub fn warnings(&self) -> &[String] {
@@ -1213,7 +1230,7 @@ impl ResolvedTimeline {
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
-        self.source().frame(clock, target, ctx)
+        self.source().frame(clock, self.canvas, target, ctx)
     }
 
     /// Samples the audio channel for `[t, t + window)`.
@@ -1284,6 +1301,20 @@ impl std::fmt::Debug for ResolvedTimeline {
 pub fn resolve(
     root: impl TimelineComponent + Send + 'static,
 ) -> Result<ResolvedTimeline, ResolveError> {
+    resolve_with_canvas(root, DEFAULT_CANVAS)
+}
+
+/// The default authoring canvas (1080p logical space) used when a composition
+/// does not declare one. The pixel target scales this; layout is resolution-
+/// independent.
+pub const DEFAULT_CANVAS: Vec2 = Vec2(1920.0, 1080.0);
+
+/// Resolve `root` against an explicit logical `canvas` (the composition's
+/// authored layout space). [`resolve`] is this with [`DEFAULT_CANVAS`].
+pub fn resolve_with_canvas(
+    root: impl TimelineComponent + Send + 'static,
+    canvas: Vec2,
+) -> Result<ResolvedTimeline, ResolveError> {
     // Own the source root intact (audit M1): box it once and keep it whole.
     let source: Box<dyn TimelineComponent + Send> = Box::new(root);
 
@@ -1308,6 +1339,7 @@ pub fn resolve(
         triggers,
         duration,
         warnings,
+        canvas,
     })
 }
 
@@ -1410,7 +1442,7 @@ mod tests {
         let table = TriggerTable::new();
         let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
         let mut ctx = PassThrough;
-        let frame = dot.frame(clock, Resolution::new(4, 4), &mut ctx);
+        let frame = dot.frame(clock, Vec2(4.0, 4.0), Resolution::new(4, 4), &mut ctx);
         assert!(frame.is_some());
     }
 
@@ -1495,8 +1527,9 @@ mod tests {
         let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
         let mut ctx = PassThrough;
         let target = Resolution::new(1280, 720); // 16:9
+        let canvas = Vec2(target.width as f32, target.height as f32);
         let frame = Square
-            .frame(clock, target, &mut ctx)
+            .frame(clock, canvas, target, &mut ctx)
             .expect("a visual contributes a frame");
         let cpu = frame.as_cpu().expect("cpu image");
         let (span_w, span_h) = opaque_span(cpu);
@@ -1655,7 +1688,7 @@ mod tests {
         // nothing; an interior local still proves the real clock threads through.
         let clock = Clock::new(TimelineTime::new(1.25), LocalTime::new(1.25), &table);
         let mut ctx = PassThrough;
-        let frame = pulse.frame(clock, Resolution::new(4, 4), &mut ctx);
+        let frame = pulse.frame(clock, Vec2(4.0, 4.0), Resolution::new(4, 4), &mut ctx);
         assert!(frame.is_some());
 
         // Clock-less queries still resolve via the structural clock.

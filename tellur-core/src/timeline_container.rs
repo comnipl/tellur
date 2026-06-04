@@ -22,6 +22,7 @@
 
 use crate::audio::{self, AudioMix};
 use crate::composite::composite_frame_over;
+use crate::geometry::Vec2;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time};
@@ -181,6 +182,7 @@ impl TimelineComponent for Timeline {
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
@@ -209,7 +211,7 @@ impl TimelineComponent for Timeline {
         }
         let mut acc: Option<RasterImage> = None;
         for child in &self.children {
-            if let Some(img) = child.frame(clock, target, ctx) {
+            if let Some(img) = child.frame(clock, canvas, target, ctx) {
                 acc = Some(composite_frame_over(acc, img, target, ctx));
             }
         }
@@ -371,6 +373,7 @@ impl TimelineComponent for Sequence {
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
@@ -401,7 +404,7 @@ impl TimelineComponent for Sequence {
             };
             if active {
                 let child_clock = clock.with_local_window(LocalTime::new(local_t - cursor), slot);
-                if let Some(img) = child.frame(child_clock, target, ctx) {
+                if let Some(img) = child.frame(child_clock, canvas, target, ctx) {
                     acc = Some(composite_frame_over(acc, img, target, ctx));
                 }
             }
@@ -543,6 +546,7 @@ impl TimelineComponent for VideoFile {
     fn frame(
         &self,
         clock: Clock<'_>,
+        canvas: Vec2,
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
@@ -550,8 +554,11 @@ impl TimelineComponent for VideoFile {
         // clip's source-local axis; the leaf only adds its `.trim` start to reach
         // the absolute source time, then decodes scaled to `target` via the
         // per-source ffmpeg child (`video_decode`). `ctx` is unused: decode
-        // spawns its own child and does not touch the render context.
+        // spawns its own child and does not touch the render context. `canvas`
+        // is ignored: a video decodes scaled to the pixel `target` directly,
+        // independent of the logical layout space.
         let _ = ctx;
+        let _ = canvas;
         crate::video_decode::decode_frame(&self.path, clock.local().seconds(), self.trim, target)
     }
 
@@ -1184,9 +1191,11 @@ mod tests {
         fn frame(
             &self,
             clock: Clock<'_>,
+            canvas: Vec2,
             target: Resolution,
             _ctx: &mut dyn RenderContext,
         ) -> Option<RasterImage> {
+            let _ = canvas;
             self.log.lock().unwrap().push(clock.window());
             Some(RasterImage::cpu(
                 target.width,
@@ -1281,9 +1290,11 @@ mod tests {
         fn frame(
             &self,
             clock: Clock<'_>,
+            canvas: Vec2,
             target: Resolution,
             _ctx: &mut dyn RenderContext,
         ) -> Option<RasterImage> {
+            let _ = canvas;
             self.log.lock().unwrap().push(clock.local().seconds());
             Some(RasterImage::cpu(
                 target.width,
@@ -1347,12 +1358,12 @@ mod tests {
 
         // Bare RasterComponent via the blanket.
         let solid = SolidColor { rgba: [10, 20, 30, 255] };
-        let f = solid.frame(clock, Resolution::new(2, 2), &mut ctx).expect("renders");
+        let f = solid.frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx).expect("renders");
         assert_eq!(first_pixel(&f), [10, 20, 30, 255]);
 
         // A timeline component whose body builds a timeless visual.
         let probe = LocalProbe::builder().build();
-        let f = probe.frame(clock, Resolution::new(2, 2), &mut ctx).expect("renders");
+        let f = probe.frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx).expect("renders");
         assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
     }
 
