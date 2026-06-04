@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { ChevronDown, ChevronRight, Component } from "lucide-react";
 import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
@@ -20,9 +22,14 @@ interface TimelineProps {
 }
 
 // A single placed segment on a lane. `id` is the stable dotted DFS path of the
-// originating node (or that path for a collapsed-summary clip). `collapsedNode`
-// is set only for a collapsed-container summary clip so the clip can render a
-// re-expand affordance and toggle that node id.
+// originating node. `collapsedNode` is set on any clip that toggles a node's
+// collapsed state on click (a leaf-container title bar — collapsed OR expanded —
+// and a collapsed grouping-container summary). `isTitle` marks a leaf-container
+// title bar so it renders with the thick window-title look + a chevron.
+// `frameOwner` is the expanded leaf-container path this clip belongs to (set on
+// the title clip and every descendant clip), so window frames are derived from
+// clip ownership rather than lane tags — two time-disjoint expanded windows can
+// then share the same lanes yet still each draw their own box.
 interface Clip {
   id: string;
   start: number;
@@ -32,17 +39,79 @@ interface Clip {
   triggers: number[];
   trim: [number, number] | null;
   collapsedNode: string | null;
+  isTitle: boolean;
+  frameOwner: string | null;
+  // True when the node is a user `#[component]` (the macro sets a non-null
+  // `name`). A component is green if it COMPOSES children (a container), or blue
+  // if its body is a single raster (no children); raw nodes use their kind color.
+  isComponent: boolean;
+  // True when the node has children. Distinguishes container components (green)
+  // from single-raster leaf components (blue).
+  hasChildren: boolean;
 }
 
 // One horizontal row in the timeline. A "header lane" carries `header` (the
 // chevron + name on the rail) and no clips; a "content lane" carries one or
-// more time-packed clips and no header. Rail and grid both iterate `Lane[]` in
-// lockstep, so `depth` drives the rail indent for both.
+// more time-packed clips. A leaf-container title lane carries BOTH a `header`
+// (so the rail shows its chevron) and a single title-bar clip. `frame` tags the
+// lane as belonging to an expanded leaf-container's window block (its dotted
+// path) so the overlay can draw one rounded box around the block. Rail and grid
+// both iterate `Lane[]` in lockstep, so `depth` drives the rail indent for both.
 interface Lane {
   id: string;
   depth: number;
   header: { nodeId: string; name: string } | null;
   clips: Clip[];
+  frame: string | null;
+}
+
+// A rounded "window" drawn around an expanded leaf-container's title + child
+// lanes. Positioned absolutely over `.timeline__tracks`: x/width from the time
+// projection of [start, end]; y/height from the contiguous lane block. `kind`
+// (the container's NodeKind) colors the frame border to match its title bar.
+interface Frame {
+  path: string;
+  kind: NodeKind;
+  // Mirror of the owner title clip's flag, so the border picks green for a
+  // component window (e.g. Dialogue) regardless of its inner kind.
+  isComponent: boolean;
+  start: number;
+  end: number;
+  laneStart: number;
+  laneCount: number;
+}
+
+// Row height in px, matching `--track-h`. Tracks stack with no vertical gap, so
+// frame top/height are exact multiples of this.
+const TRACK_H = 28;
+
+// Per-NodeKind colors. Containers (timeline/sequence) are green ("components");
+// caption yellow, subtitle a warm orange, video blue, audio red. Light fills get
+// dark text; the darker blue/red fills get light text — readability first.
+// `tint` is the fill at low alpha, used for the expanded window's interior so a
+// Dialogue (timeline=green) window reads as a soft green box around its children.
+const KIND_COLOR: Record<
+  NodeKind,
+  { fill: string; text: string; border: string; tint: string }
+> = {
+  timeline: { fill: "#6fcf97", text: "#0e1f15", border: "#8fdcab", tint: "rgba(111, 207, 151, 0.14)" },
+  sequence: { fill: "#6fcf97", text: "#0e1f15", border: "#8fdcab", tint: "rgba(111, 207, 151, 0.14)" },
+  caption: { fill: "#e6c34d", text: "#241d05", border: "#f0d570", tint: "rgba(230, 195, 77, 0.14)" },
+  subtitle: { fill: "#e0944a", text: "#2a1606", border: "#eaa869", tint: "rgba(224, 148, 74, 0.14)" },
+  video: { fill: "#5a7fd6", text: "#f2f5fc", border: "#7d9be1", tint: "rgba(90, 127, 214, 0.14)" },
+  audio: { fill: "#d65a6b", text: "#fdf2f4", border: "#e17d8b", tint: "rgba(214, 90, 107, 0.14)" },
+};
+
+// Color rule, distinguishing container components from single-raster leaf
+// components: a component that composes children (e.g. Dialogue) is green; a
+// component whose body is a single raster (e.g. Backdrop/Reveal/FadingCaption,
+// no children) is blue — regardless of the kind its body rasterizes to. Raw
+// nodes (null name) use their own kind color.
+function colorFor(kind: NodeKind, isComponent: boolean, hasChildren: boolean) {
+  if (isComponent) {
+    return hasChildren ? KIND_COLOR.timeline : KIND_COLOR.video;
+  }
+  return KIND_COLOR[kind];
 }
 
 // Packing scratch lane: a `Lane` plus the time after which it is free to accept
@@ -89,13 +158,42 @@ function leafClip(node: Arrangement, path: string): Clip {
     triggers: node.triggers,
     trim: node.trim,
     collapsedNode: null,
+    isTitle: false,
+    frameOwner: null,
+    isComponent: node.name != null,
+    hasChildren: node.children.length > 0,
   };
 }
 
-// Lanes for `node`'s subtree. The four cases mirror the swimlane spec:
-// leaf -> one content lane; collapsed container -> one summary lane; grouping
-// container -> header lane + packed children; leaf container -> transparent
-// (its children packed at the same depth, no header).
+// A title-bar clip for a leaf-container, spanning its full [start, end]. Clicking
+// it toggles `path`; `isTitle` drives the thick window-title styling. `frameOwner`
+// is left null here and set by the expanded leaf-container branch — a COLLAPSED
+// title bar owns no frame.
+function titleClip(node: Arrangement, path: string): Clip {
+  return {
+    id: path,
+    start: node.start,
+    end: node.end,
+    name: displayName(node),
+    kind: node.kind,
+    triggers: node.triggers,
+    trim: node.trim,
+    collapsedNode: path,
+    isTitle: true,
+    frameOwner: null,
+    isComponent: node.name != null,
+    hasChildren: node.children.length > 0,
+  };
+}
+
+// Lanes for `node`'s subtree:
+//  - leaf -> one content lane.
+//  - grouping container (has a container child): rail header lane + packed
+//    children at depth+1. Collapsed grouping -> a single summary lane.
+//  - leaf container (all children are leaves): a COLLAPSIBLE WINDOW. Collapsed
+//    -> one title-bar lane (no frame, so siblings pack onto a shared lane).
+//    Expanded -> a title lane + packed children at depth+1, every lane tagged
+//    `frame = path` so the overlay draws a rounded box around the block.
 function layout(
   node: Arrangement,
   depth: number,
@@ -103,28 +201,39 @@ function layout(
   collapsed: Set<string>,
 ): Lane[] {
   if (!isContainer(node)) {
-    return [{ id: path, depth, header: null, clips: [leafClip(node, path)] }];
+    return [
+      { id: path, depth, header: null, clips: [leafClip(node, path)], frame: null },
+    ];
   }
 
   if (collapsed.has(path)) {
-    // Collapsed summary: a single clip spanning the container's full extent.
-    // `collapsedNode` makes the clip (and rail chevron) toggle this node open.
-    const clip: Clip = {
-      id: path,
-      start: node.start,
-      end: node.end,
-      name: displayName(node),
-      kind: node.kind,
-      triggers: node.triggers,
-      trim: node.trim,
-      collapsedNode: path,
-    };
+    // Collapsed container: a single clip spanning the container's full extent.
+    // For a grouping container it is a plain summary; for a leaf container it is
+    // a title bar (so collapsed Dialogues read as `Dialogue | Dialogue | ...`).
+    const grouping = isGrouping(node);
+    const clip: Clip = grouping
+      ? {
+          id: path,
+          start: node.start,
+          end: node.end,
+          name: displayName(node),
+          kind: node.kind,
+          triggers: node.triggers,
+          trim: node.trim,
+          collapsedNode: path,
+          isTitle: false,
+          frameOwner: null,
+          isComponent: node.name != null,
+          hasChildren: node.children.length > 0,
+        }
+      : titleClip(node, path);
     return [
       {
         id: path,
         depth,
         header: { nodeId: path, name: displayName(node) },
         clips: [clip],
+        frame: null,
       },
     ];
   }
@@ -135,13 +244,30 @@ function layout(
       depth,
       header: { nodeId: path, name: displayName(node) },
       clips: [],
+      frame: null,
     };
     return [headerLane, ...packChildren(node.children, depth + 1, path, collapsed)];
   }
 
-  // Leaf container, expanded: transparent. Pack its leaf children at the same
-  // depth with no header row of its own.
-  return packChildren(node.children, depth, path, collapsed);
+  // Leaf container, expanded: a window. Title lane on top, child lanes below.
+  // Stamp `frameOwner = path` on the title clip and every descendant clip so the
+  // frame is derived from clip ownership; this stays correct even when another
+  // time-disjoint expanded window shares these same lanes.
+  const titleLane: Lane = {
+    id: `${path}#title`,
+    depth,
+    header: { nodeId: path, name: displayName(node) },
+    clips: [{ ...titleClip(node, path), frameOwner: path }],
+    frame: path,
+  };
+  const childLanes = packChildren(node.children, depth + 1, path, collapsed).map(
+    (lane) => ({
+      ...lane,
+      frame: path,
+      clips: lane.clips.map((c) => ({ ...c, frameOwner: path })),
+    }),
+  );
+  return [titleLane, ...childLanes];
 }
 
 // A packing unit: the consecutive lanes contributed by one child subtree plus
@@ -154,10 +280,12 @@ interface PackUnit {
   order: number;
 }
 
-// 2D greedy first-fit packing of child subtrees by time. Transparent leaf
-// containers are flattened inline: each of their leaf children becomes its own
-// unit so leaves from different siblings (the per-Dialogue Captions/Subtitles)
-// pack across siblings into shared lanes.
+// 2D greedy first-fit packing of child subtrees by time. Each child is one unit
+// whose lanes come from `layout` and whose time extent is the child's span; a
+// unit occupies a contiguous block of result lanes equal to its lane count
+// (1 for a leaf or a collapsed container; 1+childLanes for an expanded window).
+// Collapsed leaf-container siblings (height 1) therefore pack onto one shared
+// lane, while an expanded leaf-container's contiguous block stays intact.
 function packChildren(
   children: Arrangement[],
   depth: number,
@@ -169,26 +297,6 @@ function packChildren(
 
   children.forEach((child, i) => {
     const childPath = `${parentPath}.${i}`;
-    const transparent =
-      isContainer(child) && !isGrouping(child) && !collapsed.has(childPath);
-
-    if (transparent) {
-      // Flatten the transparent leaf container: each leaf child is a unit
-      // whose lanes/extent come from that leaf alone.
-      child.children.forEach((leaf, j) => {
-        const leafPath = `${childPath}.${j}`;
-        units.push({
-          lanes: layout(leaf, depth, leafPath, collapsed),
-          start: leaf.start,
-          end: leaf.end,
-          order: order++,
-        });
-      });
-      return;
-    }
-
-    // Leaf, grouping container, or collapsed container: one unit whose lanes
-    // are the child's own layout and whose extent is the child's span.
     units.push({
       lanes: layout(child, depth, childPath, collapsed),
       start: child.start,
@@ -232,11 +340,14 @@ function packChildren(
           depth: src.depth,
           header: src.header,
           clips: [...src.clips],
+          frame: src.frame,
           lastEnd: -Infinity,
         };
       } else {
         // Merge into an existing lane: keep its header if it already had one,
         // otherwise adopt the incoming header (e.g. a packed grouping unit).
+        // `frame` is preserved from the existing lane; only same-frame (or
+        // frameless) units ever share a result lane, so no tag is lost.
         const lane = result[idx];
         lane.clips.push(...src.clips);
         if (!lane.header && src.header) lane.header = src.header;
@@ -248,11 +359,17 @@ function packChildren(
   return result.map(({ lastEnd: _lastEnd, ...lane }) => lane);
 }
 
-// Build the full lane list for the arrangement, re-keying each lane with a
-// render-stable id derived from its position so React reconciles cleanly.
-function computeLanes(root: Arrangement, collapsed: Set<string>): Lane[] {
-  const lanes = layout(root, 0, "0", collapsed);
-  return lanes.map((lane, index) => ({
+// Build the full lane list for the arrangement plus the window frames to draw
+// over them. Each lane is re-keyed with a render-stable id from its position so
+// React reconciles cleanly. Frames are derived from CLIP ownership: every clip
+// carrying a `frameOwner` path votes for that owner's lane span. Two time-
+// disjoint expanded windows can share the same lanes (the packer places their
+// blocks side by side), yet each draws its own box because each owns its clips.
+function computeLanes(
+  root: Arrangement,
+  collapsed: Set<string>,
+): { lanes: Lane[]; frames: Frame[] } {
+  const lanes = layout(root, 0, "0", collapsed).map((lane, index) => ({
     ...lane,
     id: lane.header
       ? `${lane.header.nodeId}#${index}`
@@ -260,6 +377,66 @@ function computeLanes(root: Arrangement, collapsed: Set<string>): Lane[] {
         ? `${lane.clips[0].id}#${index}`
         : `lane#${index}`,
   }));
+
+  // Per owner: min/max lane index its clips touch, plus the owner's title clip
+  // (the one with isTitle) which carries the window's [start, end].
+  interface FrameAcc {
+    minLane: number;
+    maxLane: number;
+    title: Clip | null;
+  }
+  const accByOwner = new Map<string, FrameAcc>();
+  const order: string[] = [];
+  lanes.forEach((lane, index) => {
+    for (const clip of lane.clips) {
+      const owner = clip.frameOwner;
+      if (owner == null) continue;
+      let acc = accByOwner.get(owner);
+      if (!acc) {
+        acc = { minLane: index, maxLane: index, title: null };
+        accByOwner.set(owner, acc);
+        order.push(owner);
+      } else {
+        if (index < acc.minLane) acc.minLane = index;
+        if (index > acc.maxLane) acc.maxLane = index;
+      }
+      if (clip.isTitle && clip.frameOwner === owner) acc.title = clip;
+    }
+  });
+
+  const frames: Frame[] = order.map((owner) => {
+    const acc = accByOwner.get(owner)!;
+    return {
+      path: owner,
+      // Border color follows the owner: green for a component window (Dialogue),
+      // else the kind color. `kind`/`isComponent` mirror the owner title clip.
+      kind: acc.title ? acc.title.kind : "timeline",
+      isComponent: acc.title ? acc.title.isComponent : false,
+      start: acc.title ? acc.title.start : 0,
+      end: acc.title ? acc.title.end : 0,
+      laneStart: acc.minLane,
+      laneCount: acc.maxLane - acc.minLane + 1,
+    };
+  });
+
+  return { lanes, frames };
+}
+
+// Walk the tree collecting the dotted paths of every leaf-container (a container
+// whose children are all leaves). These default to COLLAPSED. Paths use the same
+// dotted DFS scheme as `layout`/`packChildren`, so they match the lane ids.
+function collectLeafContainerPaths(
+  node: Arrangement,
+  path: string,
+  out: string[],
+): void {
+  if (isContainer(node) && !isGrouping(node)) {
+    out.push(path);
+    return; // its children are leaves; nothing collapsible deeper
+  }
+  node.children.forEach((child, i) =>
+    collectLeafContainerPaths(child, `${path}.${i}`, out),
+  );
 }
 
 // Rail / clip label for a content lane: the shared display name when every clip
@@ -282,9 +459,14 @@ export function Timeline(props: TimelineProps) {
   const [bodyWidth, setBodyWidth] = useState(0);
   const [draggingSeek, setDraggingSeek] = useState(false);
   const [arrangement, setArrangement] = useState<Arrangement | null>(null);
-  // Set of collapsed grouping-container node ids (dotted DFS paths). Empty by
-  // default, so the tree renders fully expanded.
+  // Set of collapsed node ids (dotted DFS paths). Seeded with every leaf
+  // container when an arrangement loads (windows default to COLLAPSED); grouping
+  // containers stay expanded. A user's manual toggle persists until refetch.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Honor the OS "reduce motion" preference: when set, expand/collapse snaps
+  // instead of tweening (zero-duration transitions, no enter/exit offset).
+  const reduceMotion = useReducedMotion();
 
   // Immutable toggle: collapsing/expanding swaps in a fresh Set so React sees a
   // new reference and re-derives the lanes.
@@ -325,7 +507,20 @@ export function Timeline(props: TimelineProps) {
     return () => controller.abort();
   }, [timelineId]);
 
-  const lanes = arrangement ? computeLanes(arrangement, collapsed) : [];
+  // Default every leaf-container window to collapsed whenever the tree changes.
+  useEffect(() => {
+    if (!arrangement) {
+      setCollapsed(new Set());
+      return;
+    }
+    const leafContainers: string[] = [];
+    collectLeafContainerPaths(arrangement, "0", leafContainers);
+    setCollapsed(new Set(leafContainers));
+  }, [arrangement]);
+
+  const { lanes, frames } = arrangement
+    ? computeLanes(arrangement, collapsed)
+    : { lanes: [], frames: [] };
 
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
@@ -443,6 +638,23 @@ export function Timeline(props: TimelineProps) {
     ],
   );
 
+  // Motion transitions for the expand/collapse choreography. Tuned to be flashy
+  // but SNAPPY (派手でサクサク): a stiff, low-mass, slightly under-damped spring
+  // settles in ~150–200ms with a touch of overshoot, and fades are short. Under
+  // reduced-motion every transition is instant. `nestedDelay` lightly staggers a
+  // window's child bars so the box "unfolds" without dragging.
+  const layoutSpring = reduceMotion
+    ? { duration: 0 }
+    : ({ type: "spring", stiffness: 900, damping: 30, mass: 0.5 } as const);
+  const fadeIn = reduceMotion
+    ? { duration: 0 }
+    : ({ duration: 0.12, ease: [0.22, 1, 0.36, 1] } as const);
+  const fadeOut = reduceMotion
+    ? { duration: 0 }
+    : ({ duration: 0.1, ease: "easeIn" } as const);
+  const nestedDelay = (laneIndex: number) =>
+    reduceMotion ? 0 : Math.min(laneIndex * 0.015, 0.05);
+
   return (
     <section className="timeline">
       <aside className="timeline__side">
@@ -454,10 +666,18 @@ export function Timeline(props: TimelineProps) {
             const railLabel = lane.header
               ? lane.header.name
               : contentLaneLabel(lane);
+            // A header lane with no clips is a grouping-container section header
+            // (de-emphasized). A header lane with clips is a leaf-container title
+            // bar (collapsed or expanded), which reads as a window title.
+            const isSectionHeader = lane.header != null && lane.clips.length === 0;
             return (
               <div
                 className={
-                  lane.header ? "track-head track-head--group" : "track-head"
+                  isSectionHeader
+                    ? "track-head track-head--group"
+                    : lane.header
+                      ? "track-head track-head--title"
+                      : "track-head"
                 }
                 key={lane.id}
                 style={{ paddingLeft: `${10 + lane.depth * 14}px` }}
@@ -474,7 +694,11 @@ export function Timeline(props: TimelineProps) {
                       toggleCollapsed(lane.header!.nodeId);
                     }}
                   >
-                    {isCollapsed ? "▸" : "▾"}
+                    {isCollapsed ? (
+                      <ChevronRight size={13} strokeWidth={2} />
+                    ) : (
+                      <ChevronDown size={13} strokeWidth={2} />
+                    )}
                   </button>
                 ) : (
                   <span className="track-head__chevron-spacer" />
@@ -511,7 +735,7 @@ export function Timeline(props: TimelineProps) {
           }}
         >
           {lanes.length > 0
-            ? lanes.map((lane) => {
+            ? lanes.map((lane, laneIndex) => {
                 if (lane.header && lane.clips.length === 0) {
                   // Grouping-container header row: no clip, just a faint
                   // full-row hairline so the group band reads as a section.
@@ -523,40 +747,109 @@ export function Timeline(props: TimelineProps) {
                 }
                 return (
                   <div key={lane.id} className="timeline__track">
-                    {lane.clips.map((clip) => {
-                      const left = (clamp(clip.start, 0, duration) / duration) *
-                        innerWidth;
-                      const right = (clamp(clip.end, 0, duration) / duration) *
-                        innerWidth;
-                      const width = Math.max(right - left, 2);
-                      const summary = clip.collapsedNode != null;
-                      return (
-                        <div
-                          key={clip.id}
-                          className={
-                            summary
-                              ? "timeline__clip timeline__clip--summary"
-                              : "timeline__clip"
-                          }
-                          style={{ left: `${left}px`, width: `${width}px` }}
-                          onPointerDown={
-                            summary ? (e) => e.stopPropagation() : undefined
-                          }
-                          onClick={
-                            summary
-                              ? (e) => {
-                                  e.stopPropagation();
-                                  toggleCollapsed(clip.collapsedNode!);
-                                }
-                              : undefined
-                          }
-                        >
-                          <span className="timeline__clip-label">
-                            {summary ? `▸ ${clip.name}` : clip.name}
-                          </span>
-                        </div>
-                      );
-                    })}
+                    {/* AnimatePresence lets a window's child/title bars fade +
+                        rise in on expand and out on collapse; surviving bars
+                        glide via the layoutSpring on left/width. */}
+                    <AnimatePresence initial={false}>
+                      {lane.clips.map((clip) => {
+                        // Exact time->x projection — NO horizontal inset, so a
+                        // nested child bar is flush to the same edges as its
+                        // window frame (the horizontal axis is faithful).
+                        const left =
+                          (clamp(clip.start, 0, duration) / duration) *
+                          innerWidth;
+                        const right =
+                          (clamp(clip.end, 0, duration) / duration) *
+                          innerWidth;
+                        const width = Math.max(right - left, 2);
+                        // A clip with `collapsedNode` toggles a node on click: a
+                        // leaf-container title bar (collapsed or expanded) or a
+                        // collapsed grouping summary. `isTitle` selects the
+                        // window-title look; the handle reflects collapsed state.
+                        const toggles = clip.collapsedNode != null;
+                        const clipCollapsed =
+                          toggles && collapsed.has(clip.collapsedNode!);
+                        const nested =
+                          clip.frameOwner != null && !clip.isTitle;
+                        const color = colorFor(
+                          clip.kind,
+                          clip.isComponent,
+                          clip.hasChildren,
+                        );
+                        const classes = ["timeline__clip"];
+                        if (clip.isTitle)
+                          classes.push("timeline__clip--title");
+                        else if (toggles)
+                          classes.push("timeline__clip--summary");
+                        if (nested) classes.push("timeline__clip--nested");
+                        return (
+                          <motion.div
+                            key={clip.id}
+                            className={classes.join(" ")}
+                            style={{ background: color.fill, color: color.text }}
+                            // Position is driven by motion so reflows glide.
+                            initial={{
+                              left,
+                              width,
+                              opacity: 0,
+                              y: reduceMotion ? 0 : -6,
+                            }}
+                            animate={{ left, width, opacity: 1, y: 0 }}
+                            exit={{
+                              opacity: 0,
+                              y: reduceMotion ? 0 : -6,
+                              transition: fadeOut,
+                            }}
+                            transition={{
+                              left: layoutSpring,
+                              width: layoutSpring,
+                              y: layoutSpring,
+                              // Stagger nested bars so the window unfolds.
+                              opacity: nested
+                                ? { ...fadeIn, delay: nestedDelay(laneIndex) }
+                                : fadeIn,
+                            }}
+                            onPointerDown={
+                              toggles ? (e) => e.stopPropagation() : undefined
+                            }
+                            onClick={
+                              toggles
+                                ? (e) => {
+                                    e.stopPropagation();
+                                    toggleCollapsed(clip.collapsedNode!);
+                                  }
+                                : undefined
+                            }
+                          >
+                            {/* Container bars get a toggle handle + a component
+                                type icon; plain leaf clips get neither. */}
+                            {toggles ? (
+                              <span
+                                className="timeline__clip-toggle"
+                                aria-hidden="true"
+                              >
+                                {clipCollapsed ? (
+                                  <ChevronRight size={13} strokeWidth={2} />
+                                ) : (
+                                  <ChevronDown size={13} strokeWidth={2} />
+                                )}
+                              </span>
+                            ) : null}
+                            {toggles ? (
+                              <span
+                                className="timeline__clip-icon"
+                                aria-hidden="true"
+                              >
+                                <Component size={13} strokeWidth={2} />
+                              </span>
+                            ) : null}
+                            <span className="timeline__clip-label">
+                              {clip.name}
+                            </span>
+                          </motion.div>
+                        );
+                      })}
+                    </AnimatePresence>
                     {/* Triggers sit at track level (full-width coords) so their
                         diamond heads are not clipped by the clip's overflow. */}
                     {lane.clips.flatMap((clip) =>
@@ -578,7 +871,7 @@ export function Timeline(props: TimelineProps) {
             : timeline ? (
                 <div className="timeline__track">
                   <div
-                    className="timeline__clip"
+                    className="timeline__clip timeline__clip--fallback"
                     style={{ left: 0, width: `${innerWidth}px` }}
                   >
                     <span className="timeline__clip-label">
@@ -587,6 +880,61 @@ export function Timeline(props: TimelineProps) {
                   </div>
                 </div>
               ) : null}
+          {/* Window frames: one rounded box per expanded leaf-container, drawn
+              under the clips (pointer-events:none) so clicks still reach the
+              title-bar chevron and child clips. AnimatePresence grows the box
+              in from the title bar (transform-origin top) on expand and shrinks
+              it out on collapse; left/width/top/height glide via layoutSpring. */}
+          <AnimatePresence initial={false}>
+            {frames.map((frame) => {
+              const left = (clamp(frame.start, 0, duration) / duration) *
+                innerWidth;
+              const right = (clamp(frame.end, 0, duration) / duration) *
+                innerWidth;
+              const width = Math.max(right - left, 2);
+              const top = frame.laneStart * TRACK_H;
+              const height = frame.laneCount * TRACK_H;
+              // Border matches the owner color (green for a component Dialogue);
+              // the interior is that color at low alpha (light-green tint). A
+              // window owner is always a container, so hasChildren is true — a
+              // component window never goes blue.
+              const color = colorFor(frame.kind, frame.isComponent, true);
+              return (
+                <motion.div
+                  key={`frame:${frame.path}`}
+                  className="timeline__window"
+                  style={{
+                    borderColor: color.border,
+                    background: color.tint,
+                    transformOrigin: "top",
+                  }}
+                  initial={{
+                    left,
+                    width,
+                    top,
+                    height,
+                    opacity: 0,
+                    scaleY: reduceMotion ? 1 : 0.4,
+                  }}
+                  animate={{ left, width, top, height, opacity: 1, scaleY: 1 }}
+                  exit={{
+                    opacity: 0,
+                    scaleY: reduceMotion ? 1 : 0.4,
+                    transition: fadeOut,
+                  }}
+                  transition={{
+                    left: layoutSpring,
+                    width: layoutSpring,
+                    top: layoutSpring,
+                    height: layoutSpring,
+                    scaleY: layoutSpring,
+                    opacity: fadeIn,
+                    default: fadeIn,
+                  }}
+                />
+              );
+            })}
+          </AnimatePresence>
           <div
             className="timeline__playhead"
             style={{ left: `${playheadX}px` }}

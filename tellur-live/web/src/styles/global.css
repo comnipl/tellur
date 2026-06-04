@@ -686,6 +686,28 @@ select option {
   font-weight: 600;
 }
 
+/* Grouping containers (Timeline, Sequence) read as "components": a subtle green
+   tint on their rail chevron, matching the green kind color of container bars. */
+.track-head--group .track-head__chevron {
+  color: #6fcf97;
+}
+
+.track-head--group .track-head__chevron:hover {
+  color: #8fdcab;
+}
+
+/* Leaf-container title rows (collapsed bar or expanded window title) read as a
+   window title: transparent head (the clip carries the title look) with a
+   slightly bolder, brighter name. */
+.track-head--title {
+  background: transparent;
+}
+
+.track-head--title .track-head__name {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
 .track-head__chevron {
   display: inline-flex;
   align-items: center;
@@ -693,7 +715,6 @@ select option {
   width: 14px;
   height: 14px;
   color: var(--text-muted);
-  font-size: 9px;
   line-height: 1;
 }
 
@@ -762,34 +783,86 @@ select option {
   background: var(--bg-track);
 }
 
+/* Every bar's fill/text color is set inline from KIND_COLOR; this rule owns only
+   layout. `gap` spaces the optional toggle + ❖ icon from the label. */
 .timeline__clip {
   position: absolute;
   top: 5px;
   bottom: 3px;
+  z-index: 2;
   display: flex;
   align-items: center;
+  gap: 5px;
   overflow: hidden;
-  padding: 0 10px;
-  background: var(--accent-clip);
+  padding: 0 9px;
   border-radius: 4px;
 }
 
-/* Collapsed-container summary clip: dimmer band + pointer cursor to signal it
-   re-expands on click (the label is prefixed with a ▸ chevron in the markup). */
+/* Collapsed grouping-container summary bar: pointer cursor signals it re-expands
+   on click (its fill comes inline from the container's kind color). */
 .timeline__clip--summary {
-  background: var(--accent-pink-soft);
   cursor: pointer;
+}
+
+/* Legacy/unresolved-arrangement fallback: a single neutral full-width bar with
+   the timeline title (no kind color is available in this path). */
+.timeline__clip--fallback {
+  background: var(--accent-clip);
+  color: #12121c;
+}
+
+/* Leaf-container title bar (collapsed pill OR expanded window title): a filled,
+   bold, fully rounded bar at full lane height. Clickable to collapse/expand. */
+.timeline__clip--title {
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Child bars inside an expanded window: inset VERTICALLY a touch more so they
+   float clear of the frame's top/bottom border. There is intentionally NO
+   horizontal inset — a child is flush to the same time edges as its window
+   frame, so the horizontal axis stays faithful to the frame. */
+.timeline__clip--nested {
+  top: 5px;
+  bottom: 5px;
+}
+
+/* The component-type icon and the expand/collapse handle on container bars hold
+   lucide SVG glyphs; inline-flex centers the SVG, which inherits the bar's text
+   color via currentColor. Slightly dimmed so the label stays primary. */
+.timeline__clip-icon,
+.timeline__clip-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.timeline__clip-icon {
+  opacity: 0.85;
+}
+
+.timeline__clip-toggle {
+  opacity: 0.9;
 }
 
 .timeline__clip-label {
   min-width: 0;
   overflow: hidden;
-  color: #12121c;
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.timeline__clip--title .timeline__clip-label {
+  font-weight: 700;
 }
 
 /* Faint full-row hairline behind a grouping-container header row, so the empty
@@ -801,6 +874,22 @@ select option {
   right: 0;
   height: 1px;
   background: var(--border-subtle);
+}
+
+/* Window frame around an expanded leaf-container's title + child lanes. Drawn
+   under the clips (z-index 1, below the nested clips' z-index 2 and the title
+   bar's z-index 3) and click-through (pointer-events:none) so the title toggle
+   and child clips stay interactive. The 1px border color AND the light-tint
+   interior background are set inline from the container's kind color (a Dialogue
+   window gets a soft green interior). top/height are exact lane multiples, so the
+   frame top aligns with the title lane's row top; the filled title bar overlays
+   that top edge, and the children sit flush to the time edges inside. */
+.timeline__window {
+  position: absolute;
+  z-index: 1;
+  border: 1px solid;
+  border-radius: 8px;
+  pointer-events: none;
 }
 
 .timeline__playhead {
