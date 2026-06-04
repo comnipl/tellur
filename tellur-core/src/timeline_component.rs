@@ -636,22 +636,60 @@ static EVENT_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// resolve pass records the resolved time in a side table (`id → TimelineTime`),
 /// and components read it through the [`Clock`]. Being a plain id, it is a sound
 /// cache-key term (audit B5); the trigger *time* lives outside the component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// An optional `name` ([`Event::named`]) is a `&'static str` so the token stays
+/// `Copy`. It is carried purely for display — it surfaces on the arrangement's
+/// [`TriggerMark`]s so the live UI can label event markers — and is NOT part of
+/// the event identity (only [`id`](Self::id) is).
+#[derive(Debug, Clone, Copy)]
 pub struct Event {
     id: u64,
+    name: Option<&'static str>,
+}
+
+// Identity is the minted `id` ALONE: the `name` is a display annotation, never
+// part of equality/hash (so it is not a cache-key term either, audit B5). Two
+// `Event`s are equal iff their ids match — and ids are process-unique per mint.
+impl PartialEq for Event {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Event {}
+
+impl Hash for Event {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 impl Event {
-    /// Mints a fresh process-unique id.
+    /// Mints a fresh, unnamed process-unique id.
     pub fn new() -> Self {
         Self {
             id: EVENT_COUNTER.fetch_add(1, Ordering::Relaxed),
+            name: None,
+        }
+    }
+
+    /// Mints a fresh process-unique id carrying a display `name`. The name is
+    /// for UI labelling only; the identity is still the freshly minted id.
+    pub fn named(name: &'static str) -> Self {
+        Self {
+            id: EVENT_COUNTER.fetch_add(1, Ordering::Relaxed),
+            name: Some(name),
         }
     }
 
     /// The raw id, used by the resolve pass / [`TriggerTable`] as the key.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The optional display name bound at construction (`None` for [`Event::new`]).
+    pub fn name(&self) -> Option<&'static str> {
+        self.name
     }
 
     /// `now < trigger` (unfired ⇒ trigger is `+∞`, so always true).
@@ -790,7 +828,10 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
             TriggerKind::End => node.end,
             TriggerKind::At(local) => offset + local,
         };
-        node.triggers.push(at);
+        node.triggers.push(TriggerMark {
+            time: at,
+            name: self.event().name().map(::std::string::String::from),
+        });
         node
     }
 }
@@ -1379,11 +1420,22 @@ pub struct Cue {
     pub text: String,
 }
 
+/// One resolved [`Event`] marker on a node: the absolute time it fires, plus the
+/// event's optional display name (from [`Event::named`]) so the live UI can
+/// label the marker. The name is owned (`String`) so the arrangement is a
+/// self-contained, serializable snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriggerMark {
+    pub time: f32,
+    pub name: Option<String>,
+}
+
 /// What the live UI draws — the resolved arrangement of a node and its
 /// children. Built by walking the RESOLVED tree (`.sketch/01` A.7 / B.4).
 ///
 /// `trim` carries the source crop separately so the UI can show both the placed
-/// bar and the source crop; `triggers` surfaces where [`Event`]s fire.
+/// bar and the source crop; `triggers` surfaces where [`Event`]s fire (each a
+/// [`TriggerMark`] carrying the time and the event's optional name).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arrangement {
     pub kind: NodeKind,
@@ -1397,7 +1449,7 @@ pub struct Arrangement {
     pub start: f32,
     pub end: f32,
     pub trim: Option<(f32, f32)>,
-    pub triggers: Vec<f32>,
+    pub triggers: Vec<TriggerMark>,
     pub children: Vec<Arrangement>,
 }
 

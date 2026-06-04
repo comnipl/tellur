@@ -25,7 +25,7 @@ export interface Arrangement {
   start: number;
   end: number;
   trim: [number, number] | null;
-  triggers: number[];
+  triggers: { time: number; name: string | null }[];
   children: Arrangement[];
 }
 

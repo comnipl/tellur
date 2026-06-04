@@ -19,6 +19,7 @@
   --accent-pink: #ff4c82;
   --accent-pink-soft: #9a4b5f;
   --timeline-marker: #f03168;
+  --timeline-event: #2bd0d6;
   --accent-cache: #31d99b;
   --accent-clip: #7d98df;
   --accent-track-dot: #7392e8;
@@ -902,28 +903,51 @@ select option {
   z-index: 3;
 }
 
-/* Event trigger: a marker pinned to the trigger time on its node's lane
-   (e.g. the reveal fired at segment 2's boundary). The diamond head sits at the
-   top of the lane and a hairline drops through the clip. */
-.timeline__trigger {
+/* Timeline Event: a full-height dashed line spanning all lanes (drawn over the
+   clips, beneath the flag), with a flag pill pinned at the very top edge of the
+   tracks. The event accent (cyan) is deliberately distinct from the pink
+   playhead so the two never blend. The line element itself is the positioned
+   anchor; the flag is nested at its top. */
+.timeline__event {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 0;
-  border-left: 1px dashed var(--timeline-marker);
+  border-left: 1.5px dashed var(--timeline-event);
   pointer-events: none;
-  z-index: 2;
+  z-index: 4;
 }
 
-.timeline__trigger::before {
+/* Flag at the top edge of the tracks: a rounded pill with a Flag icon + name.
+   Sits at the line's x, sticking up at the very top (overlapping lane 0 is fine
+   — it must be the topmost, most visible element). z-index tops the playhead. */
+.timeline__event-flag {
   position: absolute;
-  top: 2px;
-  left: -4px;
-  width: 8px;
-  height: 8px;
-  content: "";
-  background: var(--timeline-marker);
-  transform: rotate(45deg);
+  top: 1px;
+  left: 0;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px 0 5px;
+  color: #062223;
+  background: var(--timeline-event);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+  transform: translateX(-1px);
+}
+
+.timeline__event-flag svg {
+  flex: 0 0 auto;
+}
+
+.timeline__event-name {
+  line-height: 1;
 }
 
 .zoom-bar {

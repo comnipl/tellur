@@ -1185,8 +1185,9 @@ fn node_kind_str(kind: NodeKind) -> &'static str {
 
 /// Serializes an [`Arrangement`] node and its children into the hand-built JSON
 /// the live UI consumes (audit B.4). Recurses over `children`; every float goes
-/// through [`finite_json_number`]; `trim` is `null` or `[a,b]`. Shape mirrored
-/// in `web/src/types.ts`.
+/// through [`finite_json_number`]; `trim` is `null` or `[a,b]`; each trigger is
+/// an object `{"time":<num>,"name":<null|string>}`. Shape mirrored in
+/// `web/src/types.ts`.
 fn arrangement_json(node: &Arrangement) -> String {
     let trim = match node.trim {
         Some((a, b)) => format!("[{},{}]", finite_json_number(a), finite_json_number(b)),
@@ -1195,7 +1196,17 @@ fn arrangement_json(node: &Arrangement) -> String {
     let triggers = node
         .triggers
         .iter()
-        .map(|t| finite_json_number(*t))
+        .map(|t| {
+            let name = match &t.name {
+                Some(n) => format!("\"{}\"", json_escape(n)),
+                None => "null".to_owned(),
+            };
+            format!(
+                "{{\"time\":{},\"name\":{}}}",
+                finite_json_number(t.time),
+                name,
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
     let children = node
@@ -1248,6 +1259,7 @@ fn json_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tellur_core::timeline_component::TriggerMark;
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
     // overlay timeline with a video child (a source crop) and a sequence of two
@@ -1303,7 +1315,18 @@ mod tests {
                             start: 3.0,
                             end: 6.0,
                             trim: None,
-                            triggers: vec![3.0],
+                            // A named trigger exercises the string branch; an
+                            // anonymous one covers the `null` branch.
+                            triggers: vec![
+                                TriggerMark {
+                                    time: 3.0,
+                                    name: Some("reveal".to_owned()),
+                                },
+                                TriggerMark {
+                                    time: 4.0,
+                                    name: None,
+                                },
+                            ],
                             children: Vec::new(),
                         },
                     ],
@@ -1321,7 +1344,10 @@ mod tests {
             "{\"kind\":\"caption\",\"label\":\"one\",\"name\":null,\"start\":0,\"end\":3,",
             "\"trim\":null,\"triggers\":[],\"children\":[]},",
             "{\"kind\":\"caption\",\"label\":\"two\",\"name\":null,\"start\":3,\"end\":6,",
-            "\"trim\":null,\"triggers\":[3],\"children\":[]}",
+            "\"trim\":null,\"triggers\":[",
+            "{\"time\":3,\"name\":\"reveal\"},",
+            "{\"time\":4,\"name\":null}",
+            "],\"children\":[]}",
             "]}",
             "]}"
         );
@@ -1340,12 +1366,15 @@ mod tests {
             start: f32::INFINITY,
             end: f32::NAN,
             trim: None,
-            triggers: vec![f32::INFINITY],
+            triggers: vec![TriggerMark {
+                time: f32::INFINITY,
+                name: None,
+            }],
             children: Vec::new(),
         };
         let json = arrangement_json(&arrangement);
         assert!(json.contains("\"start\":0"));
         assert!(json.contains("\"end\":0"));
-        assert!(json.contains("\"triggers\":[0]"));
+        assert!(json.contains("\"triggers\":[{\"time\":0,\"name\":null}]"));
     }
 }

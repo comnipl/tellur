@@ -186,7 +186,8 @@ fn Reveal(#[clock] clock: Clock, #[builder(into)] line: String, event: Event) ->
 /// reveal that fades in when the second segment starts.
 pub fn build() -> impl TimelineComponent + Send {
     // The one explicit handle — a structural moment bound to segment 2's start.
-    let reveal = Event::new();
+    // Named so the live UI can label the reveal marker in the arrangement.
+    let reveal = Event::named("reveal");
 
     Timeline::builder()
         // Full-frame animated background, spanning the whole piece.

@@ -907,7 +907,7 @@ mod tests {
     // surface segment-2's resolved start in its `triggers`.
     #[test]
     fn arrangement_stamps_resolved_starts_ends_and_triggers() {
-        use crate::timeline_component::{Event, NodeKind, Triggers};
+        use crate::timeline_component::{Event, NodeKind, TriggerMark, Triggers};
 
         let e = Event::new();
         let root = Timeline::builder()
@@ -944,8 +944,15 @@ mod tests {
         assert_eq!((seq.children[1].start, seq.children[1].end), (3.0, 6.0));
         assert_eq!((seq.children[2].start, seq.children[2].end), (6.0, 9.0));
 
-        // Segment-2's trigger fires at its resolved start (3.0).
-        assert_eq!(seq.children[1].triggers, vec![3.0]);
+        // Segment-2's trigger fires at its resolved start (3.0); the event is
+        // unnamed (`Event::new`), so the mark carries `None`.
+        assert_eq!(
+            seq.children[1].triggers,
+            vec![TriggerMark {
+                time: 3.0,
+                name: None
+            }]
+        );
         // The untriggered segments carry no triggers.
         assert!(seq.children[0].triggers.is_empty());
         assert!(seq.children[2].triggers.is_empty());

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ChevronDown, ChevronRight, Component } from "lucide-react";
+import { ChevronDown, ChevronRight, Component, Flag } from "lucide-react";
 import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
@@ -30,13 +30,20 @@ interface TimelineProps {
 // the title clip and every descendant clip), so window frames are derived from
 // clip ownership rather than lane tags — two time-disjoint expanded windows can
 // then share the same lanes yet still each draw their own box.
+// A timeline Event firing: an absolute time and an optional name. Collected
+// from the whole arrangement tree (independent of collapse/lane state) and drawn
+// at the timeline level as a full-height line + a flag at the very top.
+interface TimelineEvent {
+  time: number;
+  name: string | null;
+}
+
 interface Clip {
   id: string;
   start: number;
   end: number;
   name: string;
   kind: NodeKind;
-  triggers: number[];
   trim: [number, number] | null;
   collapsedNode: string | null;
   isTitle: boolean;
@@ -155,7 +162,6 @@ function leafClip(node: Arrangement, path: string): Clip {
     end: node.end,
     name: displayName(node),
     kind: node.kind,
-    triggers: node.triggers,
     trim: node.trim,
     collapsedNode: null,
     isTitle: false,
@@ -176,7 +182,6 @@ function titleClip(node: Arrangement, path: string): Clip {
     end: node.end,
     name: displayName(node),
     kind: node.kind,
-    triggers: node.triggers,
     trim: node.trim,
     collapsedNode: path,
     isTitle: true,
@@ -218,7 +223,6 @@ function layout(
           end: node.end,
           name: displayName(node),
           kind: node.kind,
-          triggers: node.triggers,
           trim: node.trim,
           collapsedNode: path,
           isTitle: false,
@@ -439,6 +443,25 @@ function collectLeafContainerPaths(
   );
 }
 
+// DFS-collect every Event firing across the whole tree, deduped by time+name.
+// Independent of collapse/lane state, so events render at the timeline level
+// regardless of which containers are open.
+function collectEvents(root: Arrangement): TimelineEvent[] {
+  const seen = new Set<string>();
+  const out: TimelineEvent[] = [];
+  const visit = (node: Arrangement) => {
+    for (const t of node.triggers) {
+      const key = `${t.time}:${t.name ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ time: t.time, name: t.name });
+    }
+    node.children.forEach(visit);
+  };
+  visit(root);
+  return out;
+}
+
 // Rail / clip label for a content lane: the shared display name when every clip
 // agrees, else the shared capitalized kind, else nothing.
 function contentLaneLabel(lane: Lane): string {
@@ -521,6 +544,9 @@ export function Timeline(props: TimelineProps) {
   const { lanes, frames } = arrangement
     ? computeLanes(arrangement, collapsed)
     : { lanes: [], frames: [] };
+
+  // Events are collected from the whole tree, independent of collapse/lane state.
+  const events = arrangement ? collectEvents(arrangement) : [];
 
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
@@ -850,21 +876,6 @@ export function Timeline(props: TimelineProps) {
                         );
                       })}
                     </AnimatePresence>
-                    {/* Triggers sit at track level (full-width coords) so their
-                        diamond heads are not clipped by the clip's overflow. */}
-                    {lane.clips.flatMap((clip) =>
-                      clip.triggers.map((t, index) => (
-                        <div
-                          key={`${clip.id}:${index}`}
-                          className="timeline__trigger"
-                          title={`Event @ ${t.toFixed(3)}s`}
-                          style={{
-                            left: `${(clamp(t, 0, duration) / duration) *
-                              innerWidth}px`,
-                          }}
-                        />
-                      )),
-                    )}
                   </div>
                 );
               })
@@ -935,6 +946,32 @@ export function Timeline(props: TimelineProps) {
               );
             })}
           </AnimatePresence>
+          {/* Timeline Events: a full-height line spanning all lanes plus a flag
+              pinned at the very top. Rendered inside `.timeline__tracks` so they
+              pan/zoom with the playhead. The flag carries the event name and an
+              accent distinct from the pink playhead. */}
+          {events.map((event) => {
+            const x = (clamp(event.time, 0, duration) / duration) * innerWidth;
+            const label = event.name ?? "Event";
+            return (
+              <div
+                key={`event:${event.time}:${event.name ?? ""}`}
+                className="timeline__event"
+                style={{ left: `${x}px` }}
+              >
+                <motion.div
+                  className="timeline__event-flag"
+                  title={`Event "${label}" @ ${event.time.toFixed(3)}s`}
+                  initial={{ opacity: 0, y: reduceMotion ? 0 : -6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={fadeIn}
+                >
+                  <Flag size={12} strokeWidth={2} />
+                  <span className="timeline__event-name">{label}</span>
+                </motion.div>
+              </div>
+            );
+          })}
           <div
             className="timeline__playhead"
             style={{ left: `${playheadX}px` }}
