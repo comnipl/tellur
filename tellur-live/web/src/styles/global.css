@@ -661,7 +661,7 @@ select option {
 
 .track-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   height: var(--track-h);
   margin: 0 10px;
@@ -673,6 +673,40 @@ select option {
 
 .track-head--empty {
   visibility: hidden;
+}
+
+/* Grouping-container header rows are de-emphasized vs content rows: no clip
+   band sits beside them, so the lighter text reads as a section label. */
+.track-head--group {
+  background: transparent;
+}
+
+.track-head--group .track-head__name {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.track-head__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.track-head__chevron:hover {
+  color: var(--text-primary);
+}
+
+/* Keep content-row names aligned with header-row names under the chevron
+   column by reserving the same leading 14px slot. */
+.track-head__chevron-spacer {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
 }
 
 .track-head__name {
@@ -740,6 +774,13 @@ select option {
   border-radius: 4px;
 }
 
+/* Collapsed-container summary clip: dimmer band + pointer cursor to signal it
+   re-expands on click (the label is prefixed with a ▸ chevron in the markup). */
+.timeline__clip--summary {
+  background: var(--accent-pink-soft);
+  cursor: pointer;
+}
+
 .timeline__clip-label {
   min-width: 0;
   overflow: hidden;
@@ -749,6 +790,17 @@ select option {
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Faint full-row hairline behind a grouping-container header row, so the empty
+   track still reads as part of the group band. */
+.timeline__group-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border-subtle);
 }
 
 .timeline__playhead {
