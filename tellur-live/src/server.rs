@@ -1176,7 +1176,6 @@ fn node_kind_str(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Video => "video",
         NodeKind::Audio => "audio",
-        NodeKind::Caption => "caption",
         NodeKind::Subtitle => "subtitle",
         NodeKind::Timeline => "timeline",
         NodeKind::Sequence => "sequence",
@@ -1316,7 +1315,7 @@ mod tests {
                     triggers: Vec::new(),
                     children: vec![
                         Arrangement {
-                            kind: NodeKind::Caption,
+                            kind: NodeKind::Video,
                             label: "one".to_owned(),
                             name: None,
                             source: None,
@@ -1327,7 +1326,7 @@ mod tests {
                             children: Vec::new(),
                         },
                         Arrangement {
-                            kind: NodeKind::Caption,
+                            kind: NodeKind::Video,
                             label: "two".to_owned(),
                             name: None,
                             source: None,
@@ -1360,9 +1359,9 @@ mod tests {
             "\"trim\":[1,3],\"triggers\":[],\"children\":[]},",
             "{\"kind\":\"sequence\",\"label\":\"\",\"name\":null,\"source\":null,\"start\":0,\"end\":6,",
             "\"trim\":null,\"triggers\":[],\"children\":[",
-            "{\"kind\":\"caption\",\"label\":\"one\",\"name\":null,\"source\":null,\"start\":0,\"end\":3,",
+            "{\"kind\":\"video\",\"label\":\"one\",\"name\":null,\"source\":null,\"start\":0,\"end\":3,",
             "\"trim\":null,\"triggers\":[],\"children\":[]},",
-            "{\"kind\":\"caption\",\"label\":\"two\",\"name\":null,\"source\":null,\"start\":3,\"end\":6,",
+            "{\"kind\":\"video\",\"label\":\"two\",\"name\":null,\"source\":null,\"start\":3,\"end\":6,",
             "\"trim\":null,\"triggers\":[",
             "{\"time\":3,\"name\":\"reveal\"},",
             "{\"time\":4,\"name\":null}",
@@ -1379,7 +1378,7 @@ mod tests {
         // `finite_json_number` guards every float, so an unfired/absent length
         // (∞ / NaN) never leaks a non-JSON token.
         let arrangement = Arrangement {
-            kind: NodeKind::Caption,
+            kind: NodeKind::Video,
             label: String::new(),
             name: None,
             source: None,

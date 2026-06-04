@@ -642,10 +642,11 @@ mod tests {
         assert_eq!(root.end, 3.0);
         assert!(root.trim.is_none());
 
-        // Two children, each a Caption-kind visual leaf (via the blanket).
+        // Two children, each a Video-kind visual leaf (via the blanket): a
+        // timeless visual lives on the video (映像) track.
         assert_eq!(root.children.len(), 2);
         for child in &root.children {
-            assert_eq!(child.kind, NodeKind::Caption);
+            assert_eq!(child.kind, NodeKind::Video);
             assert!(child.children.is_empty());
         }
     }

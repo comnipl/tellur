@@ -258,11 +258,13 @@ where
     }
 
     fn arrangement(&self, offset: f32) -> Arrangement {
-        // A timeless visual surfaces as a Caption-kind node. Un-windowed it is
+        // A timeless visual surfaces as a Video-kind node — every rasterized
+        // visual (a backdrop, a caption telop, a reveal) lives on the video
+        // (映像) track; there is no separate caption kind. Un-windowed it is
         // 0-length; the wrapping `Placed` stamps its real window end (mirrors the
         // `cues` zero-length-point + window-end-stamp pattern).
         Arrangement {
-            kind: NodeKind::Caption,
+            kind: NodeKind::Video,
             // TODO(task 6): carry a real label (e.g. the concrete type name).
             label: String::new(),
             // A `#[component(raster)]` overrides `arrangement_name` to surface
@@ -1623,11 +1625,16 @@ pub struct Arrangement {
 }
 
 /// The kind of node the live UI renders.
+///
+/// The display side collapses to three TRACK kinds — `Video` (映像: every
+/// rasterized/timeless visual, including backdrops, captions, and reveals),
+/// `Audio` (音声), and `Subtitle` (字幕) — plus the two structural containers
+/// (`Timeline` / `Sequence`). There is intentionally no separate caption kind:
+/// a styled `Text` telop is a visual and lives on the video track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Video,
     Audio,
-    Caption,
     Subtitle,
     Timeline,
     Sequence,
@@ -1680,7 +1687,7 @@ mod tests {
         assert_eq!(boxed.duration(), None);
         assert_eq!(boxed.measure(), None);
         assert_eq!(boxed.cues(0.0), Vec::new());
-        assert_eq!(boxed.arrangement(0.0).kind, NodeKind::Caption);
+        assert_eq!(boxed.arrangement(0.0).kind, NodeKind::Video);
         // A plain raster primitive has no display name; only a
         // `#[component(...)]` overrides `arrangement_name`.
         assert_eq!(boxed.arrangement(0.0).name, None);
@@ -1927,7 +1934,7 @@ mod tests {
         assert_eq!(beat.measure(), Some(5.0));
         assert_eq!(beat.cues(0.0), Vec::new());
         let node = beat.arrangement(0.0);
-        assert_eq!(node.kind, NodeKind::Caption);
+        assert_eq!(node.kind, NodeKind::Video);
         // The delegated node is relabeled with the auto-derived component name
         // (the PascalCase ident), not the inner body's empty caption label.
         assert_eq!(node.name.as_deref(), Some("Beat"));
@@ -1951,7 +1958,7 @@ mod tests {
         assert_eq!(a.arrangement(0.0).name.as_deref(), Some("Shot 1: intro"));
         assert_eq!(b.arrangement(0.0).name.as_deref(), Some("Shot 7: outro"));
         // The template only relabels — it adds no tree level and preserves kind.
-        assert_eq!(a.arrangement(0.0).kind, NodeKind::Caption);
+        assert_eq!(a.arrangement(0.0).kind, NodeKind::Video);
         assert!(a.arrangement(0.0).children.is_empty());
     }
 
@@ -2313,7 +2320,7 @@ mod event_path_tests {
         // never panic / NaN.
         assert_eq!(reveal.duration(), None, "the baked visual is timeless");
         assert_eq!(reveal.measure(), None);
-        assert_eq!(reveal.arrangement(0.0).kind, NodeKind::Caption);
+        assert_eq!(reveal.arrangement(0.0).kind, NodeKind::Video);
         assert!(reveal.cues(0.0).is_empty());
 
         // `resolve` on the wrapper recurses into the structural visual without
