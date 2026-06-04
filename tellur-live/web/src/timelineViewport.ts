@@ -1,4 +1,6 @@
-export const MIN_TIMELINE_ZOOM = 1;
+// Zoom < 1 shrinks the whole timeline NARROWER than the viewport (content
+// left-aligned, empty space to the right); zoom 1 fits it exactly.
+export const MIN_TIMELINE_ZOOM = 0.2;
 export const MAX_TIMELINE_ZOOM = 20;
 
 export interface TimelineViewport {
@@ -21,6 +23,8 @@ export function clampTimelineViewport(
     MAX_TIMELINE_ZOOM,
   );
   const visibleDuration = getVisibleDuration(safeDuration, zoom);
+  // At zoom < 1 the visible window exceeds the content, so maxStart is 0 and
+  // `start` clamps to 0 — the content is left-aligned with no pan room.
   const maxStart = Math.max(0, safeDuration - visibleDuration);
 
   return {

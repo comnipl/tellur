@@ -903,11 +903,10 @@ select option {
   z-index: 3;
 }
 
-/* Timeline Event: a full-height dashed line spanning all lanes (drawn over the
-   clips, beneath the flag), with a flag pill pinned at the very top edge of the
-   tracks. The event accent (cyan) is deliberately distinct from the pink
-   playhead so the two never blend. The line element itself is the positioned
-   anchor; the flag is nested at its top. */
+/* Timeline Event reference line: a full-height dashed line spanning all lanes,
+   drawn over the clips and beneath the flags. One per DISTINCT trigger time. The
+   event accent (cyan) is deliberately distinct from the pink playhead so the two
+   never blend. */
 .timeline__event {
   position: absolute;
   top: 0;
@@ -918,13 +917,14 @@ select option {
   z-index: 4;
 }
 
-/* Flag at the top edge of the tracks: a rounded pill with a Flag icon + name.
-   Sits at the line's x, sticking up at the very top (overlapping lane 0 is fine
-   — it must be the topmost, most visible element). z-index tops the playhead. */
+/* Event flag: a rounded cyan pill (Flag icon + name) rendered at TRACK level and
+   pinned to the top of its emitting clip's lane, sticking UP slightly so it
+   points at the clip that raised the Event. Positioned at the trigger's x within
+   the track; the negative `top` lifts it just above the lane's top edge. High
+   z-index keeps it above clips and the playhead. */
 .timeline__event-flag {
   position: absolute;
-  top: 1px;
-  left: 0;
+  top: -6px;
   z-index: 6;
   display: inline-flex;
   align-items: center;

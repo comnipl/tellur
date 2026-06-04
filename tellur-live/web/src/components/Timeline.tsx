@@ -30,9 +30,8 @@ interface TimelineProps {
 // the title clip and every descendant clip), so window frames are derived from
 // clip ownership rather than lane tags — two time-disjoint expanded windows can
 // then share the same lanes yet still each draw their own box.
-// A timeline Event firing: an absolute time and an optional name. Collected
-// from the whole arrangement tree (independent of collapse/lane state) and drawn
-// at the timeline level as a full-height line + a flag at the very top.
+// A timeline Event firing: an absolute time and an optional name. Carried on the
+// emitting clip so the flag can be anchored directly above that clip.
 interface TimelineEvent {
   time: number;
   name: string | null;
@@ -45,6 +44,8 @@ interface Clip {
   name: string;
   kind: NodeKind;
   trim: [number, number] | null;
+  // Events fired by this clip's node, drawn as a flag above the clip's top edge.
+  triggers: TimelineEvent[];
   collapsedNode: string | null;
   isTitle: boolean;
   frameOwner: string | null;
@@ -91,6 +92,10 @@ interface Frame {
 // Row height in px, matching `--track-h`. Tracks stack with no vertical gap, so
 // frame top/height are exact multiples of this.
 const TRACK_H = 28;
+
+// Min px a sticky clip label keeps inside the clip's right edge, so it never
+// slides off the end of a partly-scrolled clip.
+const LABEL_RESERVE = 24;
 
 // Per-NodeKind colors. Containers (timeline/sequence) are green ("components");
 // caption yellow, subtitle a warm orange, video blue, audio red. Light fills get
@@ -163,6 +168,7 @@ function leafClip(node: Arrangement, path: string): Clip {
     name: displayName(node),
     kind: node.kind,
     trim: node.trim,
+    triggers: node.triggers,
     collapsedNode: null,
     isTitle: false,
     frameOwner: null,
@@ -183,6 +189,7 @@ function titleClip(node: Arrangement, path: string): Clip {
     name: displayName(node),
     kind: node.kind,
     trim: node.trim,
+    triggers: node.triggers,
     collapsedNode: path,
     isTitle: true,
     frameOwner: null,
@@ -224,6 +231,7 @@ function layout(
           name: displayName(node),
           kind: node.kind,
           trim: node.trim,
+          triggers: node.triggers,
           collapsedNode: path,
           isTitle: false,
           frameOwner: null,
@@ -443,23 +451,17 @@ function collectLeafContainerPaths(
   );
 }
 
-// DFS-collect every Event firing across the whole tree, deduped by time+name.
-// Independent of collapse/lane state, so events render at the timeline level
-// regardless of which containers are open.
-function collectEvents(root: Arrangement): TimelineEvent[] {
-  const seen = new Set<string>();
-  const out: TimelineEvent[] = [];
-  const visit = (node: Arrangement) => {
-    for (const t of node.triggers) {
-      const key = `${t.time}:${t.name ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ time: t.time, name: t.name });
+// The distinct trigger times across all currently-rendered clips, so the full-
+// height reference lines are drawn once per time (deduped) even when several
+// clips fire at the same instant — each clip still gets its own flag.
+function eventLineTimes(lanes: Lane[]): number[] {
+  const times = new Set<number>();
+  for (const lane of lanes) {
+    for (const clip of lane.clips) {
+      for (const t of clip.triggers) times.add(t.time);
     }
-    node.children.forEach(visit);
-  };
-  visit(root);
-  return out;
+  }
+  return [...times];
 }
 
 // Rail / clip label for a content lane: the shared display name when every clip
@@ -545,18 +547,20 @@ export function Timeline(props: TimelineProps) {
     ? computeLanes(arrangement, collapsed)
     : { lanes: [], frames: [] };
 
-  // Events are collected from the whole tree, independent of collapse/lane state.
-  const events = arrangement ? collectEvents(arrangement) : [];
+  // Distinct trigger times → one deduped full-height reference line each.
+  const eventTimes = eventLineTimes(lanes);
 
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
     duration,
     normalizedViewport.zoom,
   );
-  const innerWidth = Math.max(
-    bodyWidth * normalizedViewport.zoom,
-    bodyWidth,
-  );
+  // No viewport-width floor: at zoom < 1 the content shrinks NARROWER than the
+  // viewport (left-aligned, empty space to the right). A tiny absolute floor
+  // keeps projections finite.
+  const innerWidth = Math.max(bodyWidth * normalizedViewport.zoom, 16);
+  // When the content is narrower than the viewport there is nothing to pan, so
+  // `innerWidth - bodyWidth` is negative and this clamps to 0 (left-aligned).
   const viewportX = clamp(
     (normalizedViewport.start / duration) * innerWidth,
     0,
@@ -664,14 +668,14 @@ export function Timeline(props: TimelineProps) {
     ],
   );
 
-  // Motion transitions for the expand/collapse choreography. Tuned to be flashy
-  // but SNAPPY (派手でサクサク): a stiff, low-mass, slightly under-damped spring
-  // settles in ~150–200ms with a touch of overshoot, and fades are short. Under
+  // Motion transitions for the expand/collapse choreography. Snappy but clean:
+  // position/size/scaleY ride an ease-out tween (easeOutQuint) that decelerates
+  // to the target with NO overshoot/bounce; fades are short tweens. Under
   // reduced-motion every transition is instant. `nestedDelay` lightly staggers a
   // window's child bars so the box "unfolds" without dragging.
-  const layoutSpring = reduceMotion
+  const layoutEase = reduceMotion
     ? { duration: 0 }
-    : ({ type: "spring", stiffness: 900, damping: 30, mass: 0.5 } as const);
+    : ({ type: "tween", duration: 0.2, ease: [0.22, 1, 0.36, 1] } as const);
   const fadeIn = reduceMotion
     ? { duration: 0 }
     : ({ duration: 0.12, ease: [0.22, 1, 0.36, 1] } as const);
@@ -774,8 +778,9 @@ export function Timeline(props: TimelineProps) {
                 return (
                   <div key={lane.id} className="timeline__track">
                     {/* AnimatePresence lets a window's child/title bars fade +
-                        rise in on expand and out on collapse; surviving bars
-                        glide via the layoutSpring on left/width. */}
+                        rise in on expand and out on collapse. Horizontal
+                        position (left/width) is a plain style so pan/zoom is
+                        instant; only opacity/y animate. */}
                     <AnimatePresence initial={false}>
                       {lane.clips.map((clip) => {
                         // Exact time->x projection — NO horizontal inset, so a
@@ -808,28 +813,40 @@ export function Timeline(props: TimelineProps) {
                         else if (toggles)
                           classes.push("timeline__clip--summary");
                         if (nested) classes.push("timeline__clip--nested");
+                        // Sticky label: the track is translated by -viewportX, so
+                        // a clip at inline `left` shows at screen-x `left -
+                        // viewportX`. When its start is scrolled off the left
+                        // (left < viewportX), push the label right so it stays at
+                        // the viewport edge, but never past `width - LABEL_RESERVE`
+                        // so it stops at the clip's right end.
+                        const stickyOffset = clamp(
+                          viewportX - left,
+                          0,
+                          Math.max(0, width - LABEL_RESERVE),
+                        );
                         return (
                           <motion.div
                             key={clip.id}
                             className={classes.join(" ")}
-                            style={{ background: color.fill, color: color.text }}
-                            // Position is driven by motion so reflows glide.
-                            initial={{
+                            // `left`/`width` are the time->x projection: plain
+                            // inline styles (NOT animated) so pan/zoom updates
+                            // them instantly with no catch-up tween. Only the
+                            // open/close props (opacity, y) animate.
+                            style={{
                               left,
                               width,
-                              opacity: 0,
-                              y: reduceMotion ? 0 : -6,
+                              background: color.fill,
+                              color: color.text,
                             }}
-                            animate={{ left, width, opacity: 1, y: 0 }}
+                            initial={{ opacity: 0, y: reduceMotion ? 0 : -6 }}
+                            animate={{ opacity: 1, y: 0 }}
                             exit={{
                               opacity: 0,
                               y: reduceMotion ? 0 : -6,
                               transition: fadeOut,
                             }}
                             transition={{
-                              left: layoutSpring,
-                              width: layoutSpring,
-                              y: layoutSpring,
+                              y: layoutEase,
                               // Stagger nested bars so the window unfolds.
                               opacity: nested
                                 ? { ...fadeIn, delay: nestedDelay(laneIndex) }
@@ -869,13 +886,45 @@ export function Timeline(props: TimelineProps) {
                                 <Component size={13} strokeWidth={2} />
                               </span>
                             ) : null}
-                            <span className="timeline__clip-label">
+                            <span
+                              className="timeline__clip-label"
+                              style={{
+                                transform: `translateX(${stickyOffset}px)`,
+                              }}
+                            >
                               {clip.name}
                             </span>
                           </motion.div>
                         );
                       })}
                     </AnimatePresence>
+                    {/* Per-clip flags, rendered at TRACK level (not inside the
+                        clip, whose overflow:hidden would clip them) so each flag
+                        sticks UP above its emitting clip's top edge at the
+                        trigger's x. The track is full-width, so the flag's left
+                        is the absolute trigger projection; it tracks the clip on
+                        pan/zoom since the whole tracks layer is translated. */}
+                    {lane.clips.flatMap((clip) =>
+                      clip.triggers.map((trigger, i) => {
+                        const triggerX =
+                          (clamp(trigger.time, 0, duration) / duration) *
+                          innerWidth;
+                        const flagLabel = trigger.name ?? "Event";
+                        return (
+                          <span
+                            key={`flag:${clip.id}:${i}`}
+                            className="timeline__event-flag"
+                            title={`Event "${flagLabel}" @ ${trigger.time.toFixed(3)}s`}
+                            style={{ left: `${triggerX}px` }}
+                          >
+                            <Flag size={12} strokeWidth={2} />
+                            <span className="timeline__event-name">
+                              {flagLabel}
+                            </span>
+                          </span>
+                        );
+                      }),
+                    )}
                   </div>
                 );
               })
@@ -895,7 +944,8 @@ export function Timeline(props: TimelineProps) {
               under the clips (pointer-events:none) so clicks still reach the
               title-bar chevron and child clips. AnimatePresence grows the box
               in from the title bar (transform-origin top) on expand and shrinks
-              it out on collapse; left/width/top/height glide via layoutSpring. */}
+              it out on collapse; only top/height/scaleY (the vertical grow) glide
+              via layoutEase — left/width are instant for pan/zoom. */}
           <AnimatePresence initial={false}>
             {frames.map((frame) => {
               const left = (clamp(frame.start, 0, duration) / duration) *
@@ -914,31 +964,33 @@ export function Timeline(props: TimelineProps) {
                 <motion.div
                   key={`frame:${frame.path}`}
                   className="timeline__window"
+                  // `left`/`width` are the time->x projection: plain inline
+                  // styles (NOT animated) so pan/zoom updates them instantly.
+                  // Only the open/close props (top, height, scaleY, opacity —
+                  // the vertical grow/reflow) animate via layoutEase/fades.
                   style={{
+                    left,
+                    width,
                     borderColor: color.border,
                     background: color.tint,
                     transformOrigin: "top",
                   }}
                   initial={{
-                    left,
-                    width,
                     top,
                     height,
                     opacity: 0,
                     scaleY: reduceMotion ? 1 : 0.4,
                   }}
-                  animate={{ left, width, top, height, opacity: 1, scaleY: 1 }}
+                  animate={{ top, height, opacity: 1, scaleY: 1 }}
                   exit={{
                     opacity: 0,
                     scaleY: reduceMotion ? 1 : 0.4,
                     transition: fadeOut,
                   }}
                   transition={{
-                    left: layoutSpring,
-                    width: layoutSpring,
-                    top: layoutSpring,
-                    height: layoutSpring,
-                    scaleY: layoutSpring,
+                    top: layoutEase,
+                    height: layoutEase,
+                    scaleY: layoutEase,
                     opacity: fadeIn,
                     default: fadeIn,
                   }}
@@ -946,30 +998,19 @@ export function Timeline(props: TimelineProps) {
               );
             })}
           </AnimatePresence>
-          {/* Timeline Events: a full-height line spanning all lanes plus a flag
-              pinned at the very top. Rendered inside `.timeline__tracks` so they
-              pan/zoom with the playhead. The flag carries the event name and an
-              accent distinct from the pink playhead. */}
-          {events.map((event) => {
-            const x = (clamp(event.time, 0, duration) / duration) * innerWidth;
-            const label = event.name ?? "Event";
+          {/* Event reference lines: one full-height cyan line per DISTINCT
+              trigger time (deduped so coincident clips don't double-draw the
+              line). Each emitting clip still gets its own flag above it (above).
+              Rendered inside `.timeline__tracks` so they pan/zoom with the
+              playhead; the cyan accent stays distinct from the pink playhead. */}
+          {eventTimes.map((time) => {
+            const x = (clamp(time, 0, duration) / duration) * innerWidth;
             return (
               <div
-                key={`event:${event.time}:${event.name ?? ""}`}
+                key={`event-line:${time}`}
                 className="timeline__event"
                 style={{ left: `${x}px` }}
-              >
-                <motion.div
-                  className="timeline__event-flag"
-                  title={`Event "${label}" @ ${event.time.toFixed(3)}s`}
-                  initial={{ opacity: 0, y: reduceMotion ? 0 : -6 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={fadeIn}
-                >
-                  <Flag size={12} strokeWidth={2} />
-                  <span className="timeline__event-name">{label}</span>
-                </motion.div>
-              </div>
+              />
             );
           })}
           <div
