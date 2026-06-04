@@ -6,7 +6,7 @@ import {
   useMotionValue,
   useReducedMotion,
 } from "motion/react";
-import { ChevronDown, ChevronRight, Component, Flag } from "lucide-react";
+import { ChevronRight, Component, Flag } from "lucide-react";
 import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
@@ -771,6 +771,11 @@ export function Timeline(props: TimelineProps) {
     : ({ duration: 0.1, ease: "easeIn" } as const);
   const nestedDelay = (laneIndex: number) =>
     reduceMotion ? 0 : Math.min(laneIndex * 0.015, 0.05);
+  // Collapse-handle chevron spin: rotates between collapsed/expanded on the same
+  // ease-out curve; instant under reduced-motion.
+  const chevronSpin = reduceMotion
+    ? { duration: 0 }
+    : ({ type: "tween", duration: 0.18, ease: [0.22, 1, 0.36, 1] } as const);
 
   return (
     <section className="timeline">
@@ -814,11 +819,16 @@ export function Timeline(props: TimelineProps) {
                       e.currentTarget.blur();
                     }}
                   >
-                    {isCollapsed ? (
+                    {/* One chevron that ROTATES between states (0deg collapsed →
+                        90deg expanded) instead of swapping glyphs, so the handle
+                        turns smoothly on toggle. Snap under reduced-motion. */}
+                    <motion.span
+                      className="track-head__chevron-icon"
+                      animate={{ rotate: isCollapsed ? 0 : 90 }}
+                      transition={chevronSpin}
+                    >
                       <ChevronRight size={13} strokeWidth={2} />
-                    ) : (
-                      <ChevronDown size={13} strokeWidth={2} />
-                    )}
+                    </motion.span>
                   </button>
                 ) : (
                   <span className="track-head__chevron-spacer" />
@@ -1006,11 +1016,19 @@ export function Timeline(props: TimelineProps) {
                                   e.currentTarget.blur();
                                 }}
                               >
-                                {clipCollapsed ? (
+                                {/* Rotate one chevron (0deg collapsed → 90deg
+                                    expanded) rather than swapping glyphs. The
+                                    rotation lives on this inner span, NOT the
+                                    button (the button keeps its sticky
+                                    translateX), so #3's sticky offset is intact.
+                                    Snap under reduced-motion. */}
+                                <motion.span
+                                  className="timeline__clip-toggle-icon"
+                                  animate={{ rotate: clipCollapsed ? 0 : 90 }}
+                                  transition={chevronSpin}
+                                >
                                   <ChevronRight size={13} strokeWidth={2} />
-                                ) : (
-                                  <ChevronDown size={13} strokeWidth={2} />
-                                )}
+                                </motion.span>
                               </button>
                             ) : null}
                             {toggles ? (

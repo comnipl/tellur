@@ -29,7 +29,7 @@
   --viewer-h: 448px;
   --scrubber-h: 18px;
   --transport-h: 46px;
-  --tabs-h: 60px;
+  --tabs-h: 50px;
   --track-h: 28px;
   --footer-h: 34px;
   --side-w: 220px;
@@ -702,16 +702,17 @@ select option {
    would otherwise slide under it. */
 .tabsrow__viewport-start {
   position: absolute;
-  /* Bottom-anchored above the cache strip; the row's extra height gives the
-     time/frame text top/bottom breathing room instead of feeling cramped. */
-  bottom: 8px;
+  /* Sit ABOVE the playhead/cache band (bottom ~14px) and give the text real
+     top/bottom padding so it doesn't crowd the row top or the green cache strip
+     below. Height is content-driven (no fixed height) so the padding actually
+     opens up space around the labels. */
+  bottom: 14px;
   left: 0;
   z-index: 2;
   display: inline-flex;
   align-items: flex-end;
   gap: 1px;
-  height: 28px;
-  padding-right: 6px;
+  padding: 3px 6px 3px 0;
   background: var(--bg-panel);
   color: var(--text-secondary);
   pointer-events: none;
@@ -721,11 +722,12 @@ select option {
 .tabsrow__viewport-start-text {
   display: inline-flex;
   flex-direction: column;
+  gap: 2px;
   font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   letter-spacing: 0;
-  line-height: 1.15;
+  line-height: 1.3;
 }
 
 .tabsrow__viewport-start-frame {
@@ -754,10 +756,13 @@ select option {
 
 .tabsrow__playhead-line {
   position: absolute;
-  /* Don't pierce the top edge: start below the top padding so the pink line runs
-     through the ruler/cache but stops short of the row's top. */
-  top: 10px;
+  /* Must NOT cross the ruler's time labels. The labels sit in the upper part of
+     the row; the line lives only in the bottom band — from just above the green
+     cache strip down to the row's bottom edge (continuing into the tracks
+     below) — so it never overlaps the text. */
+  top: auto;
   bottom: 0;
+  height: 12px;
   width: 1px;
   background: var(--timeline-marker);
   z-index: 4;
@@ -766,9 +771,9 @@ select option {
 .tabsrow__chip {
   position: absolute;
   /* Bottom-anchored at the same baseline as the ruler ticks / pinned readout
-     (above the cache strip) — they share one band, the chip just overlays on
-     top (highest z). */
-  bottom: 8px;
+     (above the playhead/cache band) — they share one band, the chip just
+     overlays on top (highest z). */
+  bottom: 14px;
   z-index: 5;
   display: inline-flex;
   flex-direction: column;
@@ -825,33 +830,36 @@ select option {
    and the pink playhead. */
 .tabsrow__tick {
   position: absolute;
-  /* Bottom-anchored above the cache strip, matching the pinned readout so the
-     whole ruler shares one baseline with room above/below the labels. */
-  bottom: 8px;
-  height: 28px;
+  /* Bottom-anchored ABOVE the playhead/cache band (matching the pinned readout),
+     with real padding so the two-line label has room above and below instead of
+     hugging the row top / the green cache strip. Content-driven height. */
+  bottom: 14px;
   z-index: 0;
   display: flex;
   align-items: flex-end;
+  padding: 3px 0;
   pointer-events: none;
 }
 
 .tabsrow__tick-line {
   position: absolute;
-  bottom: 0;
+  /* Short grey graticule hanging below the label, toward the cache strip. */
+  bottom: -6px;
   left: 0;
   width: 1px;
-  height: 8px;
+  height: 6px;
   background: #4a4a4f;
 }
 
 .tabsrow__tick-label {
   display: inline-flex;
   flex-direction: column;
+  gap: 2px;
   margin-left: 4px;
   color: var(--text-muted);
   font-size: 9px;
   font-variant-numeric: tabular-nums;
-  line-height: 1.15;
+  line-height: 1.3;
   letter-spacing: 0;
   white-space: nowrap;
   -webkit-user-select: none;
@@ -995,6 +1003,15 @@ select option {
   display: inline-block;
   width: 14px;
   height: 14px;
+}
+
+/* Rotating chevron wrappers (rail + clip toggle): inline-flex centers the SVG so
+   the motion rotation pivots about the glyph's center rather than a baseline. */
+.track-head__chevron-icon,
+.timeline__clip-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .track-head__name {
