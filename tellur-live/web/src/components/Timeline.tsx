@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
-  ChevronDown,
-  ChevronRight,
-  Component,
-  FileCode,
-  Flag,
-} from "lucide-react";
+  AnimatePresence,
+  animate,
+  motion,
+  useMotionValue,
+  useReducedMotion,
+} from "motion/react";
+import { ChevronDown, ChevronRight, Component, Flag } from "lucide-react";
 import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
@@ -17,14 +17,22 @@ import {
   type TimelineViewport,
   type TimelineViewportChange,
 } from "../timelineViewport";
+import type { SelectedNode } from "./Inspector";
 import type { Arrangement, NodeKind, TimelineInfo } from "../types";
 
 interface TimelineProps {
   timeline: TimelineInfo | null;
   seconds: number;
   viewport: TimelineViewport;
+  // The id of the currently-selected node (dotted DFS path), driving the
+  // `.timeline__clip--selected` highlight. Selection state is lifted to App so
+  // the sibling Inspector can read the full node; App passes the id back here.
+  selectedId: string | null;
   onSeek: (seconds: number) => void;
   onViewportChange: (next: TimelineViewportChange) => void;
+  // Called when a clip is clicked (with the clicked node's data) or the
+  // selection is cleared (null). App owns the selection state.
+  onSelect: (node: SelectedNode | null) => void;
 }
 
 // A single placed segment on a lane. `id` is the stable dotted DFS path of the
@@ -107,17 +115,17 @@ const TRACK_H = 28;
 const LABEL_RESERVE = 24;
 
 // Per-NodeKind colors. Containers (timeline/sequence) are green ("components");
-// caption yellow, subtitle a warm orange, video blue, audio red. Light fills get
-// dark text; the darker blue/red fills get light text — readability first.
-// `tint` is the fill at low alpha, used for the expanded window's interior so a
-// Dialogue (timeline=green) window reads as a soft green box around its children.
+// subtitle a warm orange, video blue, audio red. Light fills get dark text; the
+// darker blue/red fills get light text — readability first. `tint` is the fill at
+// low alpha, used for the expanded window's interior so a Dialogue (timeline=
+// green) window reads as a soft green box around its children. Captions/telops
+// have no kind of their own — they arrive as video and take the video color.
 const KIND_COLOR: Record<
   NodeKind,
   { fill: string; text: string; border: string; tint: string }
 > = {
   timeline: { fill: "#6fcf97", text: "#0e1f15", border: "#8fdcab", tint: "rgba(111, 207, 151, 0.14)" },
   sequence: { fill: "#6fcf97", text: "#0e1f15", border: "#8fdcab", tint: "rgba(111, 207, 151, 0.14)" },
-  caption: { fill: "#e6c34d", text: "#241d05", border: "#f0d570", tint: "rgba(230, 195, 77, 0.14)" },
   subtitle: { fill: "#e0944a", text: "#2a1606", border: "#eaa869", tint: "rgba(224, 148, 74, 0.14)" },
   video: { fill: "#5a7fd6", text: "#f2f5fc", border: "#7d9be1", tint: "rgba(90, 127, 214, 0.14)" },
   audio: { fill: "#d65a6b", text: "#fdf2f4", border: "#e17d8b", tint: "rgba(214, 90, 107, 0.14)" },
@@ -148,13 +156,6 @@ const PACK_EPS = 1e-4;
 
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-// Last path segment of a source file path (handles both `/` and `\` separators),
-// e.g. ".../timeline_showcase.rs" -> "timeline_showcase.rs".
-function basename(file: string): string {
-  const segments = file.split(/[\\/]/);
-  return segments[segments.length - 1] || file;
 }
 
 // Display label for a node: explicit `name`, else its `label`, else the
@@ -495,21 +496,29 @@ function contentLaneLabel(lane: Lane): string {
 }
 
 export function Timeline(props: TimelineProps) {
-  const { timeline, seconds, viewport, onSeek, onViewportChange } = props;
+  const {
+    timeline,
+    seconds,
+    viewport,
+    selectedId,
+    onSeek,
+    onViewportChange,
+    onSelect,
+  } = props;
   const duration = Math.max(timeline?.duration ?? 0.001, 0.001);
 
   const bodyRef = useRef<HTMLDivElement>(null);
   const draggingSeekRef = useRef(false);
   const [bodyWidth, setBodyWidth] = useState(0);
+  // Last body width the geometry tween saw, so a resize (including the first
+  // measurement) snaps instead of animating — a layout change is not a pan/zoom.
+  const prevBodyWidthRef = useRef(0);
   const [draggingSeek, setDraggingSeek] = useState(false);
   const [arrangement, setArrangement] = useState<Arrangement | null>(null);
   // Set of collapsed node ids (dotted DFS paths). Seeded with every leaf
   // container when an arrangement loads (windows default to COLLAPSED); grouping
   // containers stay expanded. A user's manual toggle persists until refetch.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  // The clip id (dotted DFS path) currently selected by click, or null. Drives
-  // the highlight ring and the top-right source readout. Local to this panel.
-  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Honor the OS "reduce motion" preference: when set, expand/collapse snaps
   // instead of tweening (zero-duration transitions, no enter/exit offset).
@@ -572,31 +581,76 @@ export function Timeline(props: TimelineProps) {
   // Distinct trigger times → one deduped full-height reference line each.
   const eventTimes = eventLineTimes(lanes);
 
-  // The currently-selected clip (if its lane is still rendered), used for the
-  // top-right source readout. A selection whose node collapsed away simply
-  // yields no readout until re-selected.
-  const selectedClip = selectedId
-    ? lanes
-        .flatMap((lane) => lane.clips)
-        .find((clip) => clip.id === selectedId) ?? null
-    : null;
-
   const normalizedViewport = clampTimelineViewport(viewport, duration);
   const visibleDuration = getVisibleDuration(
     duration,
     normalizedViewport.zoom,
   );
+  // TARGET geometry: the projection the viewport prop maps to right now. Pointer
+  // input (seek/wheel) is computed against these so it stays exact and instant.
   // No viewport-width floor: at zoom < 1 the content shrinks NARROWER than the
   // viewport (left-aligned, empty space to the right). A tiny absolute floor
   // keeps projections finite.
-  const innerWidth = Math.max(bodyWidth * normalizedViewport.zoom, 16);
+  const targetInnerWidth = Math.max(bodyWidth * normalizedViewport.zoom, 16);
   // When the content is narrower than the viewport there is nothing to pan, so
   // `innerWidth - bodyWidth` is negative and this clamps to 0 (left-aligned).
-  const viewportX = clamp(
-    (normalizedViewport.start / duration) * innerWidth,
+  const targetViewportX = clamp(
+    (normalizedViewport.start / duration) * targetInnerWidth,
     0,
-    Math.max(0, innerWidth - bodyWidth),
+    Math.max(0, targetInnerWidth - bodyWidth),
   );
+
+  // ANIMATED geometry: `innerWidth`/`viewportX` glide to the target on an
+  // ease-out tween so pan/zoom feels smooth instead of jumping. Everything DRAWN
+  // (clip left/width, frames, flags, event lines, playhead, the tracks layer's
+  // width + translate) reads these animated values; only pointer math above uses
+  // the targets. Held both as motion values (the source of truth driven by
+  // `animate`) and mirrored to state so the projections recompute each frame.
+  const innerWidthMV = useMotionValue(targetInnerWidth);
+  const viewportXMV = useMotionValue(targetViewportX);
+  const [innerWidth, setInnerWidth] = useState(targetInnerWidth);
+  const [viewportX, setViewportX] = useState(targetViewportX);
+
+  // Tween the animated geometry toward the target whenever it changes. Under
+  // reduced-motion (or before a width is measured) snap instantly. The ease
+  // mirrors the expand/collapse choreography (easeOutQuint) for a consistent
+  // feel; pan and zoom share one tween so a combined zoom-at-pointer move glides
+  // as a single gesture.
+  useEffect(() => {
+    // Snap (no tween) when reduced-motion is on, before a width is measured, or
+    // on a resize — a layout change must not read as a pan/zoom gesture.
+    const resized = prevBodyWidthRef.current !== bodyWidth;
+    prevBodyWidthRef.current = bodyWidth;
+    if (reduceMotion || bodyWidth <= 0 || resized) {
+      innerWidthMV.set(targetInnerWidth);
+      viewportXMV.set(targetViewportX);
+      setInnerWidth(targetInnerWidth);
+      setViewportX(targetViewportX);
+      return;
+    }
+    const ease = [0.22, 1, 0.36, 1] as const;
+    const controls = [
+      animate(innerWidthMV, targetInnerWidth, {
+        duration: 0.28,
+        ease,
+        onUpdate: setInnerWidth,
+      }),
+      animate(viewportXMV, targetViewportX, {
+        duration: 0.28,
+        ease,
+        onUpdate: setViewportX,
+      }),
+    ];
+    return () => controls.forEach((c) => c.stop());
+  }, [
+    targetInnerWidth,
+    targetViewportX,
+    reduceMotion,
+    bodyWidth,
+    innerWidthMV,
+    viewportXMV,
+  ]);
+
   const playheadX = Math.max(
     0,
     Math.min(innerWidth, (seconds / duration) * innerWidth),
@@ -629,12 +683,14 @@ export function Timeline(props: TimelineProps) {
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      // A press on the empty body (clips stop propagation) clears the selection.
+      onSelect(null);
       draggingSeekRef.current = true;
       setDraggingSeek(true);
       seekFromClientX(e.clientX);
       e.currentTarget.setPointerCapture(e.pointerId);
     },
-    [seekFromClientX],
+    [onSelect, seekFromClientX],
   );
 
   const handleSeekPointerMove = useCallback(
@@ -887,13 +943,37 @@ export function Timeline(props: TimelineProps) {
                             }}
                             // Clicking a clip SELECTS it (not seek): stop the
                             // pointer so the body's seek/scrub handler doesn't
-                            // fire, and select on click. The collapse chevron
-                            // below stops propagation itself, so chevron clicks
-                            // toggle without bubbling up to select here.
+                            // fire, then report the clicked node to App (which
+                            // feeds the Inspector). The collapse chevron below
+                            // stops propagation itself, so chevron clicks toggle
+                            // without bubbling up to select here.
+                            //
+                            // Second click on an ALREADY-SELECTED container bar
+                            // (one with `collapsedNode`, i.e. a collapsible
+                            // window/summary) toggles its collapse instead of
+                            // re-selecting — so a user can open/close it by
+                            // clicking the bar twice, not just the chevron.
+                            // Selection is kept (Inspector stays put). Leaf bars
+                            // have no `collapsedNode`, so they always just select.
                             onPointerDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setSelectedId(clip.id);
+                              if (
+                                clip.id === selectedId &&
+                                clip.collapsedNode != null
+                              ) {
+                                toggleCollapsed(clip.collapsedNode);
+                                return;
+                              }
+                              onSelect({
+                                id: clip.id,
+                                name: clip.name,
+                                kind: clip.kind,
+                                source: clip.source,
+                                start: clip.start,
+                                end: clip.end,
+                                triggers: clip.triggers,
+                              });
                             }}
                           >
                             {/* Container bars get a toggle handle + a component
@@ -908,6 +988,12 @@ export function Timeline(props: TimelineProps) {
                                 aria-label={
                                   clipCollapsed ? "Expand" : "Collapse"
                                 }
+                                // Sticky like the label: the toggle/icon precede
+                                // the label in flex order, so they get the same
+                                // offset to stay together at the viewport edge.
+                                style={{
+                                  transform: `translateX(${stickyOffset}px)`,
+                                }}
                                 onPointerDown={(e) => e.stopPropagation()}
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -925,6 +1011,9 @@ export function Timeline(props: TimelineProps) {
                               <span
                                 className="timeline__clip-icon"
                                 aria-hidden="true"
+                                style={{
+                                  transform: `translateX(${stickyOffset}px)`,
+                                }}
                               >
                                 <Component size={13} strokeWidth={2} />
                               </span>
@@ -1061,19 +1150,6 @@ export function Timeline(props: TimelineProps) {
             style={{ left: `${playheadX}px` }}
           />
         </div>
-        {/* Top-right source readout: a floating pill (over the tracks, fixed to
-            the body's top-right corner — NOT inside the panned tracks layer) that
-            shows the selected clip's call site as `basename:line`. Hidden when
-            nothing is selected or the selection has no source (e.g. the root). */}
-        {selectedClip && selectedClip.source ? (
-          <div className="timeline__source">
-            <FileCode size={12} strokeWidth={2} />
-            <span className="timeline__source-loc">
-              {basename(selectedClip.source.file)}:{selectedClip.source.line}
-            </span>
-            <span className="timeline__source-name">{selectedClip.name}</span>
-          </div>
-        ) : null}
       </div>
     </section>
   );

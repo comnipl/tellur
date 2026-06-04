@@ -3,6 +3,11 @@
 export const MIN_TIMELINE_ZOOM = 0.2;
 export const MAX_TIMELINE_ZOOM = 20;
 
+// Initial zoom on load: innerWidth = bodyWidth * zoom, so 2/3 makes the full
+// duration span ~2/3 of the panel width — left-aligned with ~1/3 empty room to
+// its right (pulled back from a fit-to-width zoom of 1).
+export const DEFAULT_TIMELINE_ZOOM = 2 / 3;
+
 export interface TimelineViewport {
   start: number;
   zoom: number;

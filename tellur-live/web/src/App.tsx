@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchInfo } from "./api";
 import { Header } from "./components/Header";
+import { Inspector, type SelectedNode } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { PreviewScrubber } from "./components/PreviewScrubber";
 import { TabsRow } from "./components/TabsRow";
@@ -11,6 +12,7 @@ import { usePreview } from "./preview/usePreview";
 import { cleanupLegacyMediaCaches } from "./cache";
 import {
   clampTimelineViewport,
+  DEFAULT_TIMELINE_ZOOM,
   type TimelineViewport,
   type TimelineViewportChange,
 } from "./timelineViewport";
@@ -52,8 +54,12 @@ export function App() {
   const [fps, setFps] = useState(30);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
-    zoom: 1,
+    zoom: DEFAULT_TIMELINE_ZOOM,
   });
+  // The timeline node currently selected by click, lifted here so the Inspector
+  // (a sibling of the timeline) can render its details. Timeline reports clicks
+  // via `onSelect` and reads the highlight back from `selectedNode.id`.
+  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
   const [measuredFps, setMeasuredFps] = useState(0);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
   const userSelectedResolutionRef = useRef(false);
@@ -245,37 +251,43 @@ export function App() {
         compileError={loadError ?? info?.compileError ?? null}
       />
       <div className="workspace">
-        <section className="viewer-panel">
-          <Preview
-            imageSrc={preview.state.imageSrc}
-            imageVisible={preview.state.imageVisible}
-            videoVisible={preview.state.videoVisible}
-            activeVideoSlot={preview.state.activeVideoSlot}
-            aspect={aspect}
-            error={loadError ?? info?.lastError ?? preview.state.error}
-            videoRefs={preview.videoRefs}
-            imgRef={preview.imgRef}
-          />
-          <PreviewScrubber
-            seconds={preview.state.seconds}
-            duration={displayTimeline.duration}
-            onSeek={preview.setSeconds}
-          />
-          <Transport
-            seconds={preview.state.seconds}
-            duration={displayTimeline.duration}
-            fps={fps}
-            measuredFps={preview.state.playing ? measuredFps : fps}
-            resolution={resolution}
-            resolutionOptions={resolutionOptions}
-            playing={preview.state.playing}
-            onTogglePlay={preview.togglePlay}
-            onStep={preview.stepFrame}
-            onRewind={preview.rewindToStart}
-            onResolutionChange={changeResolution}
-            onFpsChange={setFps}
-          />
-        </section>
+        {/* Top row: preview (left, keeps its fixed viewer width) and the
+            Inspector (fills the leftover space to its right). The timeline
+            below stays full-width in the next row. */}
+        <div className="workspace-top">
+          <section className="viewer-panel">
+            <Preview
+              imageSrc={preview.state.imageSrc}
+              imageVisible={preview.state.imageVisible}
+              videoVisible={preview.state.videoVisible}
+              activeVideoSlot={preview.state.activeVideoSlot}
+              aspect={aspect}
+              error={loadError ?? info?.lastError ?? preview.state.error}
+              videoRefs={preview.videoRefs}
+              imgRef={preview.imgRef}
+            />
+            <PreviewScrubber
+              seconds={preview.state.seconds}
+              duration={displayTimeline.duration}
+              onSeek={preview.setSeconds}
+            />
+            <Transport
+              seconds={preview.state.seconds}
+              duration={displayTimeline.duration}
+              fps={fps}
+              measuredFps={preview.state.playing ? measuredFps : fps}
+              resolution={resolution}
+              resolutionOptions={resolutionOptions}
+              playing={preview.state.playing}
+              onTogglePlay={preview.togglePlay}
+              onStep={preview.stepFrame}
+              onRewind={preview.rewindToStart}
+              onResolutionChange={changeResolution}
+              onFpsChange={setFps}
+            />
+          </section>
+          <Inspector node={selectedNode} />
+        </div>
         <section className="timeline-panel">
           <TabsRow
             timeline={displayTimeline}
@@ -291,8 +303,10 @@ export function App() {
             timeline={displayTimeline}
             seconds={preview.state.seconds}
             viewport={timelineViewport}
+            selectedId={selectedNode?.id ?? null}
             onSeek={preview.setSeconds}
             onViewportChange={updateTimelineViewport}
+            onSelect={setSelectedNode}
           />
           <TimelineViewportBar
             duration={timelineDuration}
