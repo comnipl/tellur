@@ -147,11 +147,17 @@ export function App() {
   });
 
   useEffect(() => {
-    const isInteractiveTarget = (target: EventTarget | null) => {
+    // Only suppress the global shortcuts when focus is in a GENUINE text-entry
+    // field — typing there must not trigger play/step. Buttons and <select>s are
+    // deliberately NOT here: they blur themselves after activation (so focus
+    // can't get stuck stealing Space/arrows), and while focused a <select>'s own
+    // arrow-key option navigation should win, which it does because the keydown
+    // still reaches it natively. Text inputs without a `type` default to text.
+    const isTextEntryTarget = (target: EventTarget | null) => {
       if (!(target instanceof HTMLElement)) return false;
       return Boolean(
         target.closest(
-          'button, input, textarea, select, a[href], [contenteditable="true"], [role="textbox"]',
+          'input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"], input[type="number"], input:not([type]), textarea, [contenteditable="true"], [role="textbox"]',
         ),
       );
     };
@@ -162,7 +168,7 @@ export function App() {
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
-        isInteractiveTarget(event.target)
+        isTextEntryTarget(event.target)
       ) {
         return;
       }

@@ -809,6 +809,9 @@ export function Timeline(props: TimelineProps) {
                     onClick={(e) => {
                       e.stopPropagation();
                       toggleCollapsed(lane.header!.nodeId);
+                      // Blur so focus doesn't stay on the chevron and swallow
+                      // the global Space/arrow keyboard shortcuts.
+                      e.currentTarget.blur();
                     }}
                   >
                     {isCollapsed ? (
@@ -998,6 +1001,9 @@ export function Timeline(props: TimelineProps) {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   toggleCollapsed(clip.collapsedNode!);
+                                  // Blur so focus doesn't stay on the toggle and
+                                  // swallow the global Space/arrow shortcuts.
+                                  e.currentTarget.blur();
                                 }}
                               >
                                 {clipCollapsed ? (

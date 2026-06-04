@@ -61,7 +61,12 @@ export function Transport(props: TransportProps) {
           type="button"
           className="transport__btn"
           aria-label="Rewind"
-          onClick={onRewind}
+          // Blur after activation so focus doesn't stay on the button and
+          // swallow the global Space/arrow keyboard shortcuts.
+          onClick={(e) => {
+            onRewind();
+            e.currentTarget.blur();
+          }}
         >
           <SkipBack size={14} strokeWidth={1.6} />
         </button>
@@ -69,7 +74,10 @@ export function Transport(props: TransportProps) {
           type="button"
           className="transport__btn transport__btn--play"
           aria-label={playing ? "Pause" : "Play"}
-          onClick={onTogglePlay}
+          onClick={(e) => {
+            onTogglePlay();
+            e.currentTarget.blur();
+          }}
         >
           {playing ? (
             <Pause size={18} strokeWidth={1.4} fill="currentColor" />
@@ -81,7 +89,10 @@ export function Transport(props: TransportProps) {
           type="button"
           className="transport__btn"
           aria-label="Step forward"
-          onClick={() => onStep(1)}
+          onClick={(e) => {
+            onStep(1);
+            e.currentTarget.blur();
+          }}
         >
           <SkipForward size={14} strokeWidth={1.6} />
         </button>
@@ -90,7 +101,12 @@ export function Transport(props: TransportProps) {
         <label className="transport__control">
           <select
             value={fps}
-            onChange={(e) => onFpsChange(Number(e.target.value))}
+            // Blur after the value is committed so focus leaves the <select>
+            // and the global Space/arrow shortcuts keep working.
+            onChange={(e) => {
+              onFpsChange(Number(e.target.value));
+              e.currentTarget.blur();
+            }}
           >
             {FPS_OPTIONS.map((value) => (
               <option key={value} value={value}>
@@ -112,6 +128,9 @@ export function Transport(props: TransportProps) {
                   height: option.height,
                 });
               }
+              // Blur after the value is committed so focus leaves the <select>
+              // and the global Space/arrow shortcuts keep working.
+              e.currentTarget.blur();
             }}
           >
             {resolutionOptions.map((option) => (

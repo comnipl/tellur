@@ -943,7 +943,10 @@ select option {
 }
 
 /* Every bar's fill/text color is set inline from KIND_COLOR; this rule owns only
-   layout. `gap` spaces the optional toggle + ❖ icon from the label. */
+   layout. `gap` spaces the optional toggle + ❖ icon from the label. The clip
+   text is non-selectable: seek/scrub/pan drags happen over the clips, and a drag
+   must not range-select the label/name. (Copy-worthy text — Inspector, source
+   path:line — lives elsewhere and stays selectable.) */
 .timeline__clip {
   position: absolute;
   top: 5px;
@@ -955,6 +958,8 @@ select option {
   overflow: hidden;
   padding: 0 9px;
   border-radius: 4px;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* All clips are clickable (click selects the node); the pointer cursor signals
@@ -1120,6 +1125,10 @@ select option {
   font-weight: 700;
   letter-spacing: 0;
   white-space: nowrap;
+  /* Non-selectable like the clip text: a drag over the timeline must not
+     range-select the flag's event name. */
+  -webkit-user-select: none;
+  user-select: none;
   transform: translateX(-1px);
 }
 
