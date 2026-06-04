@@ -1,14 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  animate,
-  motion,
-  useMotionValue,
-  useReducedMotion,
-  useSpring,
-  useTransform,
-} from "motion/react";
+import { animate, useMotionValue, useReducedMotion } from "motion/react";
 import { CornerUpRight, SquareMenu } from "lucide-react";
 import { formatTimelineStart, formatTimecode } from "../formatTime";
+import { RollingNumber } from "./RollingNumber";
 import {
   clamp,
   clampTimelineViewport,
@@ -144,32 +138,13 @@ export function TabsRow(props: TabsRowProps) {
           duration,
         )
       : [];
-  // Left-edge readout: an odometer-style rolling number. `useSpring` must follow
-  // a MOTION VALUE source to react to changes — passing the bare `targetStart`
-  // number only seeds the initial value, so it would freeze at 0. So we hold
-  // `targetStart` in a motion value and update it in an effect; the spring then
-  // glides toward it on every pan/scroll. It tracks the TARGET (final viewport
-  // start), not the per-frame geometry tween, so the digits settle smoothly
-  // instead of jittering. Two transforms format it as the timecode and frame
-  // count; the motion values are rendered by passing them straight into spans.
-  // Under reduced-motion the spring uses duration 0, so it snaps with no roll.
-  const targetStartMV = useMotionValue(targetStart);
-  useEffect(() => {
-    targetStartMV.set(targetStart);
-  }, [targetStart, targetStartMV]);
-  const rolledStart = useSpring(
-    targetStartMV,
-    reduceMotion
-      ? { duration: 0 }
-      : { stiffness: 220, damping: 30, restDelta: 0.001 },
-  );
-  const viewportStartLabel = useTransform(rolledStart, (v) =>
-    formatTimelineStart(Math.max(0, v), fps),
-  );
-  const viewportStartFrame = useTransform(
-    rolledStart,
-    (v) => `${Math.max(0, Math.round(v * fps))}F`,
-  );
+  // Left-edge readout (the pinned leading tick): formatted from the TARGET start
+  // (the final viewport start, not the per-frame geometry tween, which would
+  // jitter). The slot-machine roll is handled per-digit inside <RollingNumber>,
+  // so here we just hand it the final formatted strings; each digit column rolls
+  // to its new value on pan/scroll.
+  const viewportStartLabel = formatTimelineStart(targetStart, fps);
+  const viewportStartFrame = `${Math.max(0, Math.round(targetStart * fps))}F`;
 
   const seekFromClientX = useCallback(
     (clientX: number) => {
@@ -257,17 +232,16 @@ export function TabsRow(props: TabsRowProps) {
               size={18}
               strokeWidth={1.8}
             />
-            {/* Odometer-style readout: the time and frame strings are derived
-                from a spring-driven motion value (rolledStart) and passed
-                straight into motion.spans, so the digits roll continuously to
-                the final value. Tabular numerals keep the width steady as the
-                digits change. The formatted string carries its own colons / "F"
-                suffix, so nothing else needs to be appended here. */}
+            {/* Slot-machine readout: each digit column rolls vertically to its
+                new value as the viewport start changes; colons / "." / "F" stay
+                fixed. Driven by the TARGET start so digits settle on the final
+                value. */}
             <span className="tabsrow__viewport-start-text">
-              <motion.span>{viewportStartLabel}</motion.span>
-              <motion.span className="tabsrow__viewport-start-frame">
-                {viewportStartFrame}
-              </motion.span>
+              <RollingNumber value={viewportStartLabel} />
+              <RollingNumber
+                className="tabsrow__viewport-start-frame"
+                value={viewportStartFrame}
+              />
             </span>
           </span>
           {cacheRanges.map((range, i) => {

@@ -47,7 +47,7 @@ function formatSeconds(seconds: number): string {
 export function Inspector({ node }: InspectorProps) {
   return (
     <section className="inspector" aria-label="Inspector">
-      <h2 className="inspector__heading">詳細</h2>
+      <h2 className="inspector__heading">Details</h2>
       {node ? (
         <div className="inspector__body">
           <div className="inspector__title" title={node.name}>
@@ -99,7 +99,7 @@ export function Inspector({ node }: InspectorProps) {
           ) : null}
         </div>
       ) : (
-        <p className="inspector__placeholder">ノードを選択してください</p>
+        <p className="inspector__placeholder">Select a node to inspect.</p>
       )}
     </section>
   );

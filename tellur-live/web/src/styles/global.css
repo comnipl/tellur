@@ -29,7 +29,7 @@
   --viewer-h: 448px;
   --scrubber-h: 18px;
   --transport-h: 46px;
-  --tabs-h: 50px;
+  --tabs-h: 60px;
   --track-h: 28px;
   --footer-h: 34px;
   --side-w: 220px;
@@ -481,13 +481,23 @@ select option {
   border-radius: 8px;
 }
 
+/* Mirror the Timeline panel's top-left "Timeline" label (.tabsrow__tab--primary):
+   a small dark pill with light text, so the two panels read as the same kind of
+   section header. `align-self: flex-start` keeps the pill sized to its text in
+   the inspector's flex column rather than stretching full width. */
 .inspector__heading {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
   margin: 0;
-  color: var(--text-muted);
+  padding: 0 9px;
+  color: #f2f2f4;
+  background: #3f3f42;
+  border-radius: 4px;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 .inspector__body {
@@ -692,13 +702,15 @@ select option {
    would otherwise slide under it. */
 .tabsrow__viewport-start {
   position: absolute;
-  bottom: 0;
+  /* Bottom-anchored above the cache strip; the row's extra height gives the
+     time/frame text top/bottom breathing room instead of feeling cramped. */
+  bottom: 8px;
   left: 0;
   z-index: 2;
   display: inline-flex;
   align-items: flex-end;
   gap: 1px;
-  height: 26px;
+  height: 28px;
   padding-right: 6px;
   background: var(--bg-panel);
   color: var(--text-secondary);
@@ -731,8 +743,9 @@ select option {
 .tabsrow__cache {
   position: absolute;
   right: auto;
-  /* Sit just above the ruler band (the bottom ~26px of the shared row). */
-  bottom: 28px;
+  /* The render-cache indicator sits BELOW the ruler band (ticks/readout/chip are
+     bottom-anchored at 8px), as a thin strip near the very bottom of the row. */
+  bottom: 2px;
   height: 2px;
   background: var(--accent-cache);
   border-radius: 2px;
@@ -741,9 +754,9 @@ select option {
 
 .tabsrow__playhead-line {
   position: absolute;
-  /* Span the full shared row so the playhead crosses both the cache line and the
-     ruler ticks; it overlays everything (z above ticks/readout). */
-  top: 0;
+  /* Don't pierce the top edge: start below the top padding so the pink line runs
+     through the ruler/cache but stops short of the row's top. */
+  top: 10px;
   bottom: 0;
   width: 1px;
   background: var(--timeline-marker);
@@ -752,13 +765,16 @@ select option {
 
 .tabsrow__chip {
   position: absolute;
-  top: 2px;
+  /* Bottom-anchored at the same baseline as the ruler ticks / pinned readout
+     (above the cache strip) — they share one band, the chip just overlays on
+     top (highest z). */
+  bottom: 8px;
   z-index: 5;
   display: inline-flex;
   flex-direction: column;
   justify-content: center;
   min-width: 73px;
-  height: 30px;
+  height: 26px;
   padding: 4px 7px 4px 6px;
   color: #fff;
   background: var(--timeline-marker);
@@ -790,8 +806,8 @@ select option {
   width: 0;
   height: 0;
   content: "";
-  border-top: 15px solid transparent;
-  border-bottom: 15px solid transparent;
+  border-top: 13px solid transparent;
+  border-bottom: 13px solid transparent;
   border-left: 9px solid var(--timeline-marker);
 }
 
@@ -809,8 +825,10 @@ select option {
    and the pink playhead. */
 .tabsrow__tick {
   position: absolute;
-  bottom: 0;
-  height: 26px;
+  /* Bottom-anchored above the cache strip, matching the pinned readout so the
+     whole ruler shares one baseline with room above/below the labels. */
+  bottom: 8px;
+  height: 28px;
   z-index: 0;
   display: flex;
   align-items: flex-end;
@@ -847,6 +865,37 @@ select option {
 .tabsrow__tick-frame {
   color: #66666c;
   font-weight: 600;
+}
+
+/* Slot-machine numeric readout (see RollingNumber.tsx). The control is a row of
+   fixed-width 1em-tall windows; each digit column rolls vertically to its value,
+   separators sit verbatim. Tabular numerals keep columns from jittering. */
+.rolling-number {
+  display: inline-flex;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rolling-digit {
+  display: inline-block;
+  position: relative;
+  height: 1em;
+  overflow: hidden;
+  vertical-align: baseline;
+}
+
+.rolling-digit__column {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+}
+
+.rolling-digit__cell {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
 }
 
 .timeline {

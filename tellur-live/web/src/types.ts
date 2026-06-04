@@ -7,10 +7,9 @@ export interface TimelineInfo {
 
 // Lowercased discriminants, matching `tellur_core::timeline_component::NodeKind`
 // and the server's `node_kind_str`. The display side collapses to three track
-// kinds — video (映像: every rasterized visual, including backdrops, telops, and
-// reveals), audio (音声), subtitle (字幕) — plus the two structural containers.
-// There is no separate caption kind: a styled text telop is a visual on the
-// video track.
+// kinds — video (every rasterized visual, including backdrops, telops, and
+// reveals), audio, and subtitle — plus the two structural containers. There is
+// no separate caption kind: a styled text telop is a visual on the video track.
 export type NodeKind =
   | "video"
   | "audio"
