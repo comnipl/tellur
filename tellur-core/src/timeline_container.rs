@@ -191,6 +191,22 @@ impl TimelineComponent for Timeline {
         // child is at 0 too. Recurse each child and source-over composite the
         // resulting frames at the IMAGE layer (`.sketch/02 §8`), in child order
         // so later children land on top. `None` frames are dropped.
+        //
+        // Hard-cut the overlay at its resolved length: nothing contributes
+        // outside the container interval `[0, length)` (half-open, matching the
+        // `Placed` / `Sequence` gate). This caps a `.fill()` or bare child — and
+        // any nested timeline — at the container length recursively, with no
+        // per-leaf gating: a clip whose own placement does not gate (a fill has
+        // no window of its own) still cannot render past the container that sets
+        // its span. An all-fill / timeless overlay (`measure()` is `None`) has no
+        // determinate length to gate against and is left open (already a
+        // resolve-time warning).
+        let local_t = clock.local().seconds();
+        if let Some(length) = self.measure() {
+            if local_t < 0.0 || local_t >= length {
+                return None;
+            }
+        }
         let mut acc: Option<RasterImage> = None;
         for child in &self.children {
             if let Some(img) = child.frame(clock, target, ctx) {
@@ -1087,6 +1103,34 @@ mod tests {
         assert!(
             resolved.frame(TimelineTime::new(3.5), Resolution::new(2, 2), &mut ctx).is_none(),
             "past the window: nothing",
+        );
+    }
+
+    // An overlay hard-cuts at its resolved length: a `.fill()` child does NOT
+    // render past the container length (fixed here by a non-fill sibling's
+    // window), even though a fill placement has no time-gate of its own.
+    #[test]
+    fn timeline_caps_fill_child_at_container_length() {
+        let tl = Timeline::builder()
+            // Non-fill sibling fixes the container length at 2.0s.
+            .child(SolidColor { rgba: [0, 0, 0, 255] }.at(0.0..2.0))
+            // A fill visual takes the container length.
+            .child(SolidColor { rgba: [255, 0, 0, 255] }.fill())
+            .build();
+        let resolved = resolve_root(tl).expect("windowed, not timeless");
+        let mut ctx = crate::render_context::PassThrough;
+
+        assert!(
+            resolved.frame(TimelineTime::new(1.0), Resolution::new(2, 2), &mut ctx).is_some(),
+            "inside [0,2): the fill renders",
+        );
+        assert!(
+            resolved.frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            "exclusive container end: hard cut (even for a fill)",
+        );
+        assert!(
+            resolved.frame(TimelineTime::new(2.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            "past the container length: nothing",
         );
     }
 
