@@ -661,7 +661,7 @@ select option {
 
 .track-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   height: var(--track-h);
   margin: 0 10px;
@@ -708,14 +708,6 @@ select option {
 .track-head__btn--active {
   color: #fff;
   background: var(--bg-control-hover);
-}
-
-.track-head__color {
-  width: 14px;
-  height: 14px;
-  margin-left: 5px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
 }
 
 .timeline__tracks {

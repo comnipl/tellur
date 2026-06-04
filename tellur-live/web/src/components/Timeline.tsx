@@ -31,18 +31,6 @@ interface ArrangementRow {
   triggers: number[];
 }
 
-// Per-kind clip color. Containers (timeline/sequence) read as group bands;
-// leaves (caption/subtitle/video/audio) get distinct hues so the hierarchy is
-// legible at a glance.
-const KIND_COLOR: Record<NodeKind, string> = {
-  timeline: "#5c6b8a",
-  sequence: "#7292e8",
-  video: "#4f9d8a",
-  audio: "#c08457",
-  caption: "#b06fd0",
-  subtitle: "#d0a24a",
-};
-
 // Depth-first flatten: root first, then children in order. Stable ids let React
 // keep rows across re-fetches and keep the side heads aligned with the lanes.
 function flattenArrangement(
@@ -243,10 +231,6 @@ export function Timeline(props: TimelineProps) {
               >
                 {rowHeadLabel(row)}
               </span>
-              <span
-                className="track-head__color"
-                style={{ background: KIND_COLOR[row.kind] }}
-              />
             </div>
           ))
         ) : (
@@ -281,7 +265,6 @@ export function Timeline(props: TimelineProps) {
                 const right = (clamp(row.end, 0, duration) / duration) *
                   innerWidth;
                 const width = Math.max(right - left, 2);
-                const color = KIND_COLOR[row.kind];
                 return (
                   <div key={row.id} className="timeline__track">
                     <div
@@ -289,7 +272,6 @@ export function Timeline(props: TimelineProps) {
                       style={{
                         left: `${left}px`,
                         width: `${width}px`,
-                        background: color,
                       }}
                     >
                       <span className="timeline__clip-label">
