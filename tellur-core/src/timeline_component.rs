@@ -441,14 +441,46 @@ impl TimelineComponent for Placed {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // Rebase + stretch (`.sketch/02 §8`, `.sketch/01 §A.3`): shift the
-        // child's local axis to its relative start, then time-scale by the
-        // window's implied `speed()`. A `.at(0.0..1.0)` over a 2s source has
-        // `speed = 2.0`, so source-local advances twice as fast — at parent
-        // local `0.5` the child sees `1.0`. `global` / `triggers` are unchanged
-        // (the trigger axis is global, never remapped).
-        let rebased = (clock.local().seconds() - self.placement.start) * self.speed();
-        let child_clock = clock.with_local(LocalTime::new(rebased));
+        let t = clock.local().seconds();
+        // Temporal gate: a placed clip contributes ONLY within its resolved
+        // parent-clock interval `[start, end)` (half-open, so abutting clips and
+        // Sequence slots never double-draw at the seam). A `.fill()` spans its
+        // container and is never self-gated; an open-ended timeless point (no
+        // window, no child duration) can't know its end, so it stays active.
+        if !self.is_fill() {
+            let active = match self.placement.end {
+                Some(end) => t >= self.placement.start && t < end,
+                None => match self.child.duration() {
+                    Some(d) => t >= self.placement.start && t < self.placement.start + d,
+                    None => true,
+                },
+            };
+            if !active {
+                return None;
+            }
+        }
+        // Rebase + stretch (`.sketch/02 §8`, `.sketch/01 §A.3`): shift the child's
+        // local axis to its relative start, then time-scale by the window's
+        // implied `speed()`. A `.at(0.0..1.0)` over a 2s source has `speed = 2.0`,
+        // so source-local advances twice as fast — at parent local `0.5` the child
+        // sees `1.0`. `global` / `triggers` are unchanged (the trigger axis is
+        // global, never remapped).
+        let rebased = (t - self.placement.start) * self.speed();
+        // Surface the child's LOCAL window length so end-relative effects
+        // (`clock.envelope` / `clock.remaining`) know where the clip closes. A
+        // window is `(end - start) * speed` = the child's own post-stretch seconds
+        // (content_dur for a timed stretch, `b - a` for a timeless one), matching
+        // the units of the rebased local axis above. A bare point takes the
+        // child's own duration; a fill is open-ended (`None`).
+        let window = if self.is_fill() {
+            None
+        } else {
+            match self.placement.end {
+                Some(end) => Some((end - self.placement.start) * self.speed()),
+                None => self.child.duration(),
+            }
+        };
+        let child_clock = clock.with_local_window(LocalTime::new(rebased), window);
         self.child.frame(child_clock, target, ctx)
     }
 
@@ -850,6 +882,10 @@ pub struct Clock<'a> {
     global: TimelineTime,
     local: LocalTime,
     triggers: &'a TriggerTable,
+    /// Resolved LOCAL window length (this component's own post-stretch seconds),
+    /// or `None` for an open-ended placement (`.fill()`, a bare timeless point,
+    /// the root). Carried for FRAME only — structure is never window-aware.
+    window: Option<f32>,
 }
 
 impl<'a> Clock<'a> {
@@ -859,6 +895,7 @@ impl<'a> Clock<'a> {
             global,
             local,
             triggers,
+            window: None,
         }
     }
 
@@ -878,6 +915,7 @@ impl<'a> Clock<'a> {
             global: TimelineTime::new(0.0),
             local: LocalTime::new(0.0),
             triggers,
+            window: None,
         }
     }
 
@@ -887,23 +925,69 @@ impl<'a> Clock<'a> {
         self.local
     }
 
-    /// Hands a child a clock with the same `global` axis and trigger table but
-    /// a new `local` axis (`.sketch/02 §8`). This is the rebase primitive a
-    /// container uses while compositing: it shifts the child's local clock to
-    /// the child's relative offset (`local = parent_local - child_offset`)
-    /// without touching the global / trigger axes, which are never remapped.
-    /// It keeps the borrowed `&TriggerTable` private to this module.
+    /// Pure rebase: shifts the child's local axis but PRESERVES the window (used
+    /// where the rebase does not change which window the child lives in).
     pub fn with_local(&self, local: LocalTime) -> Clock<'a> {
         Clock {
             global: self.global,
             local,
             triggers: self.triggers,
+            window: self.window,
+        }
+    }
+
+    /// Rebase AND set the child's resolved local window length in one step. The
+    /// soundness rule (`.sketch/02 §8`): the window is set ONLY by the node that
+    /// owns it (a `Placed` / `Sequence` slot) at the same site it rebases, never
+    /// carried-then-cleared. A pure-rebase node uses [`with_local`] instead.
+    pub fn with_local_window(&self, local: LocalTime, window: Option<f32>) -> Clock<'a> {
+        Clock {
+            global: self.global,
+            local,
+            triggers: self.triggers,
+            window,
         }
     }
 
     /// Absolute frame time — the SAME axis as [`Event`] triggers.
     pub fn global(&self) -> TimelineTime {
         self.global
+    }
+
+    /// The resolved LOCAL window length (this component's own slot, in its own
+    /// post-stretch seconds), or `None` for an open-ended placement (`.fill()`,
+    /// a bare timeless point, the root). End-relative effects read this.
+    pub fn window(&self) -> Option<f32> {
+        self.window
+    }
+
+    /// Time remaining until the window closes (`window - local`, clamped at 0),
+    /// or `None` if the placement is open-ended. The end-relative twin of
+    /// [`local`](Self::local): `clock.remaining().map(|r| r.phase(0.0, 0.4))`
+    /// ramps a fade-OUT over the last 0.4s.
+    pub fn remaining(&self) -> Option<LocalTime> {
+        self.window
+            .map(|w| LocalTime::new((w - self.local.seconds()).max(0.0)))
+    }
+
+    /// A fade envelope over this component's window: opacity ramps 0→1 over the
+    /// first `fade_in` seconds, holds 1, then ramps 1→0 over the last `fade_out`
+    /// seconds, and stays 0 past the window. An open-ended window (`None`) has no
+    /// end, so it fades IN only (the pre-window behavior). Because the fade-out
+    /// term is exactly 0 once `local >= window` (`phase` clamps via
+    /// `Phase::saturating`), an envelope doubles as a self-contained
+    /// appear/disappear for a caption.
+    pub fn envelope(&self, fade_in: f32, fade_out: f32) -> Phase {
+        let rise = if fade_in <= 0.0 {
+            1.0
+        } else {
+            self.local().phase(0.0, fade_in).get()
+        };
+        let fall = match self.window {
+            Some(w) if fade_out > 0.0 => 1.0 - self.local().phase(w - fade_out, w).get(),
+            _ => 1.0,
+        };
+        Phase::saturating(rise * fall)
     }
 
     /// Resolved trigger time of `e`, or `+∞` if unfired. Used by [`Event`]'s
@@ -1566,7 +1650,10 @@ mod tests {
 
         // `frame` forwards the framework-supplied clock into the body.
         let table = TriggerTable::new();
-        let clock = Clock::new(TimelineTime::new(0.5), LocalTime::new(0.25), &table);
+        // Sample INSIDE the body's window `[1.0, 2.0)` — the placed `Dot` is now
+        // temporally gated, so a pre-window local would (correctly) contribute
+        // nothing; an interior local still proves the real clock threads through.
+        let clock = Clock::new(TimelineTime::new(1.25), LocalTime::new(1.25), &table);
         let mut ctx = PassThrough;
         let frame = pulse.frame(clock, Resolution::new(4, 4), &mut ctx);
         assert!(frame.is_some());
@@ -1577,6 +1664,29 @@ mod tests {
         let builder = Pulse::builder().start(1.0);
         assert_timeline_builder(&builder);
         let _boxed: Box<dyn TimelineComponent + Send> = assert_boxable(pulse);
+    }
+
+    #[test]
+    fn clock_window_surfaces_and_drives_envelope_and_remaining() {
+        let table = TriggerTable::new();
+        let base = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+
+        // No window ⇒ open-ended: remaining is None and envelope fades IN only.
+        let open = base.with_local_window(LocalTime::new(5.0), None);
+        assert_eq!(open.window(), None);
+        assert!(open.remaining().is_none());
+        assert_eq!(open.envelope(0.4, 0.4).get(), 1.0, "open-ended holds after fade-in");
+
+        // A 3s window: remaining counts down and clamps at 0; envelope rises over
+        // the first 0.5s, holds, falls over the last 0.5s, 0 at/after the end.
+        let at = |t: f32| base.with_local_window(LocalTime::new(t), Some(3.0));
+        assert!((at(1.0).remaining().unwrap().seconds() - 2.0).abs() < 1e-6);
+        assert_eq!(at(4.0).remaining().unwrap().seconds(), 0.0, "remaining clamps at 0");
+        assert_eq!(at(0.0).envelope(0.5, 0.5).get(), 0.0, "0 at start");
+        assert!((at(0.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6, "full after fade-in");
+        assert!((at(1.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6, "held at full");
+        assert_eq!(at(3.0).envelope(0.5, 0.5).get(), 0.0, "0 at the window end");
+        assert_eq!(at(4.0).envelope(0.5, 0.5).get(), 0.0, "stays 0 past the window");
     }
 
     #[test]

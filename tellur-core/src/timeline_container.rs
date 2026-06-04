@@ -358,30 +358,38 @@ impl TimelineComponent for Sequence {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        // Re-flow the cursor exactly as `resolve` / `cues` do, then hand child N
-        // a clock rebased to its slot: `local = clock.local() - cursorN`
-        // (`.sketch/02 §8`). Each child's own `local` starts at 0 at the moment
-        // it begins, so a clip after a 2s clip sees `local ≈ 0` at global t=2.0.
-        // Composite the recursed frames source-over at the image layer (in a row
-        // usually only the active child contributes, but composite generally).
+        // Re-flow the cursor exactly as `resolve` / `cues` do, then hand the
+        // ACTIVE child (whose slot `[cursor, cursor + slot)` contains the current
+        // local time) a clock rebased to its slot — `local = clock.local() -
+        // cursorN` — carrying the slot length as its window. Half-open slots mean
+        // exactly one child draws at a seam (no double-draw); a child outside its
+        // slot contributes nothing (`.sketch/02 §8`).
         let mut cursor = 0.0_f32;
         let mut placed_any = false;
         let mut acc: Option<RasterImage> = None;
+        let local_t = clock.local().seconds();
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
-                // `.fill()` inside a Sequence is a resolve error; a valid
-                // sampled tree never reaches here, but skip it defensively so
-                // it neither shifts the cursor nor draws.
+                // `.fill()` inside a Sequence is a resolve error; a valid sampled
+                // tree never reaches here, but skip it defensively so it neither
+                // shifts the cursor nor draws.
                 continue;
             }
             if placed_any {
                 cursor += self.spacing;
             }
-            let child_clock = clock.with_local(LocalTime::new(clock.local().seconds() - cursor));
-            if let Some(img) = child.frame(child_clock, target, ctx) {
-                acc = Some(composite_frame_over(acc, img, target, ctx));
+            let slot = child.measure();
+            let active = match slot {
+                Some(len) => local_t >= cursor && local_t < cursor + len,
+                None => true,
+            };
+            if active {
+                let child_clock = clock.with_local_window(LocalTime::new(local_t - cursor), slot);
+                if let Some(img) = child.frame(child_clock, target, ctx) {
+                    acc = Some(composite_frame_over(acc, img, target, ctx));
+                }
             }
-            cursor += child.measure().unwrap_or(0.0);
+            cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
         acc
@@ -1038,12 +1046,138 @@ mod tests {
             .expect("contributes");
         assert_eq!(first_pixel(&f0)[0], 0, "local ≈ 0 at its start");
 
-        // `.at(2.0..5.0)` over a timeless child has speed 1.0, so at global 5.0
-        // the child's local is ≈ 3.0 → red channel 3.
-        let f3 = resolved
-            .frame(TimelineTime::new(5.0), Resolution::new(2, 2), &mut ctx)
+        // `.at(2.0..5.0)` over a timeless child has speed 1.0, so at an INTERIOR
+        // global 4.0 the child's local is ≈ 2.0 → red channel 2.
+        let f2 = resolved
+            .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
             .expect("contributes");
-        assert_eq!(first_pixel(&f3)[0], 3, "local advances 1:1 with global");
+        assert_eq!(first_pixel(&f2)[0], 2, "local advances 1:1 with global");
+
+        // The window is half-open `[2.0, 5.0)`: at the exclusive end the clip is
+        // gated OFF and contributes no frame.
+        assert!(
+            resolved
+                .frame(TimelineTime::new(5.0), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
+            "the exclusive window end contributes nothing",
+        );
+    }
+
+    // Temporal gate: a placed clip contributes ONLY within its half-open window
+    // `[start, end)`; outside it the frame is `None` — this is what makes a
+    // finished caption DISAPPEAR instead of staying painted.
+    #[test]
+    fn placed_frame_gates_outside_its_window() {
+        let probe = LocalProbe::builder().build().at(1.0..3.0);
+        let resolved = resolve_root(probe).expect("windowed, not timeless");
+        let mut ctx = crate::render_context::PassThrough;
+
+        assert!(
+            resolved.frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            "before the window: nothing",
+        );
+        assert!(
+            resolved.frame(TimelineTime::new(1.5), Resolution::new(2, 2), &mut ctx).is_some(),
+            "inside the window: contributes",
+        );
+        assert!(
+            resolved.frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            "exclusive end (half-open): nothing",
+        );
+        assert!(
+            resolved.frame(TimelineTime::new(3.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            "past the window: nothing",
+        );
+    }
+
+    // A Sequence composites only the ACTIVE slot; a child outside its slot is
+    // silent, and past the last slot the whole sequence contributes nothing.
+    #[test]
+    fn sequence_gates_each_child_to_its_slot() {
+        let seq = Sequence::builder()
+            .child(LocalProbe::builder().build().at(0.0..2.0)) // slot 1: [0,2)
+            .child(LocalProbe::builder().build().at(0.0..2.0)) // slot 2: [2,4)
+            .build();
+        let resolved = resolve_root(seq).expect("windowed, not timeless");
+        let mut ctx = crate::render_context::PassThrough;
+
+        assert!(
+            resolved.frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx).is_some(),
+            "slot 1 active at 0.5",
+        );
+        // Slot 2 active at global 3.0 → local rebased to 1.0 → red round(1.0)=1.
+        let f = resolved
+            .frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx)
+            .expect("slot 2 active");
+        assert_eq!(first_pixel(&f)[0], 1, "slot 2 local = 3.0 - 2.0 = 1.0");
+        assert!(
+            resolved.frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            "past both slots: nothing",
+        );
+    }
+
+    // Records the clock window it is sampled with (post-stretch local seconds),
+    // proving a stretched `.at` surfaces the window in the child's OWN units.
+    #[derive(Clone)]
+    struct WindowProbe {
+        log: Arc<Mutex<Vec<Option<f32>>>>,
+        duration: f32,
+    }
+    impl PartialEq for WindowProbe {
+        fn eq(&self, other: &Self) -> bool {
+            self.duration == other.duration
+        }
+    }
+    impl std::hash::Hash for WindowProbe {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.duration.to_bits().hash(state);
+        }
+    }
+    impl TimelineComponent for WindowProbe {
+        fn duration(&self) -> Option<f32> {
+            Some(self.duration)
+        }
+        fn frame(
+            &self,
+            clock: Clock<'_>,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> Option<RasterImage> {
+            self.log.lock().unwrap().push(clock.window());
+            Some(RasterImage::cpu(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                vec![255u8; (target.width as usize) * (target.height as usize) * 4],
+            ))
+        }
+        fn arrangement(&self, offset: f32) -> Arrangement {
+            Arrangement {
+                kind: NodeKind::Video,
+                label: String::new(),
+                start: offset,
+                end: offset + self.duration,
+                trim: None,
+                triggers: Vec::new(),
+                children: Vec::new(),
+            }
+        }
+    }
+
+    // A 2s source stretched into a 1s window (speed 2.0) surfaces a window of 2.0
+    // (content seconds), matching the rebased local axis the child actually sees.
+    #[test]
+    fn placed_surfaces_post_stretch_window_to_the_clock() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let leaf = WindowProbe { log: Arc::clone(&log), duration: 2.0 };
+        let resolved = resolve_root(leaf.at(0.0..1.0)).expect("windowed, not timeless");
+        let mut ctx = crate::render_context::PassThrough;
+        resolved.frame(TimelineTime::new(0.5), Resolution::new(1, 1), &mut ctx);
+        assert_eq!(
+            *log.lock().unwrap().last().expect("sampled"),
+            Some(2.0),
+            "(b - a) * speed = content seconds",
+        );
     }
 
     // (b') Clock rebasing through a Sequence: a probe after a 2s clip sees
