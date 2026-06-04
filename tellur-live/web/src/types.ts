@@ -21,6 +21,7 @@ export type NodeKind =
 export interface Arrangement {
   kind: NodeKind;
   label: string;
+  name?: string | null;
   start: number;
   end: number;
   trim: [number, number] | null;

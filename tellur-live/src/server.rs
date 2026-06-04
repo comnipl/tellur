@@ -1204,10 +1204,15 @@ fn arrangement_json(node: &Arrangement) -> String {
         .map(arrangement_json)
         .collect::<Vec<_>>()
         .join(",");
+    let name = match &node.name {
+        Some(n) => format!("\"{}\"", json_escape(n)),
+        None => "null".to_owned(),
+    };
     format!(
-        "{{\"kind\":\"{}\",\"label\":\"{}\",\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
+        "{{\"kind\":\"{}\",\"label\":\"{}\",\"name\":{},\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
         node_kind_str(node.kind),
         json_escape(&node.label),
+        name,
         finite_json_number(node.start),
         finite_json_number(node.end),
         trim,
@@ -1254,6 +1259,9 @@ mod tests {
         let arrangement = Arrangement {
             kind: NodeKind::Timeline,
             label: "root".to_owned(),
+            // A non-null `name` exercises the escaped-string branch; the rest stay
+            // `null` to cover the absent-name branch.
+            name: Some("Dialogue · \"hi\"".to_owned()),
             start: 0.0,
             end: 6.0,
             trim: None,
@@ -1262,6 +1270,7 @@ mod tests {
                 Arrangement {
                     kind: NodeKind::Video,
                     label: "establishing.mp4".to_owned(),
+                    name: None,
                     start: 0.0,
                     end: 2.0,
                     trim: Some((1.0, 3.0)),
@@ -1271,6 +1280,7 @@ mod tests {
                 Arrangement {
                     kind: NodeKind::Sequence,
                     label: String::new(),
+                    name: None,
                     start: 0.0,
                     end: 6.0,
                     trim: None,
@@ -1279,6 +1289,7 @@ mod tests {
                         Arrangement {
                             kind: NodeKind::Caption,
                             label: "one".to_owned(),
+                            name: None,
                             start: 0.0,
                             end: 3.0,
                             trim: None,
@@ -1288,6 +1299,7 @@ mod tests {
                         Arrangement {
                             kind: NodeKind::Caption,
                             label: "two".to_owned(),
+                            name: None,
                             start: 3.0,
                             end: 6.0,
                             trim: None,
@@ -1300,15 +1312,15 @@ mod tests {
         };
 
         let expected = concat!(
-            "{\"kind\":\"timeline\",\"label\":\"root\",\"start\":0,\"end\":6,",
+            "{\"kind\":\"timeline\",\"label\":\"root\",\"name\":\"Dialogue · \\\"hi\\\"\",\"start\":0,\"end\":6,",
             "\"trim\":null,\"triggers\":[],\"children\":[",
-            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"start\":0,\"end\":2,",
+            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"name\":null,\"start\":0,\"end\":2,",
             "\"trim\":[1,3],\"triggers\":[],\"children\":[]},",
-            "{\"kind\":\"sequence\",\"label\":\"\",\"start\":0,\"end\":6,",
+            "{\"kind\":\"sequence\",\"label\":\"\",\"name\":null,\"start\":0,\"end\":6,",
             "\"trim\":null,\"triggers\":[],\"children\":[",
-            "{\"kind\":\"caption\",\"label\":\"one\",\"start\":0,\"end\":3,",
+            "{\"kind\":\"caption\",\"label\":\"one\",\"name\":null,\"start\":0,\"end\":3,",
             "\"trim\":null,\"triggers\":[],\"children\":[]},",
-            "{\"kind\":\"caption\",\"label\":\"two\",\"start\":3,\"end\":6,",
+            "{\"kind\":\"caption\",\"label\":\"two\",\"name\":null,\"start\":3,\"end\":6,",
             "\"trim\":null,\"triggers\":[3],\"children\":[]}",
             "]}",
             "]}"
@@ -1324,6 +1336,7 @@ mod tests {
         let arrangement = Arrangement {
             kind: NodeKind::Caption,
             label: String::new(),
+            name: None,
             start: f32::INFINITY,
             end: f32::NAN,
             trim: None,

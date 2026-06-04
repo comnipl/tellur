@@ -60,11 +60,12 @@
 //! untouched — and is rejected on `#[component(vector)]`.
 
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
+    parse::{Parse, ParseStream},
     parse_macro_input, parse_quote, Attribute, DeriveInput, Field, FnArg, Ident, Item, ItemFn,
-    ItemStruct, Meta, Pat, PatType, Type,
+    ItemStruct, LitStr, Meta, Pat, PatType, Token, Type,
 };
 
 mod keyable;
@@ -147,42 +148,103 @@ impl Kind {
     }
 }
 
-/// `#[component(vector)]` / `#[component(raster)]`.
+/// Parsed `#[component(...)]` attribute arguments: the mandatory `kind` ident
+/// plus an optional `name = "<template>"` display-name override. The template
+/// (when present) is kept as a [`LitStr`] so its `{field}` placeholders are
+/// expanded later against the component's stored fields.
+struct ComponentAttr {
+    kind: Kind,
+    name_template: Option<LitStr>,
+}
+
+impl Parse for ComponentAttr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let kind_ident: Ident = input.parse()?;
+        let kind = match &kind_ident {
+            id if id == "vector" => Kind::Vector,
+            id if id == "raster" => Kind::Raster,
+            id if id == "timeline" => Kind::Timeline,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &kind_ident,
+                    "expected `vector`, `raster`, or `timeline`",
+                ));
+            }
+        };
+
+        let mut name_template = None;
+        // Optional `, name = "..."` follows the kind.
+        while input.parse::<Token![,]>().is_ok() {
+            // Allow (and ignore) a trailing comma after the kind or arg.
+            if input.is_empty() {
+                break;
+            }
+            let key: Ident = input.parse()?;
+            if key != "name" {
+                return Err(syn::Error::new_spanned(
+                    &key,
+                    "unknown `#[component]` argument (only `name = \"...\"` is supported)",
+                ));
+            }
+            if name_template.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &key,
+                    "duplicate `name` argument",
+                ));
+            }
+            input.parse::<Token![=]>()?;
+            name_template = Some(input.parse::<LitStr>()?);
+        }
+
+        Ok(Self {
+            kind,
+            name_template,
+        })
+    }
+}
+
+/// `#[component(vector)]` / `#[component(raster)]` / `#[component(timeline)]`,
+/// each optionally carrying `name = "<template>"`.
 #[proc_macro_attribute]
 pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let kind = match syn::parse::<Ident>(attr) {
-        Ok(id) if id == "vector" => Kind::Vector,
-        Ok(id) if id == "raster" => Kind::Raster,
-        Ok(id) if id == "timeline" => Kind::Timeline,
-        _ => {
-            return syn::Error::new(
-                Span::call_site(),
-                "expected `#[component(vector)]`, `#[component(raster)]`, or `#[component(timeline)]`",
-            )
-            .to_compile_error()
-            .into();
-        }
+    let ComponentAttr {
+        kind,
+        name_template,
+    } = match syn::parse::<ComponentAttr>(attr) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error().into(),
     };
-    expand_item(item, kind)
+    expand_item(item, kind, name_template)
 }
 
 /// Backwards-compatible alias for `#[component(vector)]` on a function.
 #[proc_macro_attribute]
 pub fn vector_component(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_item(item, Kind::Vector)
+    expand_item(item, Kind::Vector, None)
 }
 
 /// Backwards-compatible alias for `#[component(raster)]` on a function.
 #[proc_macro_attribute]
 pub fn raster_component(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_item(item, Kind::Raster)
+    expand_item(item, Kind::Raster, None)
 }
 
-fn expand_item(item: TokenStream, kind: Kind) -> TokenStream {
+fn expand_item(item: TokenStream, kind: Kind, name_template: Option<LitStr>) -> TokenStream {
     let item = parse_macro_input!(item as Item);
     let result = match item {
-        Item::Fn(func) => expand_fn(func, kind),
-        Item::Struct(s) => expand_struct(s, kind),
+        Item::Fn(func) => expand_fn(func, kind, name_template),
+        Item::Struct(s) => {
+            if let Some(tpl) = name_template {
+                // Struct-form components keep their hand-written trait impls;
+                // the display-name hook is function-form only (task scope).
+                Err(syn::Error::new_spanned(
+                    tpl,
+                    "`name = \"...\"` is only supported on function-form `#[component]`s",
+                ))
+            } else {
+                expand_struct(s, kind)
+            }
+        }
         other => Err(syn::Error::new_spanned(
             other,
             "#[component] can only be applied to a function or a struct",
@@ -264,7 +326,7 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
 
 // ─── function form ───────────────────────────────────────────────────────────
 
-fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
+fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Result<TokenStream2> {
     if let Some(c) = func.sig.constness {
         return Err(syn::Error::new_spanned(c, "component fn cannot be const"));
     }
@@ -402,12 +464,24 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     let trait_path = kind.component_trait();
     let build_method = Ident::new("__tellur_build", fn_ident.span());
 
+    // The display name surfaced in the live UI's arrangement tree: either the
+    // auto-derived component name, or an interpolated `name = "..."` template.
+    // The `#[available]`/`#[clock]` idents are stripped (not stored fields), so
+    // referencing them in a template is rejected with a tailored message.
+    let stripped_idents: Vec<&Ident> = available_ident.into_iter().chain(clock_ident).collect();
+    let name_expr = build_name_expr(
+        &struct_ident,
+        name_template.as_ref(),
+        &field_idents,
+        &stripped_idents,
+    )?;
+
     // `#[available]` and `#[clock]` are mutually exclusive injection paths —
     // the former belongs to the raster/vector layout protocol, the latter to
     // the timeline frame protocol — but they never coexist on one fn (the
     // timeline arm has no `#[available]` and the others reject `#[clock]`).
     let (build_fn, trait_impl) = if kind == Kind::Timeline {
-        timeline_codegen(&struct_ident, &trait_path, &build_method, field_idents.iter().copied(), clock_ident, clock_type, body)
+        timeline_codegen(&struct_ident, &trait_path, &build_method, field_idents.iter().copied(), clock_ident.zip(clock_type), body, &name_expr)
     } else {
         let (render_sig, render_args) = kind.render_sig();
         let graphic_path = kind.graphic();
@@ -480,6 +554,16 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
                 fn render(&self, #render_sig) -> #graphic_path {
                     #build_call_render
                 }
+
+                // Surfaces this component's display name to the timeline
+                // arrangement tree. For a raster component this flows through the
+                // `RasterComponent -> TimelineComponent` blanket; a vector
+                // component only reaches the timeline after `.rasterize()`, which
+                // does NOT carry this name forward (documented limitation), so the
+                // override is harmless there.
+                fn arrangement_name(&self) -> ::core::option::Option<::std::string::String> {
+                    ::core::option::Option::Some(#name_expr)
+                }
             }
         };
         (build_fn, trait_impl)
@@ -535,6 +619,114 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     })
 }
 
+/// Builds the `String`-typed expression that yields a component instance's
+/// display name at arrangement-time.
+///
+/// - With no `name = "..."` template: a `String` literal of the component's
+///   PascalCase name (e.g. `Backdrop`).
+/// - With a template: a [`format!`] over the template's literal text where each
+///   `{ident}` placeholder binds to the matching STORED field (`self.ident`).
+///   `{{` / `}}` are literal braces. Every `{ident}` is validated at expansion
+///   time against `field_idents`; an unknown name — or one of the stripped
+///   `#[available]` / `#[clock]` idents (which are not stored fields) — produces
+///   a `compile_error!` with a clear message.
+fn build_name_expr(
+    struct_ident: &Ident,
+    name_template: Option<&LitStr>,
+    field_idents: &[&Ident],
+    stripped_idents: &[&Ident],
+) -> syn::Result<TokenStream2> {
+    let Some(template) = name_template else {
+        let lit = struct_ident.to_string();
+        return Ok(quote!(::std::string::String::from(#lit)));
+    };
+
+    let raw = template.value();
+    let span = template.span();
+
+    // Walk the template, splitting it into a `format!` literal (with `{}` holes)
+    // and the ordered list of field idents that fill those holes.
+    let mut fmt_literal = String::with_capacity(raw.len());
+    let mut placeholders: Vec<Ident> = Vec::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    fmt_literal.push_str("{{");
+                    continue;
+                }
+                // Read the placeholder name up to the closing `}`.
+                let mut name = String::new();
+                let mut closed = false;
+                for nc in chars.by_ref() {
+                    if nc == '}' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(nc);
+                }
+                if !closed {
+                    return Err(syn::Error::new(
+                        span,
+                        format!("unterminated `{{` in `name` template; expected a closing `}}` after `{name}`"),
+                    ));
+                }
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(syn::Error::new(
+                        span,
+                        "empty `{}` placeholder in `name` template; name a stored field",
+                    ));
+                }
+                let field = field_idents.iter().find(|f| **f == name);
+                if field.is_none() {
+                    // Distinguish a stripped `#[available]`/`#[clock]` arg (not
+                    // stored, so never interpolable) from a plain typo.
+                    if stripped_idents.iter().any(|s| **s == name) {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`{{{name}}}` refers to a `#[available]`/`#[clock]` argument, which is not a stored field and cannot be interpolated"
+                            ),
+                        ));
+                    }
+                    let known = field_idents
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "`{{{name}}}` in `name` template does not match any stored field (available fields: {known})"
+                        ),
+                    ));
+                }
+                fmt_literal.push_str("{}");
+                placeholders.push(Ident::new(name, span));
+            }
+            '}' => {
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                    fmt_literal.push_str("}}");
+                } else {
+                    return Err(syn::Error::new(
+                        span,
+                        "stray `}` in `name` template; write `}}` for a literal brace",
+                    ));
+                }
+            }
+            other => fmt_literal.push(other),
+        }
+    }
+
+    Ok(quote! {
+        ::std::format!(#fmt_literal #( , self.#placeholders )*)
+    })
+}
+
 /// Emits the `__tellur_build` helper and the full `TimelineComponent` impl for a
 /// `#[component(timeline)]` fn (audit M3): every query
 /// (`duration`/`measure`/`resolve`/`frame`/`samples`/`cues`/`arrangement`)
@@ -551,9 +743,9 @@ fn timeline_codegen<'a>(
     trait_path: &TokenStream2,
     build_method: &Ident,
     field_idents: impl Iterator<Item = &'a Ident> + Clone,
-    clock_ident: Option<&Ident>,
-    clock_type: Option<&Type>,
+    clock: Option<(&Ident, &Type)>,
     body: &syn::Block,
+    name_expr: &TokenStream2,
 ) -> (TokenStream2, TokenStream2) {
     let destructure_idents: Vec<&Ident> = field_idents.collect();
 
@@ -561,7 +753,7 @@ fn timeline_codegen<'a>(
     // or with no clock at all. `__tellur_build` takes a clock by value in the
     // first case so every delegator forwards exactly the clock it has.
     let (build_fn, build_with_clock, build_structural) =
-        if let (Some(ck_ident), Some(ck_type)) = (clock_ident, clock_type) {
+        if let Some((ck_ident, ck_type)) = clock {
             (
                 quote! {
                     #[doc(hidden)]
@@ -634,8 +826,13 @@ fn timeline_codegen<'a>(
             }
 
             fn arrangement(&self, offset: f32) -> ::tellur_core::timeline_component::Arrangement {
+                // Relabel the delegated node IN PLACE: build the child node, then
+                // stamp this component's display name onto it. No extra tree level
+                // is introduced — the inner kind/interval/children are preserved.
                 let __child = #build_structural;
-                #trait_path::arrangement(&__child, offset)
+                let mut __node = #trait_path::arrangement(&__child, offset);
+                __node.name = ::core::option::Option::Some(#name_expr);
+                __node
             }
         }
     };

@@ -260,6 +260,7 @@ impl TimelineComponent for Timeline {
         Arrangement {
             kind: NodeKind::Timeline,
             label: String::new(),
+            name: None,
             start: offset,
             end: offset + length,
             trim: None,
@@ -460,6 +461,7 @@ impl TimelineComponent for Sequence {
         Arrangement {
             kind: NodeKind::Sequence,
             label: String::new(),
+            name: None,
             start: offset,
             end: offset + cursor,
             trim: None,
@@ -566,6 +568,7 @@ impl TimelineComponent for VideoFile {
         Arrangement {
             kind: NodeKind::Video,
             label: self.path.clone(),
+            name: None,
             start: offset,
             end: offset + self.probe(),
             trim: self.trim,
@@ -666,6 +669,7 @@ impl TimelineComponent for AudioFile {
         Arrangement {
             kind: NodeKind::Audio,
             label: self.path.clone(),
+            name: None,
             start: offset,
             end: offset + self.probe(),
             trim: self.trim,
@@ -714,6 +718,7 @@ impl TimelineComponent for Subtitle {
         Arrangement {
             kind: NodeKind::Subtitle,
             label: self.text.clone(),
+            name: None,
             start: offset,
             end: offset + self.duration().unwrap_or(0.0),
             trim: None,
@@ -1208,6 +1213,7 @@ mod tests {
             Arrangement {
                 kind: NodeKind::Video,
                 label: String::new(),
+                name: None,
                 start: offset,
                 end: offset + self.duration,
                 trim: None,
@@ -1308,6 +1314,7 @@ mod tests {
             Arrangement {
                 kind: NodeKind::Video,
                 label: String::new(),
+                name: None,
                 start: offset,
                 end: offset + self.duration,
                 trim: None,

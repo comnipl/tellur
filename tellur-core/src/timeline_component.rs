@@ -254,6 +254,9 @@ where
             kind: NodeKind::Caption,
             // TODO(task 6): carry a real label (e.g. the concrete type name).
             label: String::new(),
+            // A `#[component(raster)]` overrides `arrangement_name` to surface
+            // its display name here; plain raster primitives leave it `None`.
+            name: self.arrangement_name(),
             start: offset,
             end: offset + self.duration().unwrap_or(0.0),
             trim: None,
@@ -1385,6 +1388,12 @@ pub struct Cue {
 pub struct Arrangement {
     pub kind: NodeKind,
     pub label: String,
+    /// Human-readable DISPLAY NAME for a `#[component(...)]` node, distinct from
+    /// [`label`](Self::label) (which carries body-specific content such as a
+    /// caption's text or a clip's source path). Auto-derived from the component's
+    /// PascalCase name, or set from an explicit `name = "..."` template; `None`
+    /// for nodes that have no enclosing named component.
+    pub name: Option<String>,
     pub start: f32,
     pub end: f32,
     pub trim: Option<(f32, f32)>,
@@ -1424,6 +1433,24 @@ mod tests {
         }
     }
 
+    // A macro-generated raster component reaches the timeline via the one-way
+    // blanket; its overridden `arrangement_name` surfaces on the node's `name`.
+    #[crate::component(raster)]
+    fn Badge(#[builder(into)] tag: String) -> impl RasterComponent {
+        let _ = &tag;
+        Dot
+    }
+
+    #[test]
+    fn raster_component_macro_name_flows_through_the_blanket() {
+        let badge = Badge::builder().tag("hello").build();
+        // Direct hook: the generated override returns the templated/derived name.
+        assert_eq!(badge.arrangement_name().as_deref(), Some("Badge"));
+        // And it lands on the arrangement node through the blanket impl.
+        let boxed: Box<dyn TimelineComponent + Send> = Box::new(badge);
+        assert_eq!(boxed.arrangement(0.0).name.as_deref(), Some("Badge"));
+    }
+
     #[test]
     fn raster_component_is_a_timeline_component_via_blanket() {
         // The whole point of the one-way blanket: a RasterComponent can be
@@ -1433,6 +1460,9 @@ mod tests {
         assert_eq!(boxed.measure(), None);
         assert_eq!(boxed.cues(0.0), Vec::new());
         assert_eq!(boxed.arrangement(0.0).kind, NodeKind::Caption);
+        // A plain raster primitive has no display name; only a
+        // `#[component(...)]` overrides `arrangement_name`.
+        assert_eq!(boxed.arrangement(0.0).name, None);
     }
 
     #[test]
@@ -1645,6 +1675,17 @@ mod tests {
         Dot.at(start..(start + 1.0))
     }
 
+    // A timeline component with an explicit `name = "..."` template: the
+    // `{label}`/`{take}` placeholders interpolate the STORED builder fields at
+    // arrangement-time, so two instances surface distinct display names.
+    #[crate::component(timeline, name = "Shot {take}: {label}")]
+    fn NamedBeat(#[builder(into)] label: String, take: u32, start: f32) -> impl TimelineComponent {
+        // The body destructures every stored field; `label`/`take` feed only the
+        // name template, so silence the body-side "unused" lint for them.
+        let _ = (&label, take);
+        Dot.at(start..(start + 2.0))
+    }
+
     // Generic acceptors that only hold if the bounds are met — these are the
     // load-bearing assertions: the generated types implement the right traits.
     fn assert_timeline_component<T: TimelineComponent>(_: &T) {}
@@ -1664,7 +1705,12 @@ mod tests {
         assert_eq!(beat.duration(), Some(2.0));
         assert_eq!(beat.measure(), Some(5.0));
         assert_eq!(beat.cues(0.0), Vec::new());
-        assert_eq!(beat.arrangement(0.0).kind, NodeKind::Caption);
+        let node = beat.arrangement(0.0);
+        assert_eq!(node.kind, NodeKind::Caption);
+        // The delegated node is relabeled with the auto-derived component name
+        // (the PascalCase ident), not the inner body's empty caption label.
+        assert_eq!(node.name.as_deref(), Some("Beat"));
+        assert_eq!(node.label, String::new());
 
         let mut ctx = ResolveCtx::new();
         // resolve recurses into the placed child at its relative start.
@@ -1674,6 +1720,18 @@ mod tests {
         let builder = Beat::builder().start(3.0);
         assert_timeline_builder(&builder);
         let _boxed: Box<dyn TimelineComponent + Send> = assert_boxable(beat);
+    }
+
+    #[test]
+    fn timeline_component_name_template_interpolates_stored_fields() {
+        // Two instances with distinct stored fields surface distinct names.
+        let a = NamedBeat::builder().label("intro").take(1).start(0.0).build();
+        let b = NamedBeat::builder().label("outro").take(7).start(0.0).build();
+        assert_eq!(a.arrangement(0.0).name.as_deref(), Some("Shot 1: intro"));
+        assert_eq!(b.arrangement(0.0).name.as_deref(), Some("Shot 7: outro"));
+        // The template only relabels — it adds no tree level and preserves kind.
+        assert_eq!(a.arrangement(0.0).kind, NodeKind::Caption);
+        assert!(a.arrangement(0.0).children.is_empty());
     }
 
     #[test]

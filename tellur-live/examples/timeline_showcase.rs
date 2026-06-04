@@ -141,7 +141,7 @@ fn FadingCaption(#[clock] clock: Clock, #[builder(into)] line: String) -> impl T
 // collapse to `[offset, offset]`. With a window, the segment is `[0, secs]` and
 // its inner bars span the slot. The `Dialogue` is then placed BARE in the
 // `Sequence`, which gives it its own slot from this intrinsic length.
-#[tellur_core::component(timeline)]
+#[tellur_core::component(timeline, name = "Dialogue · {line}")]
 fn Dialogue(#[builder(into)] line: String, secs: f32) -> impl TimelineComponent {
     Timeline::builder()
         .child(FadingCaption::builder().line(line.clone()).at(0.0..secs)) // テロップ
