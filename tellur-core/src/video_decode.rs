@@ -54,10 +54,20 @@ const FRAME_CACHE_CAPACITY: usize = 8;
 /// unbounded number of `ffmpeg` children open.
 const DECODER_POOL_CAPACITY: usize = 8;
 
-/// The largest forward gap (in FRAMES) that is served by ADVANCING the running
+/// The largest forward gap (in FRAMES) that is served by ADVANCING a running
 /// child rather than a cold `-ss` SEEK. Within this window the next decoded
 /// frames are cheap to walk to; beyond it a seek + GOP realign wins.
 const MAX_ADVANCE_FRAMES: u64 = 16;
+
+/// How many independent decode CURSORS (running `ffmpeg` children, each at its
+/// own position) a single [`VideoDecoder`] keeps. The decoder is shared per
+/// `(path, target)`, but concurrent consumers play DIFFERENT positions (the live
+/// preview's two video slots + a preload stream), so a single cursor would be
+/// dragged back and forth — every request landing as a cold `-ss` seek (measured
+/// ~5–20× slowdown). One cursor per concurrent consumer keeps each one on the
+/// cheap forward-advance path; an LRU evicts the stalest when the cap is hit (an
+/// evicted consumer just re-seeks once on its next request).
+const MAX_CURSORS: usize = 4;
 
 /// The frame rate the decoder samples the source at. The source is decoded to a
 /// fixed grid so a request time maps deterministically to a frame index; this
@@ -187,22 +197,38 @@ fn decide(target: u64, current: Option<u64>, cached: bool) -> Action {
 
 // ── the per-source decoder ─────────────────────────────────────────────────────
 
-/// A running `ffmpeg` child decoding `path` to raw `rgba` frames scaled to
-/// `target`, plus a small LRU frame cache and the current decode position.
+/// A set of running `ffmpeg` children decoding `path` to raw `rgba` frames
+/// scaled to `target`, plus a small LRU frame cache shared across them.
+///
+/// Several CURSORS may run at once (see [`MAX_CURSORS`]): one per concurrent
+/// consumer playing a different position, so each stays on the cheap
+/// forward-advance path instead of fighting over a single child's position.
 ///
 /// `Send` (an [`std::process::Child`] + plain owned buffers are `Send`); held in
 /// the process-global pool behind a `Mutex`.
 struct VideoDecoder {
     path: String,
     target: Resolution,
-    /// The running child + its stdout reader, if a decode is in flight. `None`
-    /// before the first request and after EOF.
-    running: Option<Running>,
-    /// Frame index the running child will emit NEXT (the read cursor on the
-    /// fixed decode grid). `None` when no child is running.
-    next_index: Option<u64>,
-    /// LRU of recently decoded frames, keyed by frame index.
+    /// Independent decode positions, each a running child. Capped at
+    /// [`MAX_CURSORS`]; the stalest is evicted (LRU by `last_used`) when a new
+    /// seek needs a slot.
+    cursors: Vec<Cursor>,
+    /// LRU of recently decoded frames, keyed by absolute frame index — shared by
+    /// all cursors (one cursor's decoded frames serve another's cache hits).
     cache: LruCache<u64, Frame>,
+    /// Monotonic counter stamped onto a cursor's `last_used` on every access, so
+    /// the LRU eviction picks the cursor untouched longest. Avoids wall-clock.
+    tick: u64,
+}
+
+/// One decode position: a running child plus the frame index it will emit NEXT.
+struct Cursor {
+    running: Running,
+    /// Frame index the child will emit on the next read (the read head on the
+    /// fixed decode grid).
+    next_index: u64,
+    /// `VideoDecoder::tick` at this cursor's last use, for LRU eviction.
+    last_used: u64,
 }
 
 /// The live child handle: the process plus its piped stdout. Split out so it can
@@ -226,94 +252,125 @@ impl VideoDecoder {
         Self {
             path,
             target,
-            running: None,
-            next_index: None,
+            cursors: Vec::new(),
             cache: LruCache::new(
                 NonZeroUsize::new(FRAME_CACHE_CAPACITY).expect("cache capacity is non-zero"),
             ),
+            tick: 0,
         }
     }
 
-    /// Returns the frame at `source_secs`, decoding as needed. `None` if the
-    /// child cannot be spawned or yields no frame (e.g. a bad path / past EOF).
+    /// Returns the frame at `source_secs`, decoding as needed. `None` if no child
+    /// can be spawned or none yields a frame (e.g. a bad path / past EOF).
+    ///
+    /// Serve order: a cache hit; else the cursor that can reach `target_index` by
+    /// the SMALLEST forward advance (so the request rides an existing child); else
+    /// a cold seek on a fresh cursor. Keying the decision per cursor — not against
+    /// one shared position — is what stops concurrent consumers from thrashing.
     fn frame_at(&mut self, source_secs: f32) -> Option<RasterImage> {
         let target_index = frame_index_for(source_secs);
-        let cached = self.cache.contains(&target_index);
-        match decide(target_index, self.next_index, cached) {
-            Action::Cache => self.cache.get(&target_index).map(Frame::to_image),
-            Action::Advance(n) => self.advance(target_index, n),
-            Action::Seek => self.seek(target_index, source_secs),
+        self.tick = self.tick.wrapping_add(1);
+
+        if let Some(frame) = self.cache.get(&target_index) {
+            return Some(frame.to_image());
+        }
+
+        // Pick the cursor needing the smallest advance to reach the target; a
+        // cursor that is ahead or too far behind is not a candidate.
+        let best = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match decide(target_index, Some(c.next_index), false) {
+                Action::Advance(n) => Some((i, n)),
+                _ => None,
+            })
+            .min_by_key(|&(_, n)| n);
+
+        match best {
+            Some((i, n)) => self.advance(i, target_index, n),
+            None => self.seek(target_index, source_secs),
         }
     }
 
-    /// Advances the running child forward `n` frames, returning the frame at
+    /// Advances cursor `i` forward `n` frames, returning the frame at
     /// `target_index`. Each decoded frame is cached so a later request for an
     /// intermediate frame is a cache hit.
-    fn advance(&mut self, target_index: u64, n: u64) -> Option<RasterImage> {
-        // Walk `n + 1` frames: the `n` to skip plus the one we want. The running
-        // child's `next_index` is `target_index - n`.
+    fn advance(&mut self, i: usize, target_index: u64, n: u64) -> Option<RasterImage> {
+        // Walk `n + 1` frames: the `n` to skip plus the one we want. The cursor's
+        // `next_index` is `target_index - n`.
         let frame_bytes = self.frame_bytes();
+        let target = self.target;
         let mut last: Option<Frame> = None;
         for _ in 0..=n {
-            let idx = self.next_index?;
-            let frame = match self.read_one(frame_bytes) {
+            let idx = self.cursors[i].next_index;
+            let frame = match read_frame(&mut self.cursors[i].running.stdout, frame_bytes, target) {
                 Some(f) => f,
                 None => {
-                    // EOF / read error mid-advance: serve the closest frame we
-                    // have for this target, else give up (the child is spent).
-                    self.running = None;
-                    self.next_index = None;
+                    // EOF / read error mid-advance: this child is spent — drop the
+                    // cursor and serve the closest frame we have for this target.
+                    self.cursors.remove(i);
                     return self.cache.get(&target_index).map(Frame::to_image);
                 }
             };
-            self.next_index = Some(idx + 1);
+            self.cursors[i].next_index = idx + 1;
             self.cache.put(idx, frame.clone());
             if idx == target_index {
                 last = Some(frame);
             }
         }
+        self.cursors[i].last_used = self.tick;
         last.or_else(|| self.cache.get(&target_index).cloned())
             .map(|f| f.to_image())
     }
 
-    /// Cold `-ss` seek: (re)spawn the child positioned at `source_secs`, then
-    /// read the first emitted frame as `target_index`. The frame cache survives
-    /// the restart (it is keyed by absolute frame index, not child position).
+    /// Cold `-ss` seek: spawn a fresh cursor positioned at `source_secs` and read
+    /// its first emitted frame as `target_index`. Evicts the stalest cursor first
+    /// when at [`MAX_CURSORS`]. The frame cache survives (it is keyed by absolute
+    /// frame index, not child position).
     fn seek(&mut self, target_index: u64, source_secs: f32) -> Option<RasterImage> {
-        // Drop any running child first (its Drop kills + reaps it).
-        self.running = None;
-        self.next_index = None;
-
-        let running = spawn_decoder(&self.path, self.target, source_secs)?;
-        self.running = Some(running);
-        self.next_index = Some(target_index);
-
-        let frame_bytes = self.frame_bytes();
-        let frame = self.read_one(frame_bytes)?;
-        self.next_index = Some(target_index + 1);
-        self.cache.put(target_index, frame.clone());
-        Some(frame.to_image())
-    }
-
-    /// Reads exactly one frame's worth of bytes off the running child's stdout.
-    /// `None` on EOF (clean end of stream) or read error.
-    fn read_one(&mut self, frame_bytes: usize) -> Option<Frame> {
-        let running = self.running.as_mut()?;
-        let mut buf = vec![0u8; frame_bytes];
-        match read_exact_or_eof(&mut running.stdout, &mut buf) {
-            Ok(true) => Some(Frame {
-                width: self.target.width,
-                height: self.target.height,
-                pixels: buf,
-            }),
-            // Clean EOF or a short final read: out of frames.
-            Ok(false) | Err(_) => None,
+        if self.cursors.len() >= MAX_CURSORS {
+            if let Some((stalest, _)) = self
+                .cursors
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, c)| c.last_used)
+            {
+                // Drop kills + reaps the evicted child.
+                self.cursors.remove(stalest);
+            }
         }
+
+        let mut running = spawn_decoder(&self.path, self.target, source_secs)?;
+        let frame_bytes = self.frame_bytes();
+        let frame = read_frame(&mut running.stdout, frame_bytes, self.target)?;
+        self.cache.put(target_index, frame.clone());
+        self.cursors.push(Cursor {
+            running,
+            next_index: target_index + 1,
+            last_used: self.tick,
+        });
+        Some(frame.to_image())
     }
 
     /// Bytes in one decoded frame at the target resolution (RGBA, 4 bytes/px).
     fn frame_bytes(&self) -> usize {
         (self.target.width as usize) * (self.target.height as usize) * 4
+    }
+}
+
+/// Reads exactly one frame's worth of bytes off a cursor's stdout. `None` on EOF
+/// (clean end of stream) or read error.
+fn read_frame(stdout: &mut ChildStdout, frame_bytes: usize, target: Resolution) -> Option<Frame> {
+    let mut buf = vec![0u8; frame_bytes];
+    match read_exact_or_eof(stdout, &mut buf) {
+        Ok(true) => Some(Frame {
+            width: target.width,
+            height: target.height,
+            pixels: buf,
+        }),
+        // Clean EOF or a short final read: out of frames.
+        Ok(false) | Err(_) => None,
     }
 }
 
@@ -420,6 +477,90 @@ pub fn decode_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── access-order independence (the "render can't break" guarantee) ───────
+    //
+    // Behind `#[ignore]` (needs ffmpeg): the leaf must return the SAME frame for
+    // a given source time no matter HOW the decoder reached it (cold `-ss` seek
+    // vs. forward advance). If this holds, decode speed only affects latency, not
+    // which frame a time maps to — so a slow/thrashing decoder degrades to "late"
+    // but never "wrong/desynced". This test reaches each time two ways and asserts
+    // byte-identical frames.
+
+    /// Writes a `testsrc` mp4 (moving pattern + frame counter, distinct per frame)
+    /// to `path`. `secs` long at 30 fps, `w`x`h`.
+    #[cfg(test)]
+    fn write_testsrc_mp4(path: &std::path::Path, secs: u32, w: u32, h: u32) {
+        let lavfi = format!("testsrc=size={w}x{h}:rate=30:duration={secs}");
+        let status = Command::new("ffmpeg")
+            .args(["-y", "-v", "error"])
+            .args(["-f", "lavfi", "-i", &lavfi])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(path)
+            .status()
+            .expect("spawn ffmpeg testsrc fixture");
+        assert!(status.success(), "ffmpeg testsrc fixture write failed");
+    }
+
+    fn frame_bytes_at(path: &str, t: f32, target: Resolution) -> Vec<u8> {
+        let img = decode_frame(path, t, None, target)
+            .unwrap_or_else(|| panic!("decoded a frame at t={t}"));
+        img.as_cpu().expect("cpu frame").pixels.to_vec()
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg on PATH"]
+    fn frame_for_time_is_independent_of_access_order() {
+        // Two byte-identical copies so each gets its OWN pooled decoder (the pool
+        // is keyed by path): copy A is walked monotonically (all `advance`), copy
+        // B in a zig-zag that forces a cold `-ss` seek on nearly every request.
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let a = dir.join(format!("tellur_order_a_{pid}.mp4"));
+        let b = dir.join(format!("tellur_order_b_{pid}.mp4"));
+        write_testsrc_mp4(&a, 2, 160, 120);
+        std::fs::copy(&a, &b).expect("copy fixture");
+        let (a_str, b_str) = (a.to_str().unwrap(), b.to_str().unwrap());
+        let target = Resolution::new(64, 48);
+
+        // One source second on the 30 fps decode grid.
+        let times: Vec<f32> = (0..30).map(|i| i as f32 / DECODE_FPS as f32).collect();
+
+        // Monotonic baseline on copy A: every request is a forward advance.
+        let monotonic: Vec<Vec<u8>> = times.iter().map(|&t| frame_bytes_at(a_str, t, target)).collect();
+
+        // Thrash order on copy B: 0, 29, 1, 28, 2, 27, … — alternating far-forward
+        // and backward jumps, each beyond MAX_ADVANCE_FRAMES, so `decide` picks
+        // `Seek` almost every time (the worst case the live preview hits).
+        let mut order: Vec<usize> = Vec::with_capacity(times.len());
+        let (mut lo, mut hi) = (0usize, times.len() - 1);
+        while lo <= hi {
+            order.push(lo);
+            if hi != lo {
+                order.push(hi);
+            }
+            lo += 1;
+            if hi == 0 {
+                break;
+            }
+            hi -= 1;
+        }
+        let mut thrash = vec![Vec::new(); times.len()];
+        for &i in &order {
+            thrash[i] = frame_bytes_at(b_str, times[i], target);
+        }
+
+        for (i, &t) in times.iter().enumerate() {
+            assert_eq!(
+                monotonic[i], thrash[i],
+                "frame at t={t} differs between forward-advance and seek access — \
+                 the time→frame mapping is NOT order-independent"
+            );
+        }
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
 
     // ── source-time remap (no ffmpeg) ────────────────────────────────────────
 
