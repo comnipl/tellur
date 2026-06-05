@@ -48,8 +48,10 @@ export function clampTimelineViewport(
 }
 
 // Trailing overscroll past the content end, in units of the visible window
-// (1 = one full viewport width of empty space after the last clip).
-const TRAILING_OVERSCROLL = 1;
+// (1 = one full viewport width of empty space after the last clip). Exported so
+// Timeline.tsx widens its body translate clamp by the same amount, keeping body
+// + ruler in lock-step through the overscroll region.
+export const TRAILING_OVERSCROLL = 1;
 
 export function getVisibleDuration(duration: number, zoom: number): number {
   const safeDuration = getSafeDuration(duration);

@@ -11,6 +11,7 @@ import { fetchArrangement } from "../api";
 import {
   MIN_TIMELINE_ZOOM,
   MAX_TIMELINE_ZOOM,
+  TRAILING_OVERSCROLL,
   clamp,
   clampTimelineViewport,
   getVisibleDuration,
@@ -623,11 +624,19 @@ export function Timeline(props: TimelineProps) {
   // keeps projections finite.
   const targetInnerWidth = Math.max(bodyWidth * normalizedViewport.zoom, 16);
   // When the content is narrower than the viewport there is nothing to pan, so
-  // `innerWidth - bodyWidth` is negative and this clamps to 0 (left-aligned).
+  // `innerWidth - bodyWidth` is negative and the floor below clamps to 0
+  // (left-aligned). When zoomed in, allow the body to translate one extra
+  // viewport width past the content end (TRAILING_OVERSCROLL) — the SAME amount
+  // clampTimelineViewport lets `start` overscroll — so the clips slide left in
+  // lock-step with the ruler into the trailing blank, instead of stalling at the
+  // content end. `start` is already overscroll-clamped, so this just stops the
+  // body translate from re-capping it short.
+  const maxViewportX =
+    Math.max(0, targetInnerWidth - bodyWidth) + bodyWidth * TRAILING_OVERSCROLL;
   const targetViewportX = clamp(
     (normalizedViewport.start / duration) * targetInnerWidth,
     0,
-    Math.max(0, targetInnerWidth - bodyWidth),
+    maxViewportX,
   );
 
   // ANIMATED geometry: `innerWidth`/`viewportX` glide to the target on an
