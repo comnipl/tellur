@@ -28,6 +28,10 @@ interface TimelineProps {
   // `.timeline__clip--selected` highlight. Selection state is lifted to App so
   // the sibling Inspector can read the full node; App passes the id back here.
   selectedId: string | null;
+  // Bumped by the server on every hot reload (the `cacheKey`). The arrangement
+  // fetch keys off this so reloading refreshes the lanes even though the timeline
+  // id is unchanged. `null` while server info hasn't loaded yet.
+  reloadKey: string | null;
   onSeek: (seconds: number) => void;
   onViewportChange: (next: TimelineViewportChange) => void;
   // Called when a clip is clicked (with the clicked node's data) or the
@@ -501,6 +505,7 @@ export function Timeline(props: TimelineProps) {
     seconds,
     viewport,
     selectedId,
+    reloadKey,
     onSeek,
     onViewportChange,
     onSelect,
@@ -516,9 +521,15 @@ export function Timeline(props: TimelineProps) {
   const [draggingSeek, setDraggingSeek] = useState(false);
   const [arrangement, setArrangement] = useState<Arrangement | null>(null);
   // Set of collapsed node ids (dotted DFS paths). Seeded with every leaf
-  // container when an arrangement loads (windows default to COLLAPSED); grouping
-  // containers stay expanded. A user's manual toggle persists until refetch.
+  // container when an arrangement first loads (windows default to COLLAPSED);
+  // grouping containers stay expanded. On a hot-reload refetch the user's manual
+  // open/closed state is PRESERVED for paths that still exist (see the seeding
+  // effect); only brand-new leaf containers default to collapsed.
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Leaf-container paths seen on the previous arrangement, so the seeding effect
+  // can tell a genuinely NEW container (default it collapsed) from one the user
+  // already expanded (keep it expanded across a reload).
+  const prevLeafContainersRef = useRef<Set<string>>(new Set());
 
   // Honor the OS "reduce motion" preference: when set, expand/collapse snaps
   // instead of tweening (zero-duration transitions, no enter/exit offset).
@@ -544,7 +555,10 @@ export function Timeline(props: TimelineProps) {
     return () => observer.disconnect();
   }, []);
 
-  // Refetch the resolved tree whenever the active timeline changes. `null`
+  // Refetch the resolved tree whenever the active timeline changes OR the server
+  // hot-reloads (`reloadKey` = the info cacheKey). The id is stable across a
+  // reload, so without `reloadKey` the lanes would go stale; `/api/arrangement`
+  // re-resolves per request, so a refetch always returns the latest tree. `null`
   // (failed resolve / legacy adapter) leaves us in the flat fallback below.
   const timelineId = timeline?.id ?? null;
   useEffect(() => {
@@ -561,17 +575,33 @@ export function Timeline(props: TimelineProps) {
         setArrangement(null);
       });
     return () => controller.abort();
-  }, [timelineId]);
+  }, [timelineId, reloadKey]);
 
-  // Default every leaf-container window to collapsed whenever the tree changes.
+  // Seed collapsed state when the tree changes. First load (or after a failed
+  // resolve) defaults every leaf container to collapsed. On a hot-reload refetch
+  // the user's toggles are preserved: a container that still exists keeps its
+  // prior open/closed state, paths that vanished are dropped, and only brand-new
+  // leaf containers default to collapsed. Uses `prevLeafContainersRef` to tell
+  // "user expanded this" from "this didn't exist before".
   useEffect(() => {
     if (!arrangement) {
       setCollapsed(new Set());
+      prevLeafContainersRef.current = new Set();
       return;
     }
     const leafContainers: string[] = [];
     collectLeafContainerPaths(arrangement, "0", leafContainers);
-    setCollapsed(new Set(leafContainers));
+    const prevLeaf = prevLeafContainersRef.current;
+    setCollapsed((prev) => {
+      const next = new Set<string>();
+      for (const path of leafContainers) {
+        const isNew = !prevLeaf.has(path);
+        // New container -> default collapsed; existing -> keep prior state.
+        if (isNew || prev.has(path)) next.add(path);
+      }
+      return next;
+    });
+    prevLeafContainersRef.current = new Set(leafContainers);
   }, [arrangement]);
 
   const { lanes, frames } = arrangement

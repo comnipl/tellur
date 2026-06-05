@@ -310,6 +310,10 @@ export function App() {
             seconds={preview.state.seconds}
             viewport={timelineViewport}
             selectedId={selectedNode?.id ?? null}
+            // Hot-reload signal: the server bumps `cacheKey` on every reload, and
+            // `/api/arrangement` re-resolves per request, so re-fetching when this
+            // changes refreshes the lanes without the timeline id changing.
+            reloadKey={info?.cacheKey ?? null}
             onSeek={preview.setSeconds}
             onViewportChange={updateTimelineViewport}
             onSelect={setSelectedNode}
