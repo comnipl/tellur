@@ -2,7 +2,16 @@ import type { CacheRange } from "./types";
 
 const EPSILON = 1e-4;
 const RANGE_PREFIX = "tellur-live:cache-ranges:";
-const RANGE_SCOPE_VERSION = "video-ranges-v1";
+// Bump this whenever the SERVER's stream ENCODE format changes (codec, movflags,
+// fragmentation, audio mux …). The cacheKey only tracks the plugin .so, so an
+// encode-only change would otherwise let stale, format-incompatible blobs be
+// re-appended into MSE and stall playback. v2 retired the per-frame-fragment
+// (`frag_every_frame`) blobs whose audio track had non-monotonic `tfdt`; v3
+// retired the AAC-audio blobs now that the stream uses FLAC; v4 retired the
+// untagged-color blobs once the video was color-tagged; v5 switches that tag to
+// limited-range BT.709 to match the offline export default; v6 aligns the FLAC
+// block size to the video-frame grid so cache-segment audio seams are gapless.
+const RANGE_SCOPE_VERSION = "video-ranges-v6";
 const MEDIA_DB_NAME = "tellur-live-media";
 const MEDIA_DB_VERSION = 3;
 const MEDIA_STORE = "media";

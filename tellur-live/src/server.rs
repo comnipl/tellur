@@ -772,6 +772,25 @@ fn handle_video_stream(
         setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
 
+    // The frame-quantized video length, used to BOUND the output below with `-t`
+    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
+    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
+    let video_seconds = total_frames as f32 / setup.fps as f32;
+
+    // FLAC block size aligned to ONE video frame's worth of audio samples, applied
+    // to the encoder below (only when the sample rate divides evenly by fps — the
+    // common 24/25/30/48/50/60 case). `-t` quantizes every segment to an integer
+    // number of video frames, so an aligned block size makes each segment an exact
+    // integer number of FLAC blocks: no partial trailing block, so the muxer emits
+    // NO per-segment trim (`discard_padding`) at the cut. Adjacent cached segments
+    // then concatenate gaplessly in MSE. With the default (~1152-sample) block the
+    // final block is partial and gets trimmed mid-block, and the browser — which
+    // decodes each cached segment separately and stitches at the buffer level —
+    // produces an audible click at every cache-segment boundary.
+    let audio_frame_size = AUDIO_RATE
+        .is_multiple_of(setup.fps)
+        .then(|| AUDIO_RATE / setup.fps);
+
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner")
         .args(["-loglevel", "error"])
@@ -803,7 +822,27 @@ fn handle_video_stream(
     cmd.args(["-c:v", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-tune", "zerolatency"])
+        // Convert the rendered full-range RGB to (limited-range) BT.709 YUV and
+        // TAG the stream with that exact matrix/range. Without this, swscale
+        // converts with its BT.601/limited defaults and writes NO color metadata,
+        // so the browser falls back to its own guess (BT.709 for 720p+) and
+        // decodes with a different matrix than the encode used — shifting the
+        // colors versus the paused PNG (which shows the raw full-range RGB with no
+        // conversion). `scale` does the conversion, `setparams` stamps all four
+        // color fields onto the frames (so primaries/transfer are written too,
+        // without codec-specific params), and the `-color_*` options mirror them
+        // at the stream level. Limited range matches the offline export default
+        // (`FfmpegEncoder`'s `ColorRange::Limited`) so preview and export agree.
+        .args([
+            "-vf",
+            "scale=out_range=tv:out_color_matrix=bt709,format=yuv420p,\
+             setparams=range=tv:color_primaries=bt709:colorspace=bt709:color_trc=bt709",
+        ])
         .args(["-pix_fmt", "yuv420p"])
+        .args(["-color_primaries", "bt709"])
+        .args(["-color_trc", "bt709"])
+        .args(["-colorspace", "bt709"])
+        .args(["-color_range", "tv"])
         .args(["-g", &setup.gop.to_string()])
         .args(["-keyint_min", &setup.gop.to_string()])
         .args(["-sc_threshold", "0"])
@@ -811,20 +850,48 @@ fn handle_video_stream(
         .args(["-refs", "1"])
         .args(["-flags", "low_delay"])
         .args(["-crf", &setup.crf.to_string()])
-        // Audio AAC; map exactly one video + one audio stream and end with the
-        // video input (`-shortest`), so the over-long / infinite audio is cut.
-        .args(["-c:a", "aac"])
-        .args(["-b:a", "160k"])
-        .args(["-map", "0:v:0"])
+        // Audio FLAC, NOT AAC; map exactly one video + one audio stream. Each
+        // cache segment is a SEPARATE ffmpeg encode, and AAC adds ~2048 samples of
+        // encoder delay (priming) at the start of every encode plus frame-grid
+        // padding at the end. Concatenating adjacent segments in MSE then leaves a
+        // brief silent gap / click at each cache boundary. FLAC is lossless with
+        // ZERO encoder delay and stores the exact sample count, so a segment's
+        // first sample lands exactly on its start time and the boundaries are
+        // gapless. `-compression_level 0` keeps the encode fast for the realtime
+        // path (it stays lossless regardless of level).
+        .args(["-c:a", "flac"])
+        .args(["-compression_level", "0"]);
+    // Align FLAC blocks to the video-frame sample grid so cache-segment seams stay
+    // gapless (see `audio_frame_size`). Stream-specified to `:a` so it can't be
+    // misread as a (meaningless) video option.
+    if let Some(frame_size) = audio_frame_size {
+        cmd.args(["-frame_size:a", &frame_size.to_string()]);
+    }
+    cmd.args(["-map", "0:v:0"])
         .args(["-map", "1:a:0"])
-        .arg("-shortest")
+        // Bound the output to the video's frame-quantized length with `-t`, NOT
+        // `-shortest`. Video frames are produced live and paced to real time, but
+        // the audio WAV is a complete file ffmpeg reads instantly; `-shortest`
+        // then races the fully-available audio against the still-arriving video
+        // and ends the output EARLY — dropping the tail frame(s) and opening a
+        // startup gap (the offline export avoids this by pre-fitting audio to the
+        // video length). `-t` cuts on output PTS, so every fed frame survives.
+        .args(["-t", &format!("{video_seconds:.6}")])
         .args(["-muxdelay", "0"])
         .args(["-muxpreload", "0"])
         .args(["-flush_packets", "1"])
         .args(["-f", "mp4"])
+        // Fragment per GOP (`frag_keyframe`), NOT per video frame
+        // (`frag_every_frame`). `frag_every_frame` cuts a fragment every video
+        // frame (33.3 ms @ 30fps), but an AAC frame is 1024 samples (≈21.3 ms) /
+        // 2048 (≈42.7 ms) and does not align to the video grid — so the audio
+        // fragments end up with DUPLICATE / non-monotonic `tfdt`
+        // (baseMediaDecodeTime), which MSE chokes on: the audio track stalls and,
+        // since playback needs both tracks, the video freezes a frame or two in.
+        // GOP fragments hold whole audio frames with strictly increasing `tfdt`.
         .args([
             "-movflags",
-            "frag_keyframe+frag_every_frame+empty_moov+default_base_moof",
+            "frag_keyframe+empty_moov+default_base_moof",
         ])
         .arg("pipe:1")
         .stdin(Stdio::piped())
@@ -880,7 +947,6 @@ fn handle_video_stream(
 
     let frame_step = 1.0 / setup.fps as f32;
     let frame_duration = Duration::from_secs_f32(frame_step);
-    let total_frames = (setup.duration * setup.fps as f32).ceil() as u64;
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {

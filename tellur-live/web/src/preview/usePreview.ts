@@ -33,13 +33,16 @@ const END_STALL_TAIL_SECONDS = 0.5;
 const END_STALL_TICKS = 6;
 const DEBUG_STORAGE_KEY = "tellur-live:debug";
 const MP4_MIME_TYPES = [
-  // A/V variants first: the preview stream always carries an AAC audio track
+  // A/V variants first: the preview stream always carries a FLAC audio track
   // (silent when the timeline has no audio), so the SourceBuffer must declare
   // the audio codec or appended segments with an audio track fail to parse.
-  'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
-  'video/mp4; codecs="avc1.4D401E, mp4a.40.2"',
-  'video/mp4; codecs="avc1.64001E, mp4a.40.2"',
-  // Video-only fallbacks for environments without AAC support.
+  // FLAC is used instead of AAC because it has zero encoder delay, so the audio
+  // concatenates gaplessly across cache-segment boundaries — AAC's per-encode
+  // priming left an audible click at each seam.
+  'video/mp4; codecs="avc1.42E01E, flac"',
+  'video/mp4; codecs="avc1.4D401E, flac"',
+  'video/mp4; codecs="avc1.64001E, flac"',
+  // Video-only fallbacks for environments without FLAC-in-MP4 support.
   'video/mp4; codecs="avc1.42E01E"',
   'video/mp4; codecs="avc1.4D401E"',
   'video/mp4; codecs="avc1.64001E"',
@@ -166,6 +169,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const preloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playbackTokenRef = useRef(0);
   const rafRef = useRef<number | null>(null);
+  // Handle for the deferred `startVideoPlayback` rAF scheduled in `togglePlay`.
+  // Tracked separately from `rafRef` (which only holds the playback tickers) so a
+  // pause/seek landing inside the one-frame window before it fires can cancel it
+  // — otherwise the start would run after the user already paused (phantom
+  // playback) and bump `displayTokenRef`, discarding the pause-edge PNG.
+  const playStartRafRef = useRef<number | null>(null);
   const cacheScopeRef = useRef("");
   const lastCacheKeyRef = useRef("");
   const immediatePreloadRef = useRef(false);
@@ -214,7 +223,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     if (!timelineId) return "";
     const r = resolvedResolution();
     return [
-      "range-v1",
+      // Bump this version (and cache.ts RANGE_SCOPE_VERSION) on any server-side
+      // encode-format change so old, format-incompatible cached blobs are never
+      // re-appended into MSE. v2 retired the `frag_every_frame` blobs; v3 retired
+      // the AAC-audio blobs now that the stream uses FLAC; v4 retired the
+      // untagged-color blobs once the video was color-tagged; v5 switches that
+      // tag to limited-range BT.709 to match the offline export default; v6 aligns
+      // the FLAC block size to the video-frame grid for gapless segment seams.
+      "range-v6",
       timelineId,
       `${r.width}x${r.height}`,
       String(fps),
@@ -794,7 +810,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           if (streamingSessionRef.current?.id === session.id) {
             streamingSessionRef.current = null;
           }
-          if (session.clearOnFinalize) {
+          // Don't tear down the slot if it was just promoted to active playback:
+          // `promoteStoppedStream` synchronously claims `playbackRef.slot` before
+          // awaiting the element's seek/current-data. If this finalize (e.g. the
+          // preroll hitting its `stoppedTargetEnd`) cleared that same slot, the
+          // promote's `waitForVideoSeeked`/`waitForVideoCurrentData` would hang
+          // forever (a removed `src` fires `emptied`/`abort`, never `seeked`/
+          // `error`) and playback would silently never start.
+          if (session.clearOnFinalize && playbackRef.current?.slot !== slot) {
             clearVideoSlot(slot);
           }
           if (
@@ -1092,6 +1115,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const stopPlayback = useCallback(
     (saveStream: boolean, keepCurrentFrame: boolean = false) => {
       stopRaf();
+      // Cancel a deferred `startVideoPlayback` that hasn't fired yet, so pausing
+      // (or seeking) within the rAF window can't resurrect playback afterwards.
+      if (playStartRafRef.current != null) {
+        cancelAnimationFrame(playStartRafRef.current);
+        playStartRafRef.current = null;
+      }
       playbackTokenRef.current += 1;
       const playback = playbackRef.current;
       previewDebug("playback:stop", {
@@ -1150,6 +1179,15 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   );
 
   const startVideoPlayback = useCallback(() => {
+    // This runs from a deferred rAF scheduled in `togglePlay`. If the user paused
+    // (or seeked) inside that one-frame window, `playingRef` is already false —
+    // bail so we don't start phantom playback or bump `displayTokenRef` (which
+    // would discard the freshly requested paused PNG).
+    playStartRafRef.current = null;
+    if (!playingRef.current) {
+      previewDebug("playback:start:not-playing", { seconds: secondsRef.current });
+      return;
+    }
     if (!timelineId || !hasServerInfo || !pluginCacheKey) {
       previewDebug("playback:start:skipped", {
         hasTimeline: Boolean(timelineId),
@@ -1176,7 +1214,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     stopRaf();
     const token = ++displayTokenRef.current;
     heldVideoSlotRef.current = null;
-    const startSeconds = clampSeconds(secondsRef.current);
+    let startSeconds = clampSeconds(secondsRef.current);
+    // Pressing play with the head parked at the very end (after playback ran to
+    // the end, or a full-right scrub) would start at `timelineDuration`, where the
+    // pipeline cursor loop (`cursor < timelineDuration - EPSILON`) skips entirely
+    // and `maybeStart` never runs — playback would silently never begin and no
+    // error would surface. Treat play-from-the-end as a replay from the start.
+    if (startSeconds >= timelineDuration - EPSILON) {
+      startSeconds = 0;
+      setPreviewSecondsState(0);
+    }
     previewDebug("playback:start", {
       startSeconds,
       token,
@@ -1386,8 +1433,13 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           }
           await waitForVideoMetadata(streamVideo);
           if (offset > EPSILON) {
-            streamVideo.currentTime = offset;
-            await waitForVideoSeeked(streamVideo);
+            const range = bufferedRangeContaining(streamVideo.buffered, offset);
+            streamVideo.currentTime = range
+              ? Math.max(offset, range.start)
+              : offset;
+            // Resilient wait (see waitForVideoSettledAfterSeek): a `seeked` that
+            // never fires at the buffer edge must not strand the promoted stream.
+            await waitForVideoSettledAfterSeek(streamVideo);
           }
           await waitForVideoCurrentData(streamVideo);
           if (token !== displayTokenRef.current || session.controller.signal.aborted) {
@@ -1417,7 +1469,19 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       return;
     }
 
-    abortStreamingSession(false);
+    // Promotion was rejected. If the rejected preroll is a still-buffering AHEAD
+    // gap (it began past the playhead because the playhead's region was already
+    // cached), finalize it with save=true so its buffered bytes are persisted
+    // into the cache instead of discarded — the pipeline below then reuses that
+    // gap rather than re-streaming it, and the green bar doesn't blink away the
+    // segment it just built.
+    const reusablePreroll =
+      stoppedSession != null &&
+      stoppedSession.mode === "stopped" &&
+      !stoppedSession.controller.signal.aborted &&
+      stoppedSession.bufferedSeconds > EPSILON &&
+      stoppedSession.start > startSeconds + EPSILON;
+    abortStreamingSession(reusablePreroll);
     abortPlaybackPipeline(false);
     clearVideoSlot(slot);
 
@@ -1447,23 +1511,65 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
     const maybeStart = async () => {
       const sourceBuffer = pipeline.sourceBuffer;
-      if (
-        pipeline.started ||
-        pipeline.starting ||
-        !sourceBuffer ||
-        !bufferedContains(sourceBuffer.buffered, startSeconds)
-      ) {
+      const contains = sourceBuffer
+        ? bufferedContains(sourceBuffer.buffered, startSeconds)
+        : false;
+      if (pipeline.started || pipeline.starting || !sourceBuffer || !contains) {
+        previewDebug("pipeline:maybe-start:skip", {
+          id: pipeline.id,
+          started: pipeline.started,
+          starting: Boolean(pipeline.starting),
+          hasSourceBuffer: Boolean(sourceBuffer),
+          bufferedContainsStart: contains,
+          startSeconds,
+          buffered: sourceBuffer ? bufferedDebug(sourceBuffer.buffered) : [],
+        });
         return pipeline.starting ?? Promise.resolve();
       }
       pipeline.starting = (async () => {
+        previewDebug("pipeline:maybe-start:begin", {
+          id: pipeline.id,
+          startSeconds,
+          currentTime: video.currentTime,
+          readyState: video.readyState,
+          buffered: bufferedDebug(sourceBuffer.buffered),
+        });
         await waitForVideoMetadata(video);
         if (controller.signal.aborted || token !== displayTokenRef.current) return;
+        previewDebug("pipeline:maybe-start:metadata", {
+          id: pipeline.id,
+          readyState: video.readyState,
+        });
         if (Math.abs(video.currentTime - startSeconds) > EPSILON) {
-          video.currentTime = startSeconds;
-          await waitForVideoSeeked(video);
+          // Clamp the seek target up to the true start of the buffered range that
+          // brackets startSeconds: the append's first sample can land a hair after
+          // startSeconds (within EPSILON, so bufferedContains still passes), and
+          // seeking into that sub-EPSILON gap hangs the seek on some browsers.
+          const range = bufferedRangeContaining(sourceBuffer.buffered, startSeconds);
+          const target = range ? Math.max(startSeconds, range.start) : startSeconds;
+          video.currentTime = target;
+          previewDebug("pipeline:maybe-start:seek", {
+            id: pipeline.id,
+            to: target,
+            startSeconds,
+            rangeStart: range?.start ?? null,
+            rangeEnd: range?.end ?? null,
+            seeking: video.seeking,
+          });
+          await waitForVideoSettledAfterSeek(video);
+          previewDebug("pipeline:maybe-start:seeked", {
+            id: pipeline.id,
+            currentTime: video.currentTime,
+            readyState: video.readyState,
+            seeking: video.seeking,
+          });
         }
         await waitForVideoCurrentData(video);
         if (controller.signal.aborted || token !== displayTokenRef.current) return;
+        previewDebug("pipeline:maybe-start:current-data", {
+          id: pipeline.id,
+          readyState: video.readyState,
+        });
         await video.play();
         if (controller.signal.aborted || token !== displayTokenRef.current) return;
         pipeline.started = true;
@@ -1476,9 +1582,17 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         setImageVisible(false);
         setVideoVisible(true);
         startTicker();
-      })().finally(() => {
-        pipeline.starting = null;
-      });
+      })()
+        .catch((e) => {
+          previewDebug("pipeline:maybe-start:error", {
+            id: pipeline.id,
+            error: String(e),
+          });
+          throw e;
+        })
+        .finally(() => {
+          pipeline.starting = null;
+        });
       return pipeline.starting;
     };
 
@@ -1734,6 +1848,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   useEffect(
     () => () => {
       stopRaf();
+      if (playStartRafRef.current != null) {
+        cancelAnimationFrame(playStartRafRef.current);
+        playStartRafRef.current = null;
+      }
       if (preloadTimerRef.current) clearTimeout(preloadTimerRef.current);
       clearAllVideo();
       if (imageObjectUrlRef.current) {
@@ -1834,7 +1952,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       if (videoARef.current) videoARef.current.muted = false;
       if (videoBRef.current) videoBRef.current.muted = false;
       setPreviewPlayingState(true);
-      requestAnimationFrame(() => startVideoPlayback());
+      if (playStartRafRef.current != null) {
+        cancelAnimationFrame(playStartRafRef.current);
+      }
+      playStartRafRef.current = requestAnimationFrame(() => startVideoPlayback());
     } else {
       const stoppedSeconds = currentPlaybackSeconds();
       setPreviewSecondsState(stoppedSeconds);
@@ -1955,25 +2076,6 @@ function waitForVideoMetadata(video: HTMLVideoElement): Promise<void> {
   });
 }
 
-function waitForVideoSeeked(video: HTMLVideoElement): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onSeeked = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = () => {
-      cleanup();
-      reject(new Error("video seek failed"));
-    };
-    const cleanup = () => {
-      video.removeEventListener("seeked", onSeeked);
-      video.removeEventListener("error", onError);
-    };
-    video.addEventListener("seeked", onSeeked, { once: true });
-    video.addEventListener("error", onError, { once: true });
-  });
-}
-
 function waitForVideoCurrentData(video: HTMLVideoElement): Promise<void> {
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
     return Promise.resolve();
@@ -1987,7 +2089,12 @@ function waitForVideoCurrentData(video: HTMLVideoElement): Promise<void> {
       cleanup();
       reject(new Error("video frame failed"));
     };
+    // Bound the wait: if neither `loadeddata`/`canplay` nor `error` arrives (a
+    // stuck seek can leave the element at HAVE_METADATA indefinitely), proceed to
+    // the play() attempt rather than stranding the start sequence forever.
+    const timer = setTimeout(onReady, 1500);
     const cleanup = () => {
+      clearTimeout(timer);
       video.removeEventListener("loadeddata", onReady);
       video.removeEventListener("canplay", onReady);
       video.removeEventListener("error", onError);
@@ -2005,6 +2112,51 @@ function bufferedContains(buffered: TimeRanges, seconds: number): boolean {
     }
   }
   return false;
+}
+
+// The buffered range that brackets `seconds` (within EPSILON), or null. Used to
+// clamp a seek target up to the range's true start: `bufferedContains` accepts a
+// target up to EPSILON before the range, but actually seeking a hair before the
+// first buffered sample makes some browsers (Arc / older Chromium) sit at
+// `seeking = true` forever, waiting for data that isn't there — `seeked` never
+// fires and playback never starts.
+function bufferedRangeContaining(
+  buffered: TimeRanges,
+  seconds: number,
+): { start: number; end: number } | null {
+  for (let i = 0; i < buffered.length; i++) {
+    const start = buffered.start(i);
+    const end = buffered.end(i);
+    if (start <= seconds + EPSILON && end > seconds + EPSILON) {
+      return { start, end };
+    }
+  }
+  return null;
+}
+
+// Resolve once the element has settled after a seek. `seeked` is the happy path,
+// but it can never arrive when the seek target sits at the very edge of a
+// freshly-appended MSE buffer (observed in Arc); `canplay`/`loadeddata` (data is
+// ready at the new position) and a hard timeout keep that from stranding the
+// start sequence forever. Never rejects — a missing `seeked` should degrade to
+// "try to play anyway", not a dead playback.
+function waitForVideoSettledAfterSeek(video: HTMLVideoElement): Promise<void> {
+  if (!video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const finish = () => {
+      video.removeEventListener("seeked", finish);
+      video.removeEventListener("canplay", finish);
+      video.removeEventListener("loadeddata", finish);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 1500);
+    video.addEventListener("seeked", finish, { once: true });
+    video.addEventListener("canplay", finish, { once: true });
+    video.addEventListener("loadeddata", finish, { once: true });
+  });
 }
 
 async function waitForSourceBufferIdle(sourceBuffer: SourceBuffer): Promise<void> {
