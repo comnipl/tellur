@@ -135,7 +135,6 @@ export function TabsRow(props: TabsRowProps) {
           animVisibleDuration,
           targetVisibleDuration,
           width,
-          duration,
         )
       : [];
   // Left-edge readout (the pinned leading tick): formatted from the TARGET start
@@ -330,7 +329,6 @@ function buildRulerTicks(
   animVisibleDuration: number,
   pxVisibleDuration: number,
   width: number,
-  duration: number,
 ): RulerTick[] {
   if (width <= 0 || pxVisibleDuration <= 0) return [];
 
@@ -340,11 +338,15 @@ function buildRulerTicks(
   if (!Number.isFinite(step) || step <= 0) return [];
 
   // Visible window from the ANIMATED projection, padded by one step so ticks
-  // sliding in at the edges are present mid-tween.
+  // sliding in at the edges are present mid-tween. The window end is NOT capped
+  // at `duration`: in the trailing overscroll region (past the content end) the
+  // ruler keeps emitting ticks for times beyond duration, so the graticule
+  // continues across the blank area. Only the start is floored at 0 (no negative
+  // times).
   const windowStart = animStart - step;
   const windowEnd = animStart + animVisibleDuration + step;
   const first = Math.max(0, Math.ceil(windowStart / step) * step);
-  const last = Math.min(duration, windowEnd);
+  const last = windowEnd;
 
   const ticks: RulerTick[] = [];
   // Guard against pathological counts (e.g. a degenerate width during layout).
