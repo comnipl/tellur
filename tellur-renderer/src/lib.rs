@@ -11,4 +11,4 @@ pub use rasterize::{Rasterizable, RasterizableBuilder, Rasterize};
 pub use render_context::CachingRenderContext;
 pub use shadow::DropShadow;
 pub use subtitle::write_subtitles;
-pub use video::{FfmpegEncoder, FfmpegError};
+pub use video::{ColorRange, FfmpegEncoder, FfmpegError};

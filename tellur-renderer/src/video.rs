@@ -48,17 +48,49 @@ const AUDIO_RATE: u32 = 48_000;
 /// Fixed audio output channel layout for the A/V mux (stereo).
 const AUDIO_CHANNELS: u16 = 2;
 
+/// The YUV range the rendered full-range RGB is converted to (and tagged as)
+/// when encoding. The conversion and the color tag are always derived from the
+/// SAME value, so they cannot disagree — a conversion/tag mismatch is exactly
+/// what shifts the decoded colors away from the rendered source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorRange {
+    /// Limited / "TV" range (luma 16–235). The safe, widely-compatible default:
+    /// effectively every player and editor decodes it correctly.
+    #[default]
+    Limited,
+    /// Full / "PC" range (luma 0–255). Reproduces the full-range rendered source
+    /// most precisely, but full-range `yuv420p` is mishandled by some external
+    /// players/editors, so it is opt-in.
+    Full,
+}
+
+impl ColorRange {
+    /// The ffmpeg range token used for both the `scale`/`setparams` filter and
+    /// the `-color_range` output tag.
+    fn token(self) -> &'static str {
+        match self {
+            ColorRange::Limited => "tv",
+            ColorRange::Full => "pc",
+        }
+    }
+}
+
 /// Builder that spawns `ffmpeg` and drives a [`Timeline`] through it.
 ///
 /// The frame size is fixed at construction (`resolution`) and frames are
 /// emitted at `fps` Hz. Output-side `ffmpeg` arguments (codec, container,
 /// filters, ...) are supplied via [`Self::arg`] / [`Self::args`] and inserted
 /// verbatim between the raw-video input and the output path.
+///
+/// The rendered frames are full-range RGB; the encoder converts them to
+/// BT.709 YUV and tags the output accordingly (see [`Self::color_range`]) so a
+/// decoder reproduces the rendered colors instead of guessing a matrix/range.
 pub struct FfmpegEncoder {
     fps: u32,
     resolution: Resolution,
     args: Vec<String>,
     progress: bool,
+    color_range: ColorRange,
 }
 
 #[derive(Debug, Error)]
@@ -96,7 +128,18 @@ impl FfmpegEncoder {
             resolution,
             args: Vec::new(),
             progress: true,
+            color_range: ColorRange::default(),
         }
+    }
+
+    /// Selects the YUV range the rendered full-range RGB is converted to AND the
+    /// color metadata the output is tagged with. Both are derived from this one
+    /// value, so they can never disagree. Defaults to [`ColorRange::Limited`];
+    /// pass [`ColorRange::Full`] to reproduce the rendered source most precisely
+    /// at the cost of broad external-player compatibility.
+    pub fn color_range(mut self, range: ColorRange) -> Self {
+        self.color_range = range;
+        self
     }
 
     pub fn arg(mut self, a: impl Into<String>) -> Self {
@@ -256,9 +299,38 @@ impl FfmpegEncoder {
             cmd.stdout(Stdio::null());
         }
 
-        // `extra_args` (e.g. the audio `-i <wav>` + maps) and the user's
-        // `self.args` both land BETWEEN the input and the output, in that order.
+        // Convert the rendered FULL-RANGE RGB to BT.709 YUV and tag the stream
+        // with that exact matrix/range. `scale` does the RGB→YUV conversion at the
+        // chosen range, `setparams` stamps all four color fields onto the frames
+        // (so the encoder writes primaries/transfer too, codec-agnostically), and
+        // the `-color_*` output options mirror them at the stream level. Both the
+        // conversion (`out_range`) and the tag (`-color_range`) come from the SAME
+        // token, so they can't drift apart — a mismatch is what would otherwise
+        // shift decoded colors away from the rendered source.
+        let range = self.color_range.token();
+        let color_vf = format!(
+            "scale=out_range={range}:out_color_matrix=bt709,format=yuv420p,\
+             setparams=range={range}:color_primaries=bt709:colorspace=bt709:color_trc=bt709"
+        );
+        let color_args = [
+            "-vf",
+            &color_vf,
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            range,
+        ];
+
+        // `extra_args` (e.g. the audio `-i <wav>` + maps) declares the second
+        // input; the color args and the user's `self.args` are output options that
+        // follow. The color args precede `self.args` so an advanced caller can
+        // still override them through raw `.args()` if they take full control.
         cmd.args(extra_args)
+            .args(color_args)
             .args(&self.args)
             .arg(out)
             .stdin(Stdio::piped())
@@ -728,6 +800,25 @@ mod av_mux_tests {
         has_stream(path, "a")
     }
 
+    // The video stream's four color metadata fields, as
+    // "range|space|primaries|transfer".
+    fn probe_color(path: &Path) -> String {
+        let out = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args([
+                "-show_entries",
+                "stream=color_range,color_space,color_primaries,color_transfer",
+            ])
+            .args(["-of", "default=noprint_wrappers=1:nokey=1"])
+            .arg(path)
+            .output()
+            .expect("run ffprobe");
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
     /// Writes a short `testsrc` mp4 (a moving color pattern) to a temp path —
     /// the real video BACKGROUND for the end-to-end A/V test.
     fn write_testsrc_mp4(secs: u32, w: u32, h: u32) -> PathBuf {
@@ -773,6 +864,53 @@ mod av_mux_tests {
 
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&out);
+    }
+
+    // The rendered frames are full-range RGB; the encoder must convert them to
+    // BT.709 YUV and TAG all four color fields so a decoder reproduces the
+    // rendered colors instead of guessing a matrix/range (an untagged stream
+    // decoded as the player's default shifts the colors). The range token must be
+    // driven by `color_range()` and stay consistent between the conversion and
+    // the tag — this guards the regression that made the preview/export colors
+    // differ from the paused PNG.
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH"]
+    fn encode_timeline_tags_bt709_color_metadata() {
+        let tl = Timeline::builder().child(Solid.at(0.0..0.2)).build();
+        let resolved = resolve(tl).expect("solid timeline resolves");
+
+        // Default: limited-range BT.709, every field tagged.
+        let mut lim = std::env::temp_dir();
+        lim.push(format!("tellur_color_lim_{}.mp4", std::process::id()));
+        FfmpegEncoder::new(Resolution::new(64, 64), 24)
+            .progress(false)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .encode_timeline(&resolved, &lim)
+            .expect("limited-range encode succeeds");
+        assert_eq!(
+            probe_color(&lim),
+            "tv|bt709|bt709|bt709",
+            "default output is tagged limited-range BT.709 on all four fields"
+        );
+
+        // Opt-in full range flips ONLY the range; the matrix/primaries/transfer
+        // stay BT.709.
+        let mut full = std::env::temp_dir();
+        full.push(format!("tellur_color_full_{}.mp4", std::process::id()));
+        FfmpegEncoder::new(Resolution::new(64, 64), 24)
+            .progress(false)
+            .color_range(ColorRange::Full)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .encode_timeline(&resolved, &full)
+            .expect("full-range encode succeeds");
+        assert_eq!(
+            probe_color(&full),
+            "pc|bt709|bt709|bt709",
+            "color_range(Full) tags full range, keeping the BT.709 matrix"
+        );
+
+        let _ = std::fs::remove_file(&lim);
+        let _ = std::fs::remove_file(&full);
     }
 
     // End-to-end A/V: a REAL decoded video background (`testsrc` mp4 via
@@ -823,5 +961,71 @@ mod av_mux_tests {
         let _ = std::fs::remove_file(&bg);
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&out);
+    }
+
+    // Export-path integrity: unlike the live mux (which paces frames in real time
+    // and races a fully-available audio file under `-shortest`), the offline
+    // `encode_timeline` pre-fits the audio to the frame-quantized video length, so
+    // the output must contain EXACTLY `ceil(duration*fps)` video frames at a
+    // perfectly uniform 1/fps cadence — no dropped tail, no startup PTS gap.
+    // Exports the real /tmp media fixtures to /tmp/export_check.mp4 (kept for
+    // manual inspection) and probes the frame count + PTS spacing.
+    #[test]
+    #[ignore = "requires ffmpeg + the /tmp media fixtures"]
+    fn export_real_media_is_frame_exact_and_evenly_timed() {
+        use tellur_core::timeline_container::VideoFile;
+
+        let video = "/tmp/media_in_video.mp4";
+        let audio = "/tmp/media_in_audio.wav";
+        let dur = 4.0_f32;
+        let fps = 30u32;
+
+        let tl = Timeline::builder()
+            .child(VideoFile::builder().path(video).at(0.0..dur))
+            .child(AudioFile::builder().path(audio))
+            .build();
+        let resolved = resolve(tl).expect("real media resolves");
+
+        let out = PathBuf::from("/tmp/export_check.mp4");
+        FfmpegEncoder::new(Resolution::new(640, 360), fps)
+            .progress(false)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest"])
+            .encode_timeline(&resolved, &out)
+            .expect("A/V export succeeds");
+
+        // Decoded video frame count must equal ceil(duration * fps).
+        let probe = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(["-count_frames", "-show_entries", "stream=nb_read_frames"])
+            .args(["-of", "csv=p=0"])
+            .arg(&out)
+            .output()
+            .expect("ffprobe runs");
+        let count: usize = String::from_utf8_lossy(&probe.stdout).trim().parse().unwrap_or(0);
+        let expected = (dur * fps as f32).ceil() as usize;
+        assert_eq!(count, expected, "export contains every frame (no dropped tail)");
+
+        // PTS spacing must be a uniform 1/fps (no startup gap).
+        let pts_out = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(["-show_entries", "frame=pts_time", "-of", "csv=p=0"])
+            .arg(&out)
+            .output()
+            .expect("ffprobe pts runs");
+        let mut pts: Vec<f32> = String::from_utf8_lossy(&pts_out.stdout)
+            .lines()
+            .filter_map(|l| l.split(',').next())
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        pts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let step = 1.0 / fps as f32;
+        for w in pts.windows(2) {
+            let d = w[1] - w[0];
+            assert!(
+                (d - step).abs() < 1e-3,
+                "uniform 1/fps cadence; found a {d:.5}s gap (expected {step:.5})"
+            );
+        }
+        eprintln!("EXPORT OK: {count} frames, uniform {step:.5}s cadence -> {}", out.display());
     }
 }
