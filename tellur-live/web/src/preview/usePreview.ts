@@ -24,6 +24,13 @@ import type {
 const EPSILON = 0.001;
 const PRELOAD_DELAY_MS = 260;
 const STOPPED_STREAM_CACHE_SECONDS = 3;
+// End-of-playback stall detection (see the tickers): only treat a buffer-end
+// stall as "reached the end" when the buffered end is within this window of the
+// timeline duration, so a mid-clip buffering wait never snaps to the end.
+const END_STALL_TAIL_SECONDS = 0.5;
+// Consecutive RAF ticks with no forward progress (stuck at the buffer end)
+// required before we conclude playback has ended.
+const END_STALL_TICKS = 6;
 const DEBUG_STORAGE_KEY = "tellur-live:debug";
 const MP4_MIME_TYPES = [
   'video/mp4; codecs="avc1.42E01E"',
@@ -1188,9 +1195,39 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       stopPlayback(true);
     };
 
+    // Force the end-of-playback state. The browser's `ended` event doesn't fire
+    // if the stream's buffered end falls a few frames short of the duration, so
+    // the tickers also call this when they detect an end-of-timeline stall (see
+    // below). Runs at most once per playback (guarded by the ticker's `settled`).
+    const settleAtTimelineEnd = () => {
+      stopRaf();
+      setPreviewSecondsState(timelineDuration);
+      setPreviewPlayingState(false);
+      // #31 clamps the request to duration - EPSILON, so this fetches the last
+      // representable frame rather than the out-of-range exact end.
+      requestPngFrame(true, timelineDuration);
+    };
+
+    // True when `bufferedEnd` (absolute) is within END_STALL_TAIL of the timeline
+    // end AND playback is stuck at that buffered end — i.e. the stream ended a few
+    // frames short and `ended` won't fire. The duration-proximity check is what
+    // prevents a mid-clip buffering wait from being mistaken for the end.
+    const isEndStall = (current: HTMLVideoElement, absoluteEnd: number) => {
+      const buffered = current.buffered;
+      if (buffered.length === 0) return false;
+      const bufferedEnd = buffered.end(buffered.length - 1);
+      const atBufferEnd = current.currentTime >= bufferedEnd - EPSILON;
+      const nearTimelineEnd =
+        absoluteEnd >= timelineDuration - END_STALL_TAIL_SECONDS;
+      return atBufferEnd && nearTimelineEnd;
+    };
+
     const startTicker = () => {
       const playbackToken = ++playbackTokenRef.current;
       stopRaf();
+      let lastTime = -1;
+      let stalledTicks = 0;
+      let settled = false;
       const tick = () => {
         if (playbackToken !== playbackTokenRef.current) return;
         const current = videoElement(slot);
@@ -1203,6 +1240,25 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         if (current.currentTime >= secondsRef.current - EPSILON) {
           setPreviewSecondsState(current.currentTime);
         }
+        // End-of-timeline stall: when the buffered end is a hair short of the
+        // duration, `ended` never fires and the monotonic guard would freeze the
+        // playhead a few frames early. Detect a sustained stall AT the buffer end
+        // (and only when that end is near the duration) and snap to the end once.
+        if (!settled) {
+          stalledTicks =
+            Math.abs(current.currentTime - lastTime) < EPSILON
+              ? stalledTicks + 1
+              : 0;
+          lastTime = current.currentTime;
+          if (
+            stalledTicks >= END_STALL_TICKS &&
+            isEndStall(current, current.currentTime)
+          ) {
+            settled = true;
+            settleAtTimelineEnd();
+            return;
+          }
+        }
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
@@ -1211,6 +1267,9 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     const startOffsetTicker = (slot: VideoSlot, baseSeconds: number) => {
       const playbackToken = ++playbackTokenRef.current;
       stopRaf();
+      let lastTime = -1;
+      let stalledTicks = 0;
+      let settled = false;
       const tick = () => {
         if (playbackToken !== playbackTokenRef.current) return;
         const current = videoElement(slot);
@@ -1220,6 +1279,24 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         const nextSeconds = baseSeconds + current.currentTime;
         if (nextSeconds >= secondsRef.current - EPSILON) {
           setPreviewSecondsState(nextSeconds);
+        }
+        // End-of-timeline stall detection (see startTicker). Here the absolute
+        // end is `baseSeconds + bufferedEnd`, since this ticker plays an offset
+        // stream segment.
+        if (!settled) {
+          stalledTicks =
+            Math.abs(current.currentTime - lastTime) < EPSILON
+              ? stalledTicks + 1
+              : 0;
+          lastTime = current.currentTime;
+          if (
+            stalledTicks >= END_STALL_TICKS &&
+            isEndStall(current, baseSeconds + current.currentTime)
+          ) {
+            settled = true;
+            settleAtTimelineEnd();
+            return;
+          }
         }
         rafRef.current = requestAnimationFrame(tick);
       };
