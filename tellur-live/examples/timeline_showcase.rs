@@ -337,15 +337,14 @@ fn FrameDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let (a, slide) = transition(&clock);
     let dy = slide * 14.0;
     let cy = 520.0;
-    let mut s: Vec<Positioned> = Vec::new();
-
-    // Frame body + amber border.
-    s.push(fill_rect(CX, cy, 600.0, 360.0, fade(FRAME_BG, a)));
-    s.push(stroke_rect(CX, cy, 600.0, 360.0, fade(AMBER, a), 5.0));
-    // The "picture": a flat ground, a horizon, and a low sun.
-    s.push(fill_rect(CX, cy, 440.0, 200.0, fade(SLATE, a)));
-    s.push(fill_rect(CX, cy + 24.0, 440.0, 6.0, fade(CYAN, a)));
-    s.push(fill_circle(CX + 120.0, cy - 30.0, 30.0, fade(AMBER, a)));
+    // Frame body + amber border, then the "picture" (ground, horizon, low sun).
+    let mut s: Vec<Positioned> = vec![
+        fill_rect(CX, cy, 600.0, 360.0, fade(FRAME_BG, a)),
+        stroke_rect(CX, cy, 600.0, 360.0, fade(AMBER, a), 5.0),
+        fill_rect(CX, cy, 440.0, 200.0, fade(SLATE, a)),
+        fill_rect(CX, cy + 24.0, 440.0, 6.0, fade(CYAN, a)),
+        fill_circle(CX + 120.0, cy - 30.0, 30.0, fade(AMBER, a)),
+    ];
     // Sprocket holes top + bottom, riding the border margins.
     for k in 0..6 {
         let hx = CX - 250.0 + k as f32 * 100.0;
@@ -399,21 +398,24 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
         s.push(fill_circle(cx + ang.cos() * r * 0.94, cy + ang.sin() * r * 0.94, 3.0, fade(AMBER, a * 0.32)));
     }
 
-    // A tapering string of dots from the hub to `(hx, hy)` + a fatter end cap.
-    let mut hand = |hx: f32, hy: f32, dots: usize, base: f32, c: Color| {
-        for j in 1..=dots {
-            let f = j as f32 / dots as f32;
-            s.push(fill_circle(cx + (hx - cx) * f, cy + (hy - cy) * f, base - f * base * 0.45, fade(c, a)));
-        }
-        s.push(fill_circle(hx, hy, base * 1.35, fade(c, a)));
-    };
-    // Timeline (global) hand: slow + short, one revolution per whole piece.
-    let ga = global * (TAU / TOTAL) - PI * 0.5;
-    hand(cx + ga.cos() * r * 0.52, cy + ga.sin() * r * 0.52, 5, 8.5, AMBER);
-    // Local hand: fast + long, one revolution / 2s, drawn on top.
-    let la = local * (TAU / 2.0) - PI * 0.5;
-    hand(cx + la.cos() * r * 0.80, cy + la.sin() * r * 0.80, 7, 7.5, CYAN);
-    drop(hand); // release the `&mut s` the closure held, so the hub can be added
+    // Two hands off the hub. The closure borrows `s`, so it lives in its own
+    // block — when it ends the borrow is released and the hub can be added.
+    {
+        // A tapering string of dots from the hub to `(hx, hy)` + a fatter end cap.
+        let mut hand = |hx: f32, hy: f32, dots: usize, base: f32, c: Color| {
+            for j in 1..=dots {
+                let f = j as f32 / dots as f32;
+                s.push(fill_circle(cx + (hx - cx) * f, cy + (hy - cy) * f, base - f * base * 0.45, fade(c, a)));
+            }
+            s.push(fill_circle(hx, hy, base * 1.35, fade(c, a)));
+        };
+        // Timeline (global) hand: slow + short, one revolution per whole piece.
+        let ga = global * (TAU / TOTAL) - PI * 0.5;
+        hand(cx + ga.cos() * r * 0.52, cy + ga.sin() * r * 0.52, 5, 8.5, AMBER);
+        // Local hand: fast + long, one revolution / 2s, drawn on top.
+        let la = local * (TAU / 2.0) - PI * 0.5;
+        hand(cx + la.cos() * r * 0.80, cy + la.sin() * r * 0.80, 7, 7.5, CYAN);
+    }
     s.push(fill_circle(cx, cy, 10.0, fade(INK, a)));
 
     // Lead line: tie the amber `timeline` hand to its spot on the persistent
