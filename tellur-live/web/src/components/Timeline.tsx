@@ -743,46 +743,53 @@ export function Timeline(props: TimelineProps) {
 
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
-      if (!e.shiftKey || bodyWidth <= 0) return;
+      if (!e.shiftKey) return;
+      const rect = e.currentTarget.getBoundingClientRect();
+      if (rect.width <= 0) return;
 
       e.preventDefault();
       e.stopPropagation();
 
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pointerRatio = clamp((e.clientX - rect.left) / bodyWidth, 0, 1);
-      const delta = normalizeWheelDelta(e, bodyWidth);
+      // Pointer position as a 0..1 ratio across the body, measured against the
+      // body's OWN rect (not `bodyWidth`, which can lag/round) so the anchor x is
+      // exact.
+      const pointerRatio = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+      const delta = normalizeWheelDelta(e, rect.width);
+      const zoomGesture = e.metaKey || e.ctrlKey;
 
-      if (e.metaKey || e.ctrlKey) {
-        const anchorSeconds =
-          normalizedViewport.start + pointerRatio * visibleDuration;
-        const nextZoom = clamp(
-          normalizedViewport.zoom * Math.exp(-delta * 0.0025),
-          MIN_TIMELINE_ZOOM,
-          MAX_TIMELINE_ZOOM,
-        );
-        const nextVisibleDuration = getVisibleDuration(duration, nextZoom);
+      // Functional update so EACH wheel event computes from the LATEST viewport,
+      // not a value captured in this closure — back-to-back wheel events fire
+      // faster than React re-renders the `viewport` prop, and using the stale
+      // prop would drift the anchor / fail to accumulate zoom. `current` is the
+      // up-to-date viewport; recompute its visible window from it.
+      onViewportChange((current) => {
+        const view = clampTimelineViewport(current, duration);
+        const curVisible = getVisibleDuration(duration, view.zoom);
 
-        onViewportChange({
-          start: anchorSeconds - pointerRatio * nextVisibleDuration,
-          zoom: nextZoom,
-        });
-        return;
-      }
+        if (zoomGesture) {
+          // Keep the time under the cursor pinned: the seconds at the pointer
+          // before the zoom must land back under the pointer after it.
+          const anchorSeconds = view.start + pointerRatio * curVisible;
+          const nextZoom = clamp(
+            view.zoom * Math.exp(-delta * 0.0025),
+            MIN_TIMELINE_ZOOM,
+            MAX_TIMELINE_ZOOM,
+          );
+          const nextVisible = getVisibleDuration(duration, nextZoom);
+          return {
+            start: anchorSeconds - pointerRatio * nextVisible,
+            zoom: nextZoom,
+          };
+        }
 
-      onViewportChange({
-        start:
-          normalizedViewport.start + delta * (visibleDuration / bodyWidth),
-        zoom: normalizedViewport.zoom,
+        // Plain shift-wheel pans horizontally at the current zoom.
+        return {
+          start: view.start + delta * (curVisible / rect.width),
+          zoom: view.zoom,
+        };
       });
     },
-    [
-      bodyWidth,
-      duration,
-      normalizedViewport.start,
-      normalizedViewport.zoom,
-      onViewportChange,
-      visibleDuration,
-    ],
+    [duration, onViewportChange],
   );
 
   // Motion transitions for the expand/collapse choreography. Snappy but clean:
