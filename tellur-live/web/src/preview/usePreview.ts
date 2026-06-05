@@ -1534,6 +1534,13 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           readyState: video.readyState,
           buffered: bufferedDebug(sourceBuffer.buffered),
         });
+        // Reveal the active <video> NOW (still behind the paused PNG, which stays
+        // on top until playback is confirmed below). A `visibility: hidden` video
+        // is not decoded by power-managed browsers (Arc), so it stays stuck at
+        // HAVE_METADATA and the seek below never completes (`seeked` never fires).
+        // Making it rendered forces the decode; the PNG hides the pre-seek frame.
+        setActiveVideoSlot(slot);
+        setVideoVisible(true);
         await waitForVideoMetadata(video);
         if (controller.signal.aborted || token !== displayTokenRef.current) return;
         previewDebug("pipeline:maybe-start:metadata", {
@@ -1578,6 +1585,8 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           videoCurrentTime: video.currentTime,
           startSeconds,
         });
+        // The video (already revealed above) is now playing at startSeconds;
+        // drop the PNG that was covering it.
         setActiveVideoSlot(slot);
         setImageVisible(false);
         setVideoVisible(true);
