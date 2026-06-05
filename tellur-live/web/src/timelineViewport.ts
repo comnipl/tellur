@@ -28,15 +28,28 @@ export function clampTimelineViewport(
     MAX_TIMELINE_ZOOM,
   );
   const visibleDuration = getVisibleDuration(safeDuration, zoom);
-  // At zoom < 1 the visible window exceeds the content, so maxStart is 0 and
-  // `start` clamps to 0 — the content is left-aligned with no pan room.
-  const maxStart = Math.max(0, safeDuration - visibleDuration);
+  // Start that brings the content end flush to the viewport's right edge. At
+  // zoom <= 1 the visible window meets/exceeds the content, so this is <= 0 (no
+  // pan room; content stays left-aligned).
+  const contentEndStart = safeDuration - visibleDuration;
+  // When zoomed IN (content wider than the viewport) allow trailing overscroll
+  // of ~one viewport width past the content end, so the user can scroll into the
+  // empty space after the last clip. When zoomed out, there's no pan room and no
+  // overscroll — start stays clamped to 0 (unchanged behavior).
+  const maxStart =
+    contentEndStart > 0
+      ? contentEndStart + visibleDuration * TRAILING_OVERSCROLL
+      : 0;
 
   return {
     start: clamp(viewport.start, 0, maxStart),
     zoom,
   };
 }
+
+// Trailing overscroll past the content end, in units of the visible window
+// (1 = one full viewport width of empty space after the last clip).
+const TRAILING_OVERSCROLL = 1;
 
 export function getVisibleDuration(duration: number, zoom: number): number {
   const safeDuration = getSafeDuration(duration);
