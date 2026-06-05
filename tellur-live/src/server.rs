@@ -743,16 +743,28 @@ fn handle_video_stream(
     let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
     let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
     let mut stderr = child.stderr.take().ok_or("ffmpeg stderr was not piped")?;
+    // Disable Nagle so the final fragment is sent immediately rather than being
+    // held waiting to coalesce — with `Connection: close` a delayed tail can
+    // otherwise reach the client only at FIN, after playback has already ended.
+    let _ = stream.set_nodelay(true);
     let mut stream_out = stream.try_clone()?;
     let client_alive = Arc::new(AtomicBool::new(true));
     let client_alive_for_stdout = Arc::clone(&client_alive);
 
+    // Drain ffmpeg's stdout to the client until TRUE EOF. ffmpeg emits the tail
+    // GOP/fragments only after stdin is closed (the EOF below `drop(stdin)`), so
+    // this thread must keep reading past the last frame the main loop wrote — it
+    // is what carries the final ~GOP of frames to the client. A transient
+    // `Interrupted` (EINTR) read is RETRIED, not treated as EOF: aborting on it
+    // would truncate exactly that tail under load (the intermittent dropped-tail
+    // bug). Only a real read error or a client write failure ends the drain.
     let stdout_thread = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => {
                     client_alive_for_stdout.store(false, Ordering::Relaxed);
                     break;
@@ -763,6 +775,9 @@ fn handle_video_stream(
                 break;
             }
         }
+        // Flush the final fragments to the kernel before the connection's FIN so
+        // the tail is not stranded in a userspace/socket buffer at close.
+        let _ = stream_out.flush();
     });
 
     let stderr_thread = thread::spawn(move || {
