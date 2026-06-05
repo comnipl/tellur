@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
-use tellur_core::timeline_component::{Arrangement, NodeKind};
+use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
 use tellur_renderer::CachingRenderContext;
 
 use crate::build_watch::{
@@ -631,6 +631,58 @@ struct VideoFrame {
     gpu_readbacks: u64,
 }
 
+/// The fixed audio layout the preview mux uses (matches the encoder boundary).
+const AUDIO_RATE: u32 = 48_000;
+const AUDIO_CHANNELS: u16 = 2;
+
+static AUDIO_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temp file removed on drop, so a stream's staged audio WAV is cleaned up
+/// whenever `handle_video_stream` returns (including early `?` returns).
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `buf` (interleaved f32) as a 16-bit PCM WAV to a unique temp path, so
+/// ffmpeg can take it as a second input and mux it into the preview stream.
+fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
+    let seq = AUDIO_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!("tellur_live_audio_{}_{}.wav", std::process::id(), seq));
+
+    let channels = buf.channels.max(1);
+    let rate = buf.rate.max(1);
+    let bits: u16 = 16;
+    let byte_rate = rate * channels as u32 * (bits as u32 / 8);
+    let block_align = channels * (bits / 8);
+    let data_bytes = (buf.samples.len() * 2) as u32;
+
+    let mut bytes = Vec::with_capacity(44 + buf.samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&bits.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in &buf.samples {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(&path, &bytes)?;
+    Ok(path)
+}
+
 fn handle_video_stream(
     app: Arc<Mutex<PreviewApp>>,
     mut stream: TcpStream,
@@ -689,6 +741,24 @@ fn handle_video_stream(
         }
     };
 
+    // Render the timeline's audio once and stage it as a temp WAV so the stream
+    // can mux a real AAC track. `render_audio` returns a full-length buffer
+    // (silent if the tree has no audio sources); `None` only for legacy
+    // collections, where the stream falls back to a generated silent track. The
+    // guard removes the file when this function returns.
+    let audio_wav = {
+        let mut app = app
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        app.reload_plugin_if_changed()?;
+        app.plugin
+            .collection()
+            .ok()
+            .and_then(|c| c.render_audio(&setup.timeline_id, AUDIO_RATE, AUDIO_CHANNELS))
+            .and_then(|buf| write_temp_wav(&buf).ok())
+            .map(TempFile)
+    };
+
     write!(
         stream,
         "HTTP/1.1 200 OK\r\n\
@@ -702,10 +772,10 @@ fn handle_video_stream(
         setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
 
-    let mut child = Command::new("ffmpeg")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-hide_banner")
+        .args(["-loglevel", "error"])
+        // Input 0: the raw video frames, fed live over stdin.
         .args(["-f", "rawvideo"])
         .args(["-pix_fmt", "rgba"])
         .args([
@@ -713,9 +783,24 @@ fn handle_video_stream(
             &format!("{}x{}", setup.resolution.width, setup.resolution.height),
         ])
         .args(["-r", &setup.fps.to_string()])
-        .args(["-i", "-"])
-        .arg("-an")
-        .args(["-c:v", "libx264"])
+        .args(["-i", "-"]);
+    // Input 1: the audio track. A rendered WAV seeked to the stream's start when
+    // the timeline has audio; otherwise a generated silent track, so every
+    // stream has the same A/V structure the client's SourceBuffer expects.
+    match &audio_wav {
+        Some(wav) => {
+            cmd.arg("-ss")
+                .arg(format!("{:.6}", setup.start_seconds))
+                .arg("-i")
+                .arg(&wav.0);
+        }
+        None => {
+            cmd.args(["-f", "lavfi"]).arg("-i").arg(format!(
+                "anullsrc=channel_layout=stereo:sample_rate={AUDIO_RATE}"
+            ));
+        }
+    }
+    cmd.args(["-c:v", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-tune", "zerolatency"])
         .args(["-pix_fmt", "yuv420p"])
@@ -726,6 +811,13 @@ fn handle_video_stream(
         .args(["-refs", "1"])
         .args(["-flags", "low_delay"])
         .args(["-crf", &setup.crf.to_string()])
+        // Audio AAC; map exactly one video + one audio stream and end with the
+        // video input (`-shortest`), so the over-long / infinite audio is cut.
+        .args(["-c:a", "aac"])
+        .args(["-b:a", "160k"])
+        .args(["-map", "0:v:0"])
+        .args(["-map", "1:a:0"])
+        .arg("-shortest")
         .args(["-muxdelay", "0"])
         .args(["-muxpreload", "0"])
         .args(["-flush_packets", "1"])
@@ -737,8 +829,8 @@ fn handle_video_stream(
         .arg("pipe:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
 
     let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
     let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;

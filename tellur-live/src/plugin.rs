@@ -20,8 +20,8 @@ use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::{
-    resolve, resolve_with_canvas, Arrangement, NodeKind, Clock, ResolveError, ResolvedTimeline,
-    TimelineComponent,
+    resolve, resolve_with_canvas, Arrangement, AudioBuffer, NodeKind, Clock, ResolveError,
+    ResolvedTimeline, TimelineComponent,
 };
 
 /// ABI version carried by the entry symbol.
@@ -67,6 +67,15 @@ pub trait TimelineCollection: Send {
     /// (audit B.4): a collection that has not yet built a resolved tree simply
     /// returns nothing here.
     fn arrangement(&self, _id: &str) -> Option<Arrangement> {
+        None
+    }
+
+    /// The eager audio mix-down for `id` at `rate` / `channels`, for the live
+    /// preview to mux into its video stream. `None` means the collection
+    /// contributes no audio (the preview then muxes a silent track for a
+    /// consistent A/V stream structure). Defaulted so collections migrate in
+    /// stages, mirroring [`arrangement`](Self::arrangement).
+    fn render_audio(&self, _id: &str, _rate: u32, _channels: u16) -> Option<AudioBuffer> {
         None
     }
 }
@@ -156,6 +165,16 @@ impl TimelineCollection for SingleTimeline {
         // Root offset 0: the resolved tree's start coincides with the global
         // axis, so the walk stamps absolute starts/ends from there.
         Some(self.resolved()?.source().arrangement(0.0))
+    }
+
+    fn render_audio(&self, id: &str, rate: u32, channels: u16) -> Option<AudioBuffer> {
+        if id != self.id {
+            return None;
+        }
+        // `render_audio` returns a buffer of the whole resolved length — silent
+        // when the tree has no audio sources — so the preview always gets a
+        // determinate track to mux.
+        Some(self.resolved()?.render_audio(rate, channels))
     }
 }
 

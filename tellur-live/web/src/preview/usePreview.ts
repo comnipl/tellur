@@ -33,6 +33,13 @@ const END_STALL_TAIL_SECONDS = 0.5;
 const END_STALL_TICKS = 6;
 const DEBUG_STORAGE_KEY = "tellur-live:debug";
 const MP4_MIME_TYPES = [
+  // A/V variants first: the preview stream always carries an AAC audio track
+  // (silent when the timeline has no audio), so the SourceBuffer must declare
+  // the audio codec or appended segments with an audio track fail to parse.
+  'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+  'video/mp4; codecs="avc1.4D401E, mp4a.40.2"',
+  'video/mp4; codecs="avc1.64001E, mp4a.40.2"',
+  // Video-only fallbacks for environments without AAC support.
   'video/mp4; codecs="avc1.42E01E"',
   'video/mp4; codecs="avc1.4D401E"',
   'video/mp4; codecs="avc1.64001E"',
@@ -1820,6 +1827,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         clearTimeout(preloadTimerRef.current);
         preloadTimerRef.current = null;
       }
+      // Unmute within the play gesture so the browser's autoplay policy lets the
+      // (now A/V) stream play with sound. The `<video>` mounts `muted` for safe
+      // gesture-less buffering; React doesn't re-apply that attribute after
+      // mount, so flipping it here sticks for the rest of the session.
+      if (videoARef.current) videoARef.current.muted = false;
+      if (videoBRef.current) videoBRef.current.muted = false;
       setPreviewPlayingState(true);
       requestAnimationFrame(() => startVideoPlayback());
     } else {
