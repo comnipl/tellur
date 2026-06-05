@@ -292,7 +292,7 @@ export function App() {
               onFpsChange={setFps}
             />
           </section>
-          <Inspector node={selectedNode} />
+          <Inspector node={selectedNode} fps={fps} />
         </div>
         <section className="timeline-panel">
           <TabsRow

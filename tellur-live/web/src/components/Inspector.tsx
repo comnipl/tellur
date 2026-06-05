@@ -27,6 +27,9 @@ export interface SelectedNode {
 
 interface InspectorProps {
   node: SelectedNode | null;
+  // Current preview fps, used to annotate each time with its frame number. App
+  // owns the fps state and passes it down (not part of the server schema).
+  fps: number;
 }
 
 // Last path segment of a source file path (handles both `/` and `\` separators).
@@ -41,10 +44,16 @@ function formatSeconds(seconds: number): string {
   return `${seconds.toFixed(2)}s`;
 }
 
+// Frame number at a given time for the current fps, e.g. "90F" — shown next to
+// each seconds readout (matching the ruler's time + frame convention).
+function formatFrame(seconds: number, fps: number): string {
+  return `${Math.max(0, Math.round(seconds * fps))}F`;
+}
+
 // Detail/inspector panel for the selected timeline node. The source location is
 // just one field here; this panel is general and can grow as the backend exposes
 // more. When nothing is selected it shows a muted placeholder.
-export function Inspector({ node }: InspectorProps) {
+export function Inspector({ node, fps }: InspectorProps) {
   return (
     <section className="inspector" aria-label="Inspector">
       <h2 className="inspector__heading">Details</h2>
@@ -72,7 +81,8 @@ export function Inspector({ node }: InspectorProps) {
             <div className="inspector__row">
               <dt className="inspector__label">Time</dt>
               <dd className="inspector__value inspector__value--time">
-                {formatSeconds(node.start)} – {formatSeconds(node.end)}
+                {formatSeconds(node.start)} ({formatFrame(node.start, fps)}) –{" "}
+                {formatSeconds(node.end)} ({formatFrame(node.end, fps)})
               </dd>
             </div>
           </dl>
@@ -90,7 +100,8 @@ export function Inspector({ node }: InspectorProps) {
                       {trigger.name ?? "Event"}
                     </span>
                     <span className="inspector__event-time">
-                      {formatSeconds(trigger.time)}
+                      {formatSeconds(trigger.time)} (
+                      {formatFrame(trigger.time, fps)})
                     </span>
                   </li>
                 ))}
