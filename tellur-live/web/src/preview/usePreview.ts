@@ -969,7 +969,15 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     (force: boolean = false, atSeconds?: number) => {
       if (!timelineId || !hasServerInfo || !pluginCacheKey) return;
       const res = resolvedResolution();
-      const frameSeconds = clampSeconds(atSeconds ?? secondsRef.current);
+      // The timeline is a half-open range [0, duration): at exactly `duration`
+      // every clip is inactive, so `/api/frame` returns None -> 500. Never ask
+      // for the very end — pull back by EPSILON so the LAST representable frame is
+      // requested instead (this is what the playhead shows when it sticks at the
+      // end). Applies to the explicit end-of-playback requests too.
+      const frameSeconds = Math.min(
+        clampSeconds(atSeconds ?? secondsRef.current),
+        Math.max(0, timelineDuration - EPSILON),
+      );
       const url = frameUrl({
         timelineId,
         time: frameSeconds,
@@ -1187,7 +1195,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         if (playbackToken !== playbackTokenRef.current) return;
         const current = videoElement(slot);
         if (!current) return;
-        setPreviewSecondsState(current.currentTime);
+        // Monotonic guard: near the end the video clock can briefly report a
+        // value BELOW where we already are, which would flash the playhead back
+        // to the start. Skip the backwards frame (don't update state) but keep
+        // the RAF running. Forward progress and the end-clamp (onended) still
+        // apply; explicit seeks go through `setSeconds`, not this ticker.
+        if (current.currentTime >= secondsRef.current - EPSILON) {
+          setPreviewSecondsState(current.currentTime);
+        }
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
@@ -1200,7 +1215,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         if (playbackToken !== playbackTokenRef.current) return;
         const current = videoElement(slot);
         if (!current) return;
-        setPreviewSecondsState(baseSeconds + current.currentTime);
+        // Same monotonic guard as startTicker (see there): never let a momentary
+        // backwards clock reading rewind the playhead to the start.
+        const nextSeconds = baseSeconds + current.currentTime;
+        if (nextSeconds >= secondsRef.current - EPSILON) {
+          setPreviewSecondsState(nextSeconds);
+        }
         rafRef.current = requestAnimationFrame(tick);
       };
       rafRef.current = requestAnimationFrame(tick);
@@ -1744,9 +1764,19 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
   const stepFrame = useCallback(
     (delta: number) => {
-      if (!timelineId) return;
+      if (!timelineId || delta === 0) return;
       const step = 1 / Math.max(fps, 1);
-      setSeconds(secondsRef.current + delta * step);
+      const cur = secondsRef.current;
+      // Snap to the frame grid for the current fps in the press direction: from
+      // a non-aligned (scrubbed) time, the first press lands on the nearest
+      // boundary; from an aligned time it advances exactly one frame. The small
+      // epsilon absorbs float error so an already-aligned position isn't treated
+      // as just-past/just-before a boundary. Bounds are handled by setSeconds.
+      const frames =
+        delta > 0
+          ? Math.floor(cur / step + 1e-6) + delta
+          : Math.ceil(cur / step - 1e-6) + delta;
+      setSeconds(frames * step);
     },
     [timelineId, fps, setSeconds],
   );
