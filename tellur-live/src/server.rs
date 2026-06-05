@@ -553,13 +553,17 @@ impl PreviewApp {
         let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
             return Err("timeline not found".into());
         };
+        let fps = request_fps(query, self.fps.max(1));
         let seconds = query
             .get("frame")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|frame| frame as f32 / request_fps(query, self.fps.max(1)) as f32)
+            .map(|frame| frame as f32 / fps as f32)
             .or_else(|| query.get("time").and_then(|v| v.parse::<f32>().ok()))
-            .unwrap_or(0.0)
-            .clamp(0.0, info.duration.max(0.0));
+            .unwrap_or(0.0);
+        // Clamp into the half-open renderable range so a `time=<duration>`
+        // request (a frontend scrubbed to the very end) returns the last frame
+        // instead of erroring with `timeline did not produce a frame`.
+        let seconds = clamp_to_renderable(seconds, info.duration, fps);
         let resolution = request_resolution(query, self.resolution);
 
         let before = self.ctx.metrics();
@@ -604,6 +608,9 @@ impl PreviewApp {
 struct VideoStreamSetup {
     timeline_id: String,
     duration: f32,
+    /// The full timeline length, used to clamp each frame's requested time into
+    /// the half-open renderable range (`< total_duration`).
+    total_duration: f32,
     fps: u32,
     resolution: Resolution,
     gop: u32,
@@ -667,6 +674,7 @@ fn handle_video_stream(
         VideoStreamSetup {
             timeline_id: info.id.clone(),
             duration,
+            total_duration: info.duration.max(0.0),
             fps,
             resolution,
             gop,
@@ -773,7 +781,14 @@ fn handle_video_stream(
         }
 
         let frame_start = Instant::now();
-        let seconds = setup.start_seconds + frame as f32 * frame_step;
+        // Clamp into the half-open renderable range so the final frame of a
+        // full-length stream (which can land on `total_duration`) renders the
+        // last frame rather than erroring with `timeline did not produce a frame`.
+        let seconds = clamp_to_renderable(
+            setup.start_seconds + frame as f32 * frame_step,
+            setup.total_duration,
+            setup.fps,
+        );
         let image = {
             let mut app = app
                 .lock()
@@ -975,6 +990,25 @@ fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> R
 
 fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
+}
+
+/// Clamps a requested frame time into the timeline's RENDERABLE range.
+///
+/// Clip time gates in the core are half-open `[start, end)` (`tellur-core`
+/// `timeline_component.rs`'s `t < end`), so a request at exactly `duration`
+/// leaves every clip inactive and the composite is `None` — surfacing as a
+/// `timeline did not produce a frame` 500. A frontend scrubbing to the very end
+/// (or any `time=<duration>` request) would otherwise break.
+///
+/// So the upper bound is the LAST renderable frame time, one frame step below
+/// `duration` (`(duration - 1/fps).max(0.0)`), which satisfies `t < duration`
+/// and lands in the final frame's interval. A zero/sub-frame timeline clamps to
+/// `0.0`. This is the server-side root guard: an end-of-timeline request returns
+/// the last frame instead of erroring.
+fn clamp_to_renderable(seconds: f32, duration: f32, fps: u32) -> f32 {
+    let frame_step = 1.0 / fps.max(1) as f32;
+    let last_frame = (duration - frame_step).max(0.0);
+    seconds.clamp(0.0, last_frame)
 }
 
 struct Request {
@@ -1268,6 +1302,51 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use tellur_core::timeline_component::{SourceLoc, TriggerMark};
+
+    // A request for exactly `duration` must clamp into the half-open renderable
+    // range: `< duration` (so the core's `t < end` clip gate stays active) AND
+    // inside the LAST frame's interval `[duration - 1/fps, duration)`. This is
+    // the root guard for "scrub to the very end" — without it `t == duration`
+    // leaves every clip inactive and the composite is `None` (a 500
+    // `timeline did not produce a frame`).
+    #[test]
+    fn clamp_to_renderable_maps_exact_duration_to_last_frame() {
+        let duration = 7.6_f32;
+        let fps = 60;
+        let frame_step = 1.0 / fps as f32;
+
+        let clamped = clamp_to_renderable(duration, duration, fps);
+        // Strictly inside the timeline (the half-open endpoint is excluded).
+        assert!(clamped < duration, "{clamped} must be < {duration}");
+        // And within the final frame's interval, so it renders the last frame.
+        assert!(
+            clamped >= duration - frame_step,
+            "{clamped} must be in the last frame interval [{}, {duration})",
+            duration - frame_step
+        );
+        // Exactly the last frame time (one step below duration).
+        assert!((clamped - (duration - frame_step)).abs() < 1e-6);
+
+        // A past-the-end request clamps to the same last frame.
+        assert_eq!(clamp_to_renderable(duration + 5.0, duration, fps), clamped);
+    }
+
+    #[test]
+    fn clamp_to_renderable_passes_through_interior_times() {
+        // A time comfortably inside the range is unchanged.
+        let t = clamp_to_renderable(3.0, 7.6, 60);
+        assert_eq!(t, 3.0);
+    }
+
+    #[test]
+    fn clamp_to_renderable_handles_short_and_negative() {
+        // A timeline shorter than one frame (or zero) clamps to 0.0 rather than
+        // going negative.
+        assert_eq!(clamp_to_renderable(1.0, 0.0, 60), 0.0);
+        assert_eq!(clamp_to_renderable(0.005, 0.01, 60), 0.0);
+        // A negative request floors at 0.0.
+        assert_eq!(clamp_to_renderable(-2.0, 7.6, 60), 0.0);
+    }
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
     // overlay timeline with a video child (a source crop) and a sequence of two
