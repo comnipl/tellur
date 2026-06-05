@@ -772,26 +772,24 @@ select option {
   position: absolute;
   /* Bottom-anchored at the same baseline as the ruler ticks / pinned readout
      (above the playhead/cache band) — they share one band, the chip just
-     overlays on top (highest z). Taller than the ruler band on purpose: the two
-     white lines need room so they don't crowd the pink frame's edges. */
+     overlays on top (highest z). Low box with a tight gap between the two white
+     lines, but enough HORIZONTAL inner padding that the text doesn't hug the
+     pink edges. */
   bottom: 14px;
   z-index: 5;
   display: inline-flex;
   flex-direction: column;
   justify-content: center;
   min-width: 78px;
-  height: 36px;
-  /* Generous inner padding so the white time/frame text breathes inside the
-     pink chip (this is the "padding" the user meant — the chip interior, not the
-     ruler labels). */
-  padding: 6px 11px;
+  height: 31px;
+  padding: 3px 11px;
   color: #fff;
   background: var(--timeline-marker);
   border-radius: 1px 0 0 1px;
   font-size: 10px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  line-height: 1.15;
+  line-height: 1.1;
   letter-spacing: 0;
   white-space: nowrap;
   transform: translateX(-4px);
@@ -815,17 +813,17 @@ select option {
   width: 0;
   height: 0;
   content: "";
-  /* Right-pointing tab; its half-height borders track the chip height (36px). */
-  border-top: 18px solid transparent;
-  border-bottom: 18px solid transparent;
+  /* Right-pointing tab; its half-height borders track the chip height (31px). */
+  border-top: 15px solid transparent;
+  border-bottom: 15px solid transparent;
   border-left: 9px solid var(--timeline-marker);
 }
 
 .tabsrow__chip-sub {
-  margin-top: 3px;
+  margin-top: 1px;
   font-size: 10px;
   font-weight: 800;
-  line-height: 1.15;
+  line-height: 1.1;
 }
 
 /* Ruler tick: a short vertical hairline at the tick's x with a two-line label
