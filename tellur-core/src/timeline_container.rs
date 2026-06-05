@@ -363,7 +363,10 @@ impl TimelineComponent for Sequence {
             if placed_any {
                 cursor += self.spacing;
             }
-            let len = child.resolve(abs_start + cursor, out);
+            // The cursor is in THIS sequence's local seconds; scale it to absolute
+            // by the enclosing window stretch (1.0 unless the whole Sequence sits
+            // inside a stretched `.at(a..b)`), mirroring `Placed::resolve`.
+            let len = child.resolve(abs_start + cursor * out.local_scale(), out);
             cursor += len;
             placed_any = true;
         }
@@ -1553,6 +1556,36 @@ mod tests {
         assert_eq!(mixed.channels, 1);
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
+    }
+
+    // A function-form `#[component(timeline)]` that wraps audio.
+    #[crate::component(timeline)]
+    fn Voiced(#[builder(into)] path: String) -> impl crate::timeline_component::TimelineComponent {
+        AudioFile::builder().path(path).build()
+    }
+
+    // (mix) Regression: a fn-form `#[component(timeline)]` composing an
+    // `AudioFile` must forward `mix_into` to its body. Before the macro emitted
+    // a `mix_into` delegation it fell back to the silent trait default, so a
+    // `Dialogue(voice: AudioFile)`-style wrapper mixed to ZERO.
+    #[test]
+    fn fn_form_component_forwards_audio_mix() {
+        let level = (0.6 * i16::MAX as f32) as i16;
+        let frames = (TEST_RATE / 2) as usize; // 0.5s
+        let src = const_wav("fnform", TEST_RATE, frames, level);
+
+        let tl = Timeline::builder()
+            .child(Voiced::builder().path(src.to_str().unwrap()))
+            .build();
+        let resolved = resolve_audio(tl).expect("media-backed");
+        let mixed = resolved.render_audio(TEST_RATE, 1);
+
+        let mid = mixed.samples[frames / 2];
+        assert!(
+            (mid - 0.6).abs() < 0.02,
+            "wrapped audio must reach the mix (~0.6), got {mid}"
+        );
+        let _ = std::fs::remove_file(&src);
     }
 
     // (mix) A Sequence CONCATENATES audio along the cursor: child 2 starts at

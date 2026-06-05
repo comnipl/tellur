@@ -1,9 +1,12 @@
-//! The timeline subsystem's public surface — STEP 1 skeleton.
+//! The timeline subsystem's public surface.
 //!
-//! This module lands the *types and trait* the timeline macro arm (step 2)
-//! and the resolve pass (step 3+) will fill in. Everything here compiles and
-//! is exercised by focused tests, but the time-varying behaviour is still a
-//! set of empty/default returns marked `// TODO(task N):`.
+//! This module defines the time-varying analogue of the spatial component
+//! system: the [`TimelineComponent`] trait and its builders/placement verbs,
+//! the [`Placed`] / [`Triggered`] wrappers, the resolve pass, and the per-frame
+//! [`Clock`]. The timeline macro arm and the container leaves
+//! (`timeline_container.rs`) build on these. Every method below is implemented
+//! and exercised by focused tests; the media-decode / ffmpeg integration paths
+//! sit behind `#[ignore]`.
 //!
 //! The shape mirrors the spatial side of the library on purpose:
 //!
@@ -452,11 +455,30 @@ impl TimelineComponent for Placed {
     }
 
     fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
-        // TODO(task 3): apply the window/stretch rules; for now recurse into the
-        // child at its relative start and report the placed length.
-        let child_len = self.child.resolve(abs_start + self.placement.start, out);
-        self.duration()
-            .unwrap_or(self.placement.start + child_len)
+        // A zero/negative explicit window has no determinate speed (it would
+        // stretch the child by ∞); surface it as an authoring error instead of
+        // silently degrading to `speed() == 1.0`.
+        if let Some(end) = self.placement.end {
+            if end - self.placement.start <= 0.0 {
+                out.error(format!(
+                    "a placement window must have positive length, got .at({}..{})",
+                    self.placement.start, end
+                ));
+            }
+        }
+        // Recurse at the child's absolute start, folding the window stretch in
+        // (`.sketch/01 §A.3`). The relative start is in THIS level's local
+        // seconds, so scale it to absolute by the enclosing `local_scale`; the
+        // child then runs at this window's `speed()`, so any interior offsets it
+        // records shrink by that factor (a `.at(0..1)` over a 2s child has
+        // `speed = 2`, so the child's own seconds are half a parent second each).
+        let scale = out.local_scale;
+        let child_abs = abs_start + self.placement.start * scale;
+        let saved = out.local_scale;
+        out.local_scale = scale / self.speed();
+        let child_len = self.child.resolve(child_abs, out);
+        out.local_scale = saved;
+        self.duration().unwrap_or(self.placement.start + child_len)
     }
 
     fn frame(
@@ -598,13 +620,15 @@ pub trait Timed: TimelineComponent + Sized + Send + 'static {
         Placed::new(Placement::fill(), Box::new(self))
     }
 
-    /// Use only SOURCE seconds `a..b` (the in/out crop). Shortens
-    /// [`duration`](TimelineComponent::duration) to `b - a`. The way to truncate
-    /// (a short `.at` window stretches, it does not cut). Returns a component.
-    fn trim(self, r: Range<f32>) -> Self {
-        // TODO(task 3): record the trim on the leaf so `duration()` reports
-        // `b - a` and the leaf remaps its own sampling. No-op skeleton for now.
-        let _ = r;
+    /// Use only SOURCE seconds `a..b` (the in/out crop). The way to truncate (a
+    /// short `.at` window stretches, it does not cut).
+    ///
+    /// Honoured ONLY by the media leaves (`VideoFile` / `AudioFile`), which shadow
+    /// this blanket with an inherent `trim` that records the crop and reports
+    /// `b - a` from [`duration`](TimelineComponent::duration). A source-time crop
+    /// is meaningless for a synthetic (timeless / clock-driven) component, so on
+    /// everything else this is intentionally a no-op returning `self` unchanged.
+    fn trim(self, _r: Range<f32>) -> Self {
         self
     }
 }
@@ -798,11 +822,15 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
 
     fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
         let len = self.child.resolve(abs_start, out);
-        // Register the trigger time (earliest-wins) before/while recursing.
+        // `Start` is already the absolute parent-clock start. `End` / `At` are in
+        // the child's LOCAL seconds, which run faster than the global clock by any
+        // enclosing window stretch, so scale them back via the cumulative
+        // `local_scale` (1.0 unless inside a stretched `.at(a..b)`).
+        let scale = out.local_scale;
         let at = match self.kind {
             TriggerKind::Start => abs_start,
-            TriggerKind::End => abs_start + len,
-            TriggerKind::At(local) => abs_start + local,
+            TriggerKind::End => abs_start + len * scale,
+            TriggerKind::At(local) => abs_start + local * scale,
         };
         out.triggers_mut().record(self.event, at);
         len
@@ -1250,7 +1278,7 @@ impl TriggerTable {
 /// Mutable state threaded through the place pass (`.sketch/02 §6/§7`). Holds the
 /// trigger table under construction plus the absolute-start accounting the walk
 /// needs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResolveCtx {
     triggers: TriggerTable,
     /// Absolute start of the node currently being resolved. Top-down bookkeeping
@@ -1267,6 +1295,25 @@ pub struct ResolveCtx {
     /// container length, which a `Sequence` does not impose). The entry
     /// [`resolve`] turns any collected error into a [`ResolveError::Invalid`].
     errors: Vec<String>,
+    /// Cumulative absolute-seconds-per-local-second of the enclosing stretched
+    /// `.at(a..b)` windows: `1.0` at the top, smaller once inside a window that
+    /// compresses its child. [`Placed::resolve`] folds each window's `speed()`
+    /// in around its recursion; `Triggered` / `Sequence` multiply their LOCAL
+    /// offsets by it so interior trigger times land on the global axis
+    /// (`.sketch/01 §A.3`).
+    local_scale: f32,
+}
+
+impl Default for ResolveCtx {
+    fn default() -> Self {
+        Self {
+            triggers: TriggerTable::default(),
+            abs_start: 0.0,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+            local_scale: 1.0,
+        }
+    }
 }
 
 impl ResolveCtx {
@@ -1288,6 +1335,13 @@ impl ResolveCtx {
     /// Absolute start of the node currently being resolved.
     pub fn abs_start(&self) -> f32 {
         self.abs_start
+    }
+
+    /// Cumulative window-stretch scale (absolute seconds per current-level local
+    /// second). Containers in other modules multiply their local cursor offsets
+    /// by this so children land at the right absolute start under a stretch.
+    pub fn local_scale(&self) -> f32 {
+        self.local_scale
     }
 
     /// Sets the absolute start for the node currently being resolved.
@@ -1495,9 +1549,9 @@ impl std::fmt::Debug for ResolvedTimeline {
 ///    (step 4) recurse over their own children via `&self` recursion and may
 ///    [`warn`](ResolveCtx::warn) for the all-fill `0.0` case.
 ///
-/// Media-leaf duration PROBING (`.sketch/02 §12`, [`ResolveError::Probe`]) is
-/// step 4's concern; no leaves exist yet, so this entry never probes — it only
-/// folds the contract above.
+/// Media-leaf duration PROBING (`.sketch/02 §12`, [`ResolveError::Probe`])
+/// happens through the leaves during the measure fold above: `VideoFile` /
+/// `AudioFile` report their probed source length as their `duration`.
 pub fn resolve(
     root: impl TimelineComponent + Send + 'static,
 ) -> Result<ResolvedTimeline, ResolveError> {
@@ -2065,6 +2119,31 @@ mod tests {
             resolve(Dot.at(5.0..8.0).trigger_at_start(e)).expect("windowed, so not timeless");
         assert_eq!(resolved.triggers().get(e.id()).seconds(), 0.0);
         assert_eq!(resolved.duration(), 8.0);
+    }
+
+    #[test]
+    fn resolve_scales_interior_trigger_under_window_stretch() {
+        // A 2s child placed into a 1s window plays at speed 2, so an INTERIOR
+        // trigger at the child's local 1.0s fires at parent-clock 0.5s — not the
+        // un-stretched 1.0s. (`trigger_at` first, so the `Triggered` is INSIDE
+        // the stretched `Placed`.)
+        let e = Event::new();
+        let resolved = resolve(Beat::builder().start(0.0).build().trigger_at(1.0, e).at(0.0..1.0))
+            .expect("windowed timed child is not timeless");
+        assert_eq!(resolved.duration(), 1.0);
+        assert!(
+            (resolved.triggers().get(e.id()).seconds() - 0.5).abs() < 1e-6,
+            "interior trigger should compress to 0.5s, got {}",
+            resolved.triggers().get(e.id()).seconds()
+        );
+    }
+
+    #[test]
+    fn resolve_zero_length_window_is_an_error() {
+        // A zero-length `.at(a..a)` window has no determinate speed; resolve
+        // rejects it rather than silently degrading to speed 1.0.
+        let err = resolve(Dot.at(2.0..2.0)).expect_err("zero-length window is invalid");
+        assert!(matches!(err, ResolveError::Invalid(_)));
     }
 
     #[test]

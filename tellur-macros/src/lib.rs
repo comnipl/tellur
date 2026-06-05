@@ -820,6 +820,20 @@ fn timeline_codegen<'a>(
                 #trait_path::samples(&__child, clock, window)
             }
 
+            fn mix_into(
+                &self,
+                mix: &mut ::tellur_core::audio::AudioMix,
+                start_secs: f32,
+                speed: f32,
+            ) {
+                // Delegate the eager audio mix-down to the body, exactly like
+                // `cues`/`arrangement`. Without this the generated impl falls back
+                // to the trait's silent default, muting any fn-form component that
+                // composes audio (e.g. a `Dialogue(voice: AudioFile)`).
+                let __child = #build_structural;
+                #trait_path::mix_into(&__child, mix, start_secs, speed);
+            }
+
             fn cues(&self, offset: f32) -> ::std::vec::Vec<::tellur_core::timeline_component::Cue> {
                 let __child = #build_structural;
                 #trait_path::cues(&__child, offset)
