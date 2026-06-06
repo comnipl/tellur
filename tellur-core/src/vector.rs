@@ -61,6 +61,16 @@ pub trait VectorComponent: DynEq + DynHash {
     /// constraints.
     fn render(&self, size: Vec2) -> VectorGraphic;
 
+    /// Display name for this vector component, symmetric with
+    /// [`RasterComponent::arrangement_name`](crate::raster::RasterComponent::arrangement_name).
+    /// A vector component only reaches a timeline after `.rasterize()` wraps it
+    /// in a raster component, so this name is NOT currently threaded into the
+    /// arrangement tree (see the macro's vector arm); it exists for symmetry and
+    /// future use. `None` by default.
+    fn arrangement_name(&self) -> Option<String> {
+        None
+    }
+
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `VectorLayer.children`
     /// in struct-literal form.

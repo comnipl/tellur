@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
+use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
 use tellur_renderer::CachingRenderContext;
 
 use crate::build_watch::{
@@ -113,7 +114,7 @@ fn handle_connection(
     match path.as_str() {
         "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
         "/api/events" => handle_event_stream(app, stream),
-        "/api/info" | "/api/frame" | "/api/stream" => {
+        "/api/info" | "/api/frame" | "/api/stream" | "/api/arrangement" => {
             let mut app = app
                 .lock()
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
@@ -244,6 +245,7 @@ impl PreviewApp {
             "/api/info" => self.handle_info(stream),
             "/api/frame" => self.handle_frame(stream, &request.query),
             "/api/stream" => self.handle_stream(stream, &request.query),
+            "/api/arrangement" => self.handle_arrangement(stream, &request.query),
             _ => unreachable!("non-api routes are handled before acquiring the preview lock"),
         }
     }
@@ -271,6 +273,39 @@ impl PreviewApp {
             self.plugin.cache_key().unwrap_or(""),
             &compile,
         ))
+    }
+
+    fn handle_arrangement(
+        &mut self,
+        mut stream: TcpStream,
+        query: &HashMap<String, String>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.reload_plugin_if_changed()?;
+        let collection = self.plugin.collection()?;
+        let timelines = collection.timelines();
+        let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
+            return write_response(
+                &mut stream,
+                404,
+                "Not Found",
+                "application/json; charset=utf-8",
+                b"null",
+            );
+        };
+        let body = match collection.arrangement(&info.id) {
+            Some(arrangement) => arrangement_json(&arrangement),
+            // The collection has not resolved a tree for this id (a failed
+            // resolve, or a not-yet-migrated collection): emit `null` so the UI
+            // can fall back to its flat view.
+            None => "null".to_owned(),
+        };
+        write_response(
+            &mut stream,
+            200,
+            "OK",
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+        )
     }
 
     fn handle_frame(
@@ -518,13 +553,17 @@ impl PreviewApp {
         let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
             return Err("timeline not found".into());
         };
+        let fps = request_fps(query, self.fps.max(1));
         let seconds = query
             .get("frame")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|frame| frame as f32 / request_fps(query, self.fps.max(1)) as f32)
+            .map(|frame| frame as f32 / fps as f32)
             .or_else(|| query.get("time").and_then(|v| v.parse::<f32>().ok()))
-            .unwrap_or(0.0)
-            .clamp(0.0, info.duration.max(0.0));
+            .unwrap_or(0.0);
+        // Clamp into the half-open renderable range so a `time=<duration>`
+        // request (a frontend scrubbed to the very end) returns the last frame
+        // instead of erroring with `timeline did not produce a frame`.
+        let seconds = clamp_to_renderable(seconds, info.duration, fps);
         let resolution = request_resolution(query, self.resolution);
 
         let before = self.ctx.metrics();
@@ -569,6 +608,9 @@ impl PreviewApp {
 struct VideoStreamSetup {
     timeline_id: String,
     duration: f32,
+    /// The full timeline length, used to clamp each frame's requested time into
+    /// the half-open renderable range (`< total_duration`).
+    total_duration: f32,
     fps: u32,
     resolution: Resolution,
     gop: u32,
@@ -587,6 +629,62 @@ struct VideoFrame {
     gpu_available: bool,
     gpu_ops: u64,
     gpu_readbacks: u64,
+}
+
+/// The fixed audio layout the preview mux uses (matches the encoder boundary).
+const AUDIO_RATE: u32 = 48_000;
+const AUDIO_CHANNELS: u16 = 2;
+
+static AUDIO_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temp file removed on drop, so a stream's staged audio WAV is cleaned up
+/// whenever `handle_video_stream` returns (including early `?` returns).
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Writes `buf` (interleaved f32) as a 16-bit PCM WAV to a unique temp path, so
+/// ffmpeg can take it as a second input and mux it into the preview stream.
+fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
+    let seq = AUDIO_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "tellur_live_audio_{}_{}.wav",
+        std::process::id(),
+        seq
+    ));
+
+    let channels = buf.channels.max(1);
+    let rate = buf.rate.max(1);
+    let bits: u16 = 16;
+    let byte_rate = rate * channels as u32 * (bits as u32 / 8);
+    let block_align = channels * (bits / 8);
+    let data_bytes = (buf.samples.len() * 2) as u32;
+
+    let mut bytes = Vec::with_capacity(44 + buf.samples.len() * 2);
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    bytes.extend_from_slice(b"WAVE");
+    bytes.extend_from_slice(b"fmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
+    bytes.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    bytes.extend_from_slice(&channels.to_le_bytes());
+    bytes.extend_from_slice(&rate.to_le_bytes());
+    bytes.extend_from_slice(&byte_rate.to_le_bytes());
+    bytes.extend_from_slice(&block_align.to_le_bytes());
+    bytes.extend_from_slice(&bits.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in &buf.samples {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(&path, &bytes)?;
+    Ok(path)
 }
 
 fn handle_video_stream(
@@ -632,6 +730,7 @@ fn handle_video_stream(
         VideoStreamSetup {
             timeline_id: info.id.clone(),
             duration,
+            total_duration: info.duration.max(0.0),
             fps,
             resolution,
             gop,
@@ -644,6 +743,24 @@ fn handle_video_stream(
             },
             realtime: !cacheable,
         }
+    };
+
+    // Render the timeline's audio once and stage it as a temp WAV so the stream
+    // can mux a real AAC track. `render_audio` returns a full-length buffer
+    // (silent if the tree has no audio sources); `None` only for legacy
+    // collections, where the stream falls back to a generated silent track. The
+    // guard removes the file when this function returns.
+    let audio_wav = {
+        let mut app = app
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        app.reload_plugin_if_changed()?;
+        app.plugin
+            .collection()
+            .ok()
+            .and_then(|c| c.render_audio(&setup.timeline_id, AUDIO_RATE, AUDIO_CHANNELS))
+            .and_then(|buf| write_temp_wav(&buf).ok())
+            .map(TempFile)
     };
 
     write!(
@@ -659,10 +776,29 @@ fn handle_video_stream(
         setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
 
-    let mut child = Command::new("ffmpeg")
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
+    // The frame-quantized video length, used to BOUND the output below with `-t`
+    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
+    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
+    let video_seconds = total_frames as f32 / setup.fps as f32;
+
+    // FLAC block size aligned to ONE video frame's worth of audio samples, applied
+    // to the encoder below (only when the sample rate divides evenly by fps — the
+    // common 24/25/30/48/50/60 case). `-t` quantizes every segment to an integer
+    // number of video frames, so an aligned block size makes each segment an exact
+    // integer number of FLAC blocks: no partial trailing block, so the muxer emits
+    // NO per-segment trim (`discard_padding`) at the cut. Adjacent cached segments
+    // then concatenate gaplessly in MSE. With the default (~1152-sample) block the
+    // final block is partial and gets trimmed mid-block, and the browser — which
+    // decodes each cached segment separately and stitches at the buffer level —
+    // produces an audible click at every cache-segment boundary.
+    let audio_frame_size = AUDIO_RATE
+        .is_multiple_of(setup.fps)
+        .then(|| AUDIO_RATE / setup.fps);
+
+    let mut cmd = Command::new("ffmpeg");
+    cmd.arg("-hide_banner")
+        .args(["-loglevel", "error"])
+        // Input 0: the raw video frames, fed live over stdin.
         .args(["-f", "rawvideo"])
         .args(["-pix_fmt", "rgba"])
         .args([
@@ -670,12 +806,47 @@ fn handle_video_stream(
             &format!("{}x{}", setup.resolution.width, setup.resolution.height),
         ])
         .args(["-r", &setup.fps.to_string()])
-        .args(["-i", "-"])
-        .arg("-an")
-        .args(["-c:v", "libx264"])
+        .args(["-i", "-"]);
+    // Input 1: the audio track. A rendered WAV seeked to the stream's start when
+    // the timeline has audio; otherwise a generated silent track, so every
+    // stream has the same A/V structure the client's SourceBuffer expects.
+    match &audio_wav {
+        Some(wav) => {
+            cmd.arg("-ss")
+                .arg(format!("{:.6}", setup.start_seconds))
+                .arg("-i")
+                .arg(&wav.0);
+        }
+        None => {
+            cmd.args(["-f", "lavfi"]).arg("-i").arg(format!(
+                "anullsrc=channel_layout=stereo:sample_rate={AUDIO_RATE}"
+            ));
+        }
+    }
+    cmd.args(["-c:v", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-tune", "zerolatency"])
+        // Convert the rendered full-range RGB to (limited-range) BT.709 YUV and
+        // TAG the stream with that exact matrix/range. Without this, swscale
+        // converts with its BT.601/limited defaults and writes NO color metadata,
+        // so the browser falls back to its own guess (BT.709 for 720p+) and
+        // decodes with a different matrix than the encode used — shifting the
+        // colors versus the paused PNG (which shows the raw full-range RGB with no
+        // conversion). `scale` does the conversion, `setparams` stamps all four
+        // color fields onto the frames (so primaries/transfer are written too,
+        // without codec-specific params), and the `-color_*` options mirror them
+        // at the stream level. Limited range matches the offline export default
+        // (`FfmpegEncoder`'s `ColorRange::Limited`) so preview and export agree.
+        .args([
+            "-vf",
+            "scale=out_range=tv:out_color_matrix=bt709,format=yuv420p,\
+             setparams=range=tv:color_primaries=bt709:colorspace=bt709:color_trc=bt709",
+        ])
         .args(["-pix_fmt", "yuv420p"])
+        .args(["-color_primaries", "bt709"])
+        .args(["-color_trc", "bt709"])
+        .args(["-colorspace", "bt709"])
+        .args(["-color_range", "tv"])
         .args(["-g", &setup.gop.to_string()])
         .args(["-keyint_min", &setup.gop.to_string()])
         .args(["-sc_threshold", "0"])
@@ -683,33 +854,77 @@ fn handle_video_stream(
         .args(["-refs", "1"])
         .args(["-flags", "low_delay"])
         .args(["-crf", &setup.crf.to_string()])
+        // Audio FLAC, NOT AAC; map exactly one video + one audio stream. Each
+        // cache segment is a SEPARATE ffmpeg encode, and AAC adds ~2048 samples of
+        // encoder delay (priming) at the start of every encode plus frame-grid
+        // padding at the end. Concatenating adjacent segments in MSE then leaves a
+        // brief silent gap / click at each cache boundary. FLAC is lossless with
+        // ZERO encoder delay and stores the exact sample count, so a segment's
+        // first sample lands exactly on its start time and the boundaries are
+        // gapless. `-compression_level 0` keeps the encode fast for the realtime
+        // path (it stays lossless regardless of level).
+        .args(["-c:a", "flac"])
+        .args(["-compression_level", "0"]);
+    // Align FLAC blocks to the video-frame sample grid so cache-segment seams stay
+    // gapless (see `audio_frame_size`). Stream-specified to `:a` so it can't be
+    // misread as a (meaningless) video option.
+    if let Some(frame_size) = audio_frame_size {
+        cmd.args(["-frame_size:a", &frame_size.to_string()]);
+    }
+    cmd.args(["-map", "0:v:0"])
+        .args(["-map", "1:a:0"])
+        // Bound the output to the video's frame-quantized length with `-t`, NOT
+        // `-shortest`. Video frames are produced live and paced to real time, but
+        // the audio WAV is a complete file ffmpeg reads instantly; `-shortest`
+        // then races the fully-available audio against the still-arriving video
+        // and ends the output EARLY — dropping the tail frame(s) and opening a
+        // startup gap (the offline export avoids this by pre-fitting audio to the
+        // video length). `-t` cuts on output PTS, so every fed frame survives.
+        .args(["-t", &format!("{video_seconds:.6}")])
         .args(["-muxdelay", "0"])
         .args(["-muxpreload", "0"])
         .args(["-flush_packets", "1"])
         .args(["-f", "mp4"])
-        .args([
-            "-movflags",
-            "frag_keyframe+frag_every_frame+empty_moov+default_base_moof",
-        ])
+        // Fragment per GOP (`frag_keyframe`), NOT per video frame
+        // (`frag_every_frame`). `frag_every_frame` cuts a fragment every video
+        // frame (33.3 ms @ 30fps), but an AAC frame is 1024 samples (≈21.3 ms) /
+        // 2048 (≈42.7 ms) and does not align to the video grid — so the audio
+        // fragments end up with DUPLICATE / non-monotonic `tfdt`
+        // (baseMediaDecodeTime), which MSE chokes on: the audio track stalls and,
+        // since playback needs both tracks, the video freezes a frame or two in.
+        // GOP fragments hold whole audio frames with strictly increasing `tfdt`.
+        .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
         .arg("pipe:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
 
     let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
     let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
     let mut stderr = child.stderr.take().ok_or("ffmpeg stderr was not piped")?;
+    // Disable Nagle so the final fragment is sent immediately rather than being
+    // held waiting to coalesce — with `Connection: close` a delayed tail can
+    // otherwise reach the client only at FIN, after playback has already ended.
+    let _ = stream.set_nodelay(true);
     let mut stream_out = stream.try_clone()?;
     let client_alive = Arc::new(AtomicBool::new(true));
     let client_alive_for_stdout = Arc::clone(&client_alive);
 
+    // Drain ffmpeg's stdout to the client until TRUE EOF. ffmpeg emits the tail
+    // GOP/fragments only after stdin is closed (the EOF below `drop(stdin)`), so
+    // this thread must keep reading past the last frame the main loop wrote — it
+    // is what carries the final ~GOP of frames to the client. A transient
+    // `Interrupted` (EINTR) read is RETRIED, not treated as EOF: aborting on it
+    // would truncate exactly that tail under load (the intermittent dropped-tail
+    // bug). Only a real read error or a client write failure ends the drain.
     let stdout_thread = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
         loop {
             let n = match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => {
                     client_alive_for_stdout.store(false, Ordering::Relaxed);
                     break;
@@ -720,6 +935,9 @@ fn handle_video_stream(
                 break;
             }
         }
+        // Flush the final fragments to the kernel before the connection's FIN so
+        // the tail is not stranded in a userspace/socket buffer at close.
+        let _ = stream_out.flush();
     });
 
     let stderr_thread = thread::spawn(move || {
@@ -730,7 +948,6 @@ fn handle_video_stream(
 
     let frame_step = 1.0 / setup.fps as f32;
     let frame_duration = Duration::from_secs_f32(frame_step);
-    let total_frames = (setup.duration * setup.fps as f32).ceil() as u64;
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {
@@ -738,7 +955,14 @@ fn handle_video_stream(
         }
 
         let frame_start = Instant::now();
-        let seconds = setup.start_seconds + frame as f32 * frame_step;
+        // Clamp into the half-open renderable range so the final frame of a
+        // full-length stream (which can land on `total_duration`) renders the
+        // last frame rather than erroring with `timeline did not produce a frame`.
+        let seconds = clamp_to_renderable(
+            setup.start_seconds + frame as f32 * frame_step,
+            setup.total_duration,
+            setup.fps,
+        );
         let image = {
             let mut app = app
                 .lock()
@@ -942,6 +1166,25 @@ fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
 }
 
+/// Clamps a requested frame time into the timeline's RENDERABLE range.
+///
+/// Clip time gates in the core are half-open `[start, end)` (`tellur-core`
+/// `timeline_component.rs`'s `t < end`), so a request at exactly `duration`
+/// leaves every clip inactive and the composite is `None` — surfacing as a
+/// `timeline did not produce a frame` 500. A frontend scrubbing to the very end
+/// (or any `time=<duration>` request) would otherwise break.
+///
+/// So the upper bound is the LAST renderable frame time, one frame step below
+/// `duration` (`(duration - 1/fps).max(0.0)`), which satisfies `t < duration`
+/// and lands in the final frame's interval. A zero/sub-frame timeline clamps to
+/// `0.0`. This is the server-side root guard: an end-of-timeline request returns
+/// the last frame instead of erroring.
+fn clamp_to_renderable(seconds: f32, duration: f32, fps: u32) -> f32 {
+    let frame_step = 1.0 / fps.max(1) as f32;
+    let last_frame = (duration - frame_step).max(0.0);
+    seconds.clamp(0.0, last_frame)
+}
+
 struct Request {
     method: String,
     path: String,
@@ -1100,11 +1343,16 @@ fn info_json(
     let timelines_json = timelines
         .iter()
         .map(|info| {
+            let error = match info.error.as_deref() {
+                Some(e) => format!("\"{}\"", json_escape(e)),
+                None => "null".to_owned(),
+            };
             format!(
-                "{{\"id\":\"{}\",\"title\":\"{}\",\"duration\":{}}}",
+                "{{\"id\":\"{}\",\"title\":\"{}\",\"duration\":{},\"error\":{}}}",
                 json_escape(&info.id),
                 json_escape(&info.title),
                 finite_json_number(info.duration),
+                error,
             )
         })
         .collect::<Vec<_>>()
@@ -1130,6 +1378,76 @@ fn info_json(
     )
 }
 
+/// The lowercased `NodeKind` discriminant the live UI keys its rendering on.
+/// Kept in lock-step with `web/src/types.ts`'s `NodeKind` union.
+fn node_kind_str(kind: NodeKind) -> &'static str {
+    match kind {
+        NodeKind::Video => "video",
+        NodeKind::Audio => "audio",
+        NodeKind::Subtitle => "subtitle",
+        NodeKind::Timeline => "timeline",
+        NodeKind::Sequence => "sequence",
+    }
+}
+
+/// Serializes an [`Arrangement`] node and its children into the hand-built JSON
+/// the live UI consumes (audit B.4). Recurses over `children`; every float goes
+/// through [`finite_json_number`]; `trim` is `null` or `[a,b]`; each trigger is
+/// an object `{"time":<num>,"name":<null|string>}`; `source` is `null` or
+/// `{"file":<string>,"line":<num>}`. Shape mirrored in `web/src/types.ts`.
+fn arrangement_json(node: &Arrangement) -> String {
+    let trim = match node.trim {
+        Some((a, b)) => format!("[{},{}]", finite_json_number(a), finite_json_number(b)),
+        None => "null".to_owned(),
+    };
+    let triggers = node
+        .triggers
+        .iter()
+        .map(|t| {
+            let name = match &t.name {
+                Some(n) => format!("\"{}\"", json_escape(n)),
+                None => "null".to_owned(),
+            };
+            format!(
+                "{{\"time\":{},\"name\":{}}}",
+                finite_json_number(t.time),
+                name,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let children = node
+        .children
+        .iter()
+        .map(arrangement_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let name = match &node.name {
+        Some(n) => format!("\"{}\"", json_escape(n)),
+        None => "null".to_owned(),
+    };
+    let source = match &node.source {
+        Some(s) => format!(
+            "{{\"file\":\"{}\",\"line\":{}}}",
+            json_escape(&s.file),
+            s.line,
+        ),
+        None => "null".to_owned(),
+    };
+    format!(
+        "{{\"kind\":\"{}\",\"label\":\"{}\",\"name\":{},\"source\":{},\"start\":{},\"end\":{},\"trim\":{},\"triggers\":[{}],\"children\":[{}]}}",
+        node_kind_str(node.kind),
+        json_escape(&node.label),
+        name,
+        source,
+        finite_json_number(node.start),
+        finite_json_number(node.end),
+        trim,
+        triggers,
+        children,
+    )
+}
+
 fn finite_json_number(v: f32) -> String {
     if v.is_finite() {
         v.to_string()
@@ -1152,4 +1470,184 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tellur_core::timeline_component::{SourceLoc, TriggerMark};
+
+    // A request for exactly `duration` must clamp into the half-open renderable
+    // range: `< duration` (so the core's `t < end` clip gate stays active) AND
+    // inside the LAST frame's interval `[duration - 1/fps, duration)`. This is
+    // the root guard for "scrub to the very end" — without it `t == duration`
+    // leaves every clip inactive and the composite is `None` (a 500
+    // `timeline did not produce a frame`).
+    #[test]
+    fn clamp_to_renderable_maps_exact_duration_to_last_frame() {
+        let duration = 7.6_f32;
+        let fps = 60;
+        let frame_step = 1.0 / fps as f32;
+
+        let clamped = clamp_to_renderable(duration, duration, fps);
+        // Strictly inside the timeline (the half-open endpoint is excluded).
+        assert!(clamped < duration, "{clamped} must be < {duration}");
+        // And within the final frame's interval, so it renders the last frame.
+        assert!(
+            clamped >= duration - frame_step,
+            "{clamped} must be in the last frame interval [{}, {duration})",
+            duration - frame_step
+        );
+        // Exactly the last frame time (one step below duration).
+        assert!((clamped - (duration - frame_step)).abs() < 1e-6);
+
+        // A past-the-end request clamps to the same last frame.
+        assert_eq!(clamp_to_renderable(duration + 5.0, duration, fps), clamped);
+    }
+
+    #[test]
+    fn clamp_to_renderable_passes_through_interior_times() {
+        // A time comfortably inside the range is unchanged.
+        let t = clamp_to_renderable(3.0, 7.6, 60);
+        assert_eq!(t, 3.0);
+    }
+
+    #[test]
+    fn clamp_to_renderable_handles_short_and_negative() {
+        // A timeline shorter than one frame (or zero) clamps to 0.0 rather than
+        // going negative.
+        assert_eq!(clamp_to_renderable(1.0, 0.0, 60), 0.0);
+        assert_eq!(clamp_to_renderable(0.005, 0.01, 60), 0.0);
+        // A negative request floors at 0.0.
+        assert_eq!(clamp_to_renderable(-2.0, 7.6, 60), 0.0);
+    }
+
+    // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
+    // overlay timeline with a video child (a source crop) and a sequence of two
+    // captions, one carrying a trigger. Asserts the hand-built emitter matches
+    // the documented JSON exactly (lowercased kinds, `null`/`[a,b]` trim, every
+    // float through `finite_json_number`, recursive children).
+    #[test]
+    fn arrangement_json_matches_the_b4_shape() {
+        let arrangement = Arrangement {
+            kind: NodeKind::Timeline,
+            label: "root".to_owned(),
+            // A non-null `name` exercises the escaped-string branch; the rest stay
+            // `null` to cover the absent-name branch.
+            name: Some("Dialogue · \"hi\"".to_owned()),
+            source: None,
+            start: 0.0,
+            end: 6.0,
+            trim: None,
+            triggers: Vec::new(),
+            children: vec![
+                Arrangement {
+                    kind: NodeKind::Video,
+                    label: "establishing.mp4".to_owned(),
+                    name: None,
+                    // A non-null `source` exercises the object branch (note the
+                    // backslash escaping in the file path); the rest stay `null`.
+                    source: Some(SourceLoc {
+                        file: "scenes\\intro.rs".to_owned(),
+                        line: 42,
+                    }),
+                    start: 0.0,
+                    end: 2.0,
+                    trim: Some((1.0, 3.0)),
+                    triggers: Vec::new(),
+                    children: Vec::new(),
+                },
+                Arrangement {
+                    kind: NodeKind::Sequence,
+                    label: String::new(),
+                    name: None,
+                    source: None,
+                    start: 0.0,
+                    end: 6.0,
+                    trim: None,
+                    triggers: Vec::new(),
+                    children: vec![
+                        Arrangement {
+                            kind: NodeKind::Video,
+                            label: "one".to_owned(),
+                            name: None,
+                            source: None,
+                            start: 0.0,
+                            end: 3.0,
+                            trim: None,
+                            triggers: Vec::new(),
+                            children: Vec::new(),
+                        },
+                        Arrangement {
+                            kind: NodeKind::Video,
+                            label: "two".to_owned(),
+                            name: None,
+                            source: None,
+                            start: 3.0,
+                            end: 6.0,
+                            trim: None,
+                            // A named trigger exercises the string branch; an
+                            // anonymous one covers the `null` branch.
+                            triggers: vec![
+                                TriggerMark {
+                                    time: 3.0,
+                                    name: Some("reveal".to_owned()),
+                                },
+                                TriggerMark {
+                                    time: 4.0,
+                                    name: None,
+                                },
+                            ],
+                            children: Vec::new(),
+                        },
+                    ],
+                },
+            ],
+        };
+
+        let expected = concat!(
+            "{\"kind\":\"timeline\",\"label\":\"root\",\"name\":\"Dialogue · \\\"hi\\\"\",\"source\":null,\"start\":0,\"end\":6,",
+            "\"trim\":null,\"triggers\":[],\"children\":[",
+            "{\"kind\":\"video\",\"label\":\"establishing.mp4\",\"name\":null,\"source\":{\"file\":\"scenes\\\\intro.rs\",\"line\":42},\"start\":0,\"end\":2,",
+            "\"trim\":[1,3],\"triggers\":[],\"children\":[]},",
+            "{\"kind\":\"sequence\",\"label\":\"\",\"name\":null,\"source\":null,\"start\":0,\"end\":6,",
+            "\"trim\":null,\"triggers\":[],\"children\":[",
+            "{\"kind\":\"video\",\"label\":\"one\",\"name\":null,\"source\":null,\"start\":0,\"end\":3,",
+            "\"trim\":null,\"triggers\":[],\"children\":[]},",
+            "{\"kind\":\"video\",\"label\":\"two\",\"name\":null,\"source\":null,\"start\":3,\"end\":6,",
+            "\"trim\":null,\"triggers\":[",
+            "{\"time\":3,\"name\":\"reveal\"},",
+            "{\"time\":4,\"name\":null}",
+            "],\"children\":[]}",
+            "]}",
+            "]}"
+        );
+
+        assert_eq!(arrangement_json(&arrangement), expected);
+    }
+
+    #[test]
+    fn arrangement_json_non_finite_floats_become_zero() {
+        // `finite_json_number` guards every float, so an unfired/absent length
+        // (∞ / NaN) never leaks a non-JSON token.
+        let arrangement = Arrangement {
+            kind: NodeKind::Video,
+            label: String::new(),
+            name: None,
+            source: None,
+            start: f32::INFINITY,
+            end: f32::NAN,
+            trim: None,
+            triggers: vec![TriggerMark {
+                time: f32::INFINITY,
+                name: None,
+            }],
+            children: Vec::new(),
+        };
+        let json = arrangement_json(&arrangement);
+        assert!(json.contains("\"start\":0"));
+        assert!(json.contains("\"end\":0"));
+        assert!(json.contains("\"triggers\":[{\"time\":0,\"name\":null}]"));
+        assert!(json.contains("\"source\":null"));
+    }
 }

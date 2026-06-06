@@ -19,6 +19,7 @@
   --accent-pink: #ff4c82;
   --accent-pink-soft: #9a4b5f;
   --timeline-marker: #f03168;
+  --timeline-event: #2bd0d6;
   --accent-cache: #31d99b;
   --accent-clip: #7d98df;
   --accent-track-dot: #7392e8;
@@ -28,7 +29,7 @@
   --viewer-h: 448px;
   --scrubber-h: 18px;
   --transport-h: 46px;
-  --tabs-h: 56px;
+  --tabs-h: 50px;
   --track-h: 28px;
   --footer-h: 34px;
   --side-w: 220px;
@@ -227,6 +228,16 @@ select option {
   min-height: 0;
   padding: 1px 1px 5px 10px;
   background: var(--bg-app);
+}
+
+/* Top row: the preview keeps its fixed viewer width on the left; the Inspector
+   fills the leftover space to its right. The timeline occupies the full-width
+   second row of `.workspace`. */
+.workspace-top {
+  display: grid;
+  grid-template-columns: min(var(--viewer-w), 100%) minmax(0, 1fr);
+  column-gap: 6px;
+  min-height: 0;
 }
 
 .viewer-panel {
@@ -453,6 +464,164 @@ select option {
   color: var(--text-secondary);
 }
 
+/* Inspector: a general detail panel for the selected timeline node, sitting to
+   the right of the preview in the top row. Styled to match the other panels
+   (panel bg, border, radius) with its own internal padding and a small heading.
+   Scrolls vertically if its fields grow taller than the row. */
+.inspector {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden auto;
+  padding: 12px 14px;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-panel);
+  border-radius: 8px;
+}
+
+/* Mirror the Timeline panel's top-left "Timeline" label (.tabsrow__tab--primary):
+   a small dark pill with light text, so the two panels read as the same kind of
+   section header. `align-self: flex-start` keeps the pill sized to its text in
+   the inspector's flex column rather than stretching full width. */
+.inspector__heading {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  margin: 0;
+  padding: 0 9px;
+  color: #f2f2f4;
+  background: #3f3f42;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.inspector__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 12px;
+}
+
+.inspector__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector__fields {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  margin: 0;
+  column-gap: 14px;
+  row-gap: 7px;
+}
+
+.inspector__row {
+  display: contents;
+}
+
+.inspector__label {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.inspector__value {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Source row: the lucide FileCode glyph (cache-green, matching the prior pill)
+   beside the `basename:line` call site in a tabular, primary-weight readout. */
+.inspector__value--source {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.inspector__value--source svg {
+  flex: 0 0 auto;
+  color: var(--accent-cache);
+}
+
+.inspector__source-loc {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+}
+
+.inspector__value--time {
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector__events {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inspector__event-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  gap: 4px;
+  list-style: none;
+}
+
+/* One fired Event: the cyan Flag glyph + name + time, echoing the timeline's
+   event-flag accent so the two readouts read as the same thing. */
+.inspector__event {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.inspector__event svg {
+  flex: 0 0 auto;
+  color: var(--timeline-event);
+}
+
+.inspector__event-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspector__event-time {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector__placeholder {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .timeline-panel {
   display: grid;
   grid-template-rows: var(--tabs-h) minmax(0, 1fr) var(--footer-h);
@@ -526,15 +695,26 @@ select option {
   height: 100%;
 }
 
+/* Left-edge readout = the ruler's "pinned tick" at the viewport start. It shares
+   the SAME band and SAME baseline as the moving ticks (bottom-anchored, two-line
+   time-over-frame), so the row reads as one ruler with a fixed leading entry. A
+   higher z-index + an opaque panel backing keep it legible when a moving tick
+   would otherwise slide under it. */
 .tabsrow__viewport-start {
   position: absolute;
-  top: 6px;
+  /* Sit ABOVE the playhead/cache band (bottom ~14px) and give the text real
+     top/bottom padding so it doesn't crowd the row top or the green cache strip
+     below. Height is content-driven (no fixed height) so the padding actually
+     opens up space around the labels. */
+  bottom: 14px;
   left: 0;
-  z-index: 1;
+  z-index: 2;
   display: inline-flex;
-  align-items: flex-start;
-  gap: 2px;
-  color: var(--text-muted);
+  align-items: flex-end;
+  gap: 1px;
+  padding: 3px 6px 3px 0;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
   pointer-events: none;
   white-space: nowrap;
 }
@@ -542,20 +722,22 @@ select option {
 .tabsrow__viewport-start-text {
   display: inline-flex;
   flex-direction: column;
-  font-size: 10px;
+  gap: 2px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   letter-spacing: 0;
-  line-height: 1.08;
+  line-height: 1.3;
 }
 
 .tabsrow__viewport-start-frame {
-  margin-top: 2px;
+  color: #8a8a90;
 }
 
 .tabsrow__viewport-start-icon {
   flex: 0 0 auto;
-  margin-top: 10px;
+  align-self: flex-end;
+  margin-bottom: 1px;
   color: #66666c;
   transform: translateX(-3px);
 }
@@ -563,7 +745,9 @@ select option {
 .tabsrow__cache {
   position: absolute;
   right: auto;
-  bottom: 7px;
+  /* The render-cache indicator sits BELOW the ruler band (ticks/readout/chip are
+     bottom-anchored at 8px), as a thin strip near the very bottom of the row. */
+  bottom: 2px;
   height: 2px;
   background: var(--accent-cache);
   border-radius: 2px;
@@ -572,30 +756,40 @@ select option {
 
 .tabsrow__playhead-line {
   position: absolute;
-  top: 40px;
+  /* Must NOT cross the ruler's time labels. The labels sit in the upper part of
+     the row; the line lives only in the bottom band — from just above the green
+     cache strip down to the row's bottom edge (continuing into the tracks
+     below) — so it never overlaps the text. */
+  top: auto;
   bottom: 0;
+  height: 12px;
   width: 1px;
   background: var(--timeline-marker);
-  z-index: 2;
+  z-index: 4;
 }
 
 .tabsrow__chip {
   position: absolute;
-  top: 8px;
-  z-index: 3;
+  /* Bottom-anchored at the same baseline as the ruler ticks / pinned readout
+     (above the playhead/cache band) — they share one band, the chip just
+     overlays on top (highest z). Low box with a tight gap between the two white
+     lines, but enough HORIZONTAL inner padding that the text doesn't hug the
+     pink edges. */
+  bottom: 14px;
+  z-index: 5;
   display: inline-flex;
   flex-direction: column;
   justify-content: center;
-  min-width: 73px;
-  height: 30px;
-  padding: 4px 7px 4px 6px;
+  min-width: 78px;
+  height: 31px;
+  padding: 3px 11px;
   color: #fff;
   background: var(--timeline-marker);
   border-radius: 1px 0 0 1px;
   font-size: 10px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  line-height: 1.05;
+  line-height: 1.1;
   letter-spacing: 0;
   white-space: nowrap;
   transform: translateX(-4px);
@@ -619,16 +813,100 @@ select option {
   width: 0;
   height: 0;
   content: "";
+  /* Right-pointing tab; its half-height borders track the chip height (31px). */
   border-top: 15px solid transparent;
   border-bottom: 15px solid transparent;
   border-left: 9px solid var(--timeline-marker);
 }
 
 .tabsrow__chip-sub {
-  margin-top: 2px;
+  margin-top: 1px;
   font-size: 10px;
   font-weight: 800;
-  line-height: 1.05;
+  line-height: 1.1;
+}
+
+/* Ruler tick: a short vertical hairline at the tick's x with a two-line label
+   (time over frame number) to its right. The band lives at the bottom of the
+   cursor strip; ticks are click-through so the seek/scrub drag still works. The
+   line tone is a muted grey, deliberately distinct from the cyan event lines
+   and the pink playhead. */
+.tabsrow__tick {
+  position: absolute;
+  /* Bottom-anchored ABOVE the playhead/cache band (matching the pinned readout),
+     with real padding so the two-line label has room above and below instead of
+     hugging the row top / the green cache strip. Content-driven height. */
+  bottom: 14px;
+  z-index: 0;
+  display: flex;
+  align-items: flex-end;
+  padding: 3px 0;
+  pointer-events: none;
+}
+
+.tabsrow__tick-line {
+  position: absolute;
+  /* Short grey graticule hanging below the label, toward the cache strip. */
+  bottom: -6px;
+  left: 0;
+  width: 1px;
+  height: 6px;
+  background: #4a4a4f;
+}
+
+.tabsrow__tick-label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  letter-spacing: 0;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tabsrow__tick-time {
+  font-weight: 700;
+}
+
+.tabsrow__tick-frame {
+  color: #66666c;
+  font-weight: 600;
+}
+
+/* Slot-machine numeric readout (see RollingNumber.tsx). The control is a row of
+   fixed-width 1em-tall windows; each digit column rolls vertically to its value,
+   separators sit verbatim. Tabular numerals keep columns from jittering. */
+.rolling-number {
+  display: inline-flex;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rolling-digit {
+  display: inline-block;
+  position: relative;
+  height: 1em;
+  overflow: hidden;
+  vertical-align: baseline;
+}
+
+.rolling-digit__column {
+  display: flex;
+  flex-direction: column;
+  will-change: transform;
+}
+
+.rolling-digit__cell {
+  display: block;
+  height: 1em;
+  line-height: 1;
+  text-align: center;
 }
 
 .timeline {
@@ -661,7 +939,7 @@ select option {
 
 .track-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   height: var(--track-h);
   margin: 0 10px;
@@ -673,6 +951,70 @@ select option {
 
 .track-head--empty {
   visibility: hidden;
+}
+
+/* Grouping-container header rows are de-emphasized vs content rows: no clip
+   band sits beside them, so the lighter text reads as a section label. */
+.track-head--group {
+  background: transparent;
+}
+
+.track-head--group .track-head__name {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* Grouping containers (Timeline, Sequence) read as "components": a subtle green
+   tint on their rail chevron, matching the green kind color of container bars. */
+.track-head--group .track-head__chevron {
+  color: #6fcf97;
+}
+
+.track-head--group .track-head__chevron:hover {
+  color: #8fdcab;
+}
+
+/* Leaf-container title rows (collapsed bar or expanded window title) read as a
+   window title: transparent head (the clip carries the title look) with a
+   slightly bolder, brighter name. */
+.track-head--title {
+  background: transparent;
+}
+
+.track-head--title .track-head__name {
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.track-head__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.track-head__chevron:hover {
+  color: var(--text-primary);
+}
+
+/* Keep content-row names aligned with header-row names under the chevron
+   column by reserving the same leading 14px slot. */
+.track-head__chevron-spacer {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+}
+
+/* Rotating chevron wrappers (rail + clip toggle): inline-flex centers the SVG so
+   the motion rotation pivots about the glyph's center rather than a baseline. */
+.track-head__chevron-icon,
+.timeline__clip-toggle-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .track-head__name {
@@ -710,17 +1052,9 @@ select option {
   background: var(--bg-control-hover);
 }
 
-.track-head__color {
-  width: 14px;
-  height: 14px;
-  margin-left: 5px;
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
-}
-
 .timeline__tracks {
   position: relative;
-  height: 100%;
+  min-height: 100%;
   overflow: hidden;
   background: var(--bg-track);
   transform-origin: left top;
@@ -736,27 +1070,139 @@ select option {
   background: var(--bg-track);
 }
 
+/* Every bar's fill/text color is set inline from KIND_COLOR; this rule owns only
+   layout. `gap` spaces the optional toggle + ❖ icon from the label. The clip
+   text is non-selectable: seek/scrub/pan drags happen over the clips, and a drag
+   must not range-select the label/name. (Copy-worthy text — Inspector, source
+   path:line — lives elsewhere and stays selectable.) */
 .timeline__clip {
   position: absolute;
   top: 5px;
   bottom: 3px;
+  z-index: 2;
   display: flex;
   align-items: center;
+  gap: 5px;
   overflow: hidden;
-  padding: 0 10px;
-  background: var(--accent-clip);
+  padding: 0 9px;
   border-radius: 4px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* All clips are clickable (click selects the node); the pointer cursor signals
+   that. Title/summary bars additionally toggle via their chevron. */
+.timeline__clip {
+  cursor: pointer;
+}
+
+/* Collapsed grouping-container summary bar (its fill comes inline from the
+   container's kind color). */
+.timeline__clip--summary {
+  cursor: pointer;
+}
+
+/* Selected clip: a bright neutral ring drawn just outside the bar (outline so it
+   doesn't affect layout / the time projection), clearly marking the picked node
+   regardless of its kind fill. */
+.timeline__clip--selected {
+  z-index: 5;
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55);
+}
+
+/* Legacy/unresolved-arrangement fallback: a single neutral full-width bar with
+   the timeline title (no kind color is available in this path). */
+.timeline__clip--fallback {
+  background: var(--accent-clip);
+  color: #12121c;
+}
+
+/* Leaf-container title bar (collapsed pill OR expanded window title): a filled,
+   bold, fully rounded bar at full lane height. Clickable to collapse/expand. */
+.timeline__clip--title {
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Child bars inside an expanded window: inset VERTICALLY a touch more so they
+   float clear of the frame's top/bottom border. There is intentionally NO
+   horizontal inset — a child is flush to the same time edges as its window
+   frame, so the horizontal axis stays faithful to the frame. */
+.timeline__clip--nested {
+  top: 5px;
+  bottom: 5px;
+}
+
+/* The component-type icon and the expand/collapse handle on container bars hold
+   lucide SVG glyphs; inline-flex centers the SVG, which inherits the bar's text
+   color via currentColor. Slightly dimmed so the label stays primary. */
+.timeline__clip-icon,
+.timeline__clip-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.timeline__clip-icon {
+  opacity: 0.85;
+}
+
+.timeline__clip-toggle {
+  opacity: 0.9;
+  cursor: pointer;
+}
+
+.timeline__clip-toggle:hover {
+  opacity: 1;
 }
 
 .timeline__clip-label {
   min-width: 0;
   overflow: hidden;
-  color: #12121c;
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.timeline__clip--title .timeline__clip-label {
+  font-weight: 700;
+}
+
+/* Faint full-row hairline behind a grouping-container header row, so the empty
+   track still reads as part of the group band. */
+.timeline__group-line {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+/* Window frame around an expanded leaf-container's title + child lanes. Drawn
+   under the clips (z-index 1, below the nested clips' z-index 2 and the title
+   bar's z-index 3) and click-through (pointer-events:none) so the title toggle
+   and child clips stay interactive. The 1px border color AND the light-tint
+   interior background are set inline from the container's kind color (a Dialogue
+   window gets a soft green interior). top/height are exact lane multiples, so the
+   frame top aligns with the title lane's row top; the filled title bar overlays
+   that top edge, and the children sit flush to the time edges inside. */
+.timeline__window {
+  position: absolute;
+  z-index: 1;
+  border: 1px solid;
+  border-radius: 8px;
+  pointer-events: none;
 }
 
 .timeline__playhead {
@@ -767,6 +1213,59 @@ select option {
   background: var(--timeline-marker);
   pointer-events: none;
   z-index: 3;
+}
+
+/* Timeline Event reference line: a full-height dashed line spanning all lanes,
+   drawn over the clips and beneath the flags. One per DISTINCT trigger time. The
+   event accent (cyan) is deliberately distinct from the pink playhead so the two
+   never blend. */
+.timeline__event {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1.5px dashed var(--timeline-event);
+  pointer-events: none;
+  z-index: 4;
+}
+
+/* Event flag: a rounded cyan pill (Flag icon + name) rendered at TRACK level and
+   pinned to the top of its emitting clip's lane, sticking UP so it points at the
+   clip that raised the Event. Positioned at the trigger's x within the track; the
+   negative `top` lifts the whole pill ABOVE the lane's top edge (pill height is
+   16px, so -18px clears the clip top with a 2px gap) instead of overlapping the
+   clip body or its sticky icons/label. High z-index keeps it above clips and the
+   playhead. */
+.timeline__event-flag {
+  position: absolute;
+  top: -18px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px 0 5px;
+  color: #062223;
+  background: var(--timeline-event);
+  border-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+  /* Non-selectable like the clip text: a drag over the timeline must not
+     range-select the flag's event name. */
+  -webkit-user-select: none;
+  user-select: none;
+  transform: translateX(-1px);
+}
+
+.timeline__event-flag svg {
+  flex: 0 0 auto;
+}
+
+.timeline__event-name {
+  line-height: 1;
 }
 
 .zoom-bar {

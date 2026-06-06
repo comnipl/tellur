@@ -60,11 +60,12 @@
 //! untouched — and is rejected on `#[component(vector)]`.
 
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
+    parse::{Parse, ParseStream},
     parse_macro_input, parse_quote, Attribute, DeriveInput, Field, FnArg, Ident, Item, ItemFn,
-    ItemStruct, Meta, Pat, PatType, Type,
+    ItemStruct, LitStr, Meta, Pat, PatType, Token, Type,
 };
 
 mod keyable;
@@ -84,10 +85,11 @@ pub fn keyable(input: TokenStream) -> TokenStream {
 }
 
 /// Kind of component the macro targets.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Vector,
     Raster,
+    Timeline,
 }
 
 impl Kind {
@@ -95,6 +97,7 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::vector::VectorComponent),
             Kind::Raster => quote!(::tellur_core::raster::RasterComponent),
+            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineComponent),
         }
     }
 
@@ -102,6 +105,18 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::builder::VectorBuilder),
             Kind::Raster => quote!(::tellur_core::builder::RasterBuilder),
+            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineBuilder),
+        }
+    }
+
+    /// The `Box<dyn _Component>` the glue converts into. The timeline arm adds
+    /// `+ Send` (audit M2: a `TimelineComponent` must be boxable with `+ Send`);
+    /// the raster/vector arms must NOT, or existing `!Send` components break.
+    fn box_dyn(self) -> TokenStream2 {
+        let comp = self.component_trait();
+        match self {
+            Kind::Vector | Kind::Raster => quote!(::std::boxed::Box<dyn #comp>),
+            Kind::Timeline => quote!(::std::boxed::Box<dyn #comp + ::core::marker::Send>),
         }
     }
 
@@ -109,6 +124,9 @@ impl Kind {
         match self {
             Kind::Vector => quote!(::tellur_core::vector::VectorGraphic),
             Kind::Raster => quote!(::tellur_core::raster::RasterImage),
+            // The timeline arm has no single `render` graphic; it emits a full
+            // multi-method trait impl directly (see `expand_fn`).
+            Kind::Timeline => quote!(()),
         }
     }
 
@@ -124,45 +142,106 @@ impl Kind {
                 ),
                 quote!(size, target, ctx),
             ),
+            // Unused for the timeline arm; it builds its own method set.
+            Kind::Timeline => (quote!(), quote!()),
         }
     }
 }
 
-/// `#[component(vector)]` / `#[component(raster)]`.
+/// Parsed `#[component(...)]` attribute arguments: the mandatory `kind` ident
+/// plus an optional `name = "<template>"` display-name override. The template
+/// (when present) is kept as a [`LitStr`] so its `{field}` placeholders are
+/// expanded later against the component's stored fields.
+struct ComponentAttr {
+    kind: Kind,
+    name_template: Option<LitStr>,
+}
+
+impl Parse for ComponentAttr {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let kind_ident: Ident = input.parse()?;
+        let kind = match &kind_ident {
+            id if id == "vector" => Kind::Vector,
+            id if id == "raster" => Kind::Raster,
+            id if id == "timeline" => Kind::Timeline,
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &kind_ident,
+                    "expected `vector`, `raster`, or `timeline`",
+                ));
+            }
+        };
+
+        let mut name_template = None;
+        // Optional `, name = "..."` follows the kind.
+        while input.parse::<Token![,]>().is_ok() {
+            // Allow (and ignore) a trailing comma after the kind or arg.
+            if input.is_empty() {
+                break;
+            }
+            let key: Ident = input.parse()?;
+            if key != "name" {
+                return Err(syn::Error::new_spanned(
+                    &key,
+                    "unknown `#[component]` argument (only `name = \"...\"` is supported)",
+                ));
+            }
+            if name_template.is_some() {
+                return Err(syn::Error::new_spanned(&key, "duplicate `name` argument"));
+            }
+            input.parse::<Token![=]>()?;
+            name_template = Some(input.parse::<LitStr>()?);
+        }
+
+        Ok(Self {
+            kind,
+            name_template,
+        })
+    }
+}
+
+/// `#[component(vector)]` / `#[component(raster)]` / `#[component(timeline)]`,
+/// each optionally carrying `name = "<template>"`.
 #[proc_macro_attribute]
 pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let kind = match syn::parse::<Ident>(attr) {
-        Ok(id) if id == "vector" => Kind::Vector,
-        Ok(id) if id == "raster" => Kind::Raster,
-        _ => {
-            return syn::Error::new(
-                Span::call_site(),
-                "expected `#[component(vector)]` or `#[component(raster)]`",
-            )
-            .to_compile_error()
-            .into();
-        }
+    let ComponentAttr {
+        kind,
+        name_template,
+    } = match syn::parse::<ComponentAttr>(attr) {
+        Ok(parsed) => parsed,
+        Err(e) => return e.to_compile_error().into(),
     };
-    expand_item(item, kind)
+    expand_item(item, kind, name_template)
 }
 
 /// Backwards-compatible alias for `#[component(vector)]` on a function.
 #[proc_macro_attribute]
 pub fn vector_component(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_item(item, Kind::Vector)
+    expand_item(item, Kind::Vector, None)
 }
 
 /// Backwards-compatible alias for `#[component(raster)]` on a function.
 #[proc_macro_attribute]
 pub fn raster_component(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_item(item, Kind::Raster)
+    expand_item(item, Kind::Raster, None)
 }
 
-fn expand_item(item: TokenStream, kind: Kind) -> TokenStream {
+fn expand_item(item: TokenStream, kind: Kind, name_template: Option<LitStr>) -> TokenStream {
     let item = parse_macro_input!(item as Item);
     let result = match item {
-        Item::Fn(func) => expand_fn(func, kind),
-        Item::Struct(s) => expand_struct(s, kind),
+        Item::Fn(func) => expand_fn(func, kind, name_template),
+        Item::Struct(s) => {
+            if let Some(tpl) = name_template {
+                // Struct-form components keep their hand-written trait impls;
+                // the display-name hook is function-form only (task scope).
+                Err(syn::Error::new_spanned(
+                    tpl,
+                    "`name = \"...\"` is only supported on function-form `#[component]`s",
+                ))
+            } else {
+                expand_struct(s, kind)
+            }
+        }
         other => Err(syn::Error::new_spanned(
             other,
             "#[component] can only be applied to a function or a struct",
@@ -244,7 +323,7 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
 
 // ─── function form ───────────────────────────────────────────────────────────
 
-fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
+fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Result<TokenStream2> {
     if let Some(c) = func.sig.constness {
         return Err(syn::Error::new_spanned(c, "component fn cannot be const"));
     }
@@ -267,6 +346,8 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     let mut field_attrs: Vec<Vec<Attribute>> = Vec::new();
     let mut available_ident: Option<&Ident> = None;
     let mut available_type: Option<&Type> = None;
+    let mut clock_ident: Option<&Ident> = None;
+    let mut clock_type: Option<&Type> = None;
     let mut children: Option<Children> = None;
     let mut effect_child: Option<Ident> = None;
 
@@ -293,6 +374,29 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             }
             available_ident = Some(&pi.ident);
             available_type = Some(ty.as_ref());
+            continue;
+        }
+
+        // `#[clock] clock: Clock`: the temporal twin of `#[available]`. Captured
+        // and stripped here (so it is neither a struct field nor a cache-key
+        // term) and threaded into `__tellur_build` by value; the generated
+        // `frame`/`samples` forward the real framework clock. Only valid on the
+        // timeline arm — there is no clock in the raster/vector render protocol.
+        if attrs.iter().any(|a| a.path().is_ident("clock")) {
+            if kind != Kind::Timeline {
+                return Err(syn::Error::new_spanned(
+                    pi,
+                    "#[clock] is only valid on a #[component(timeline)]",
+                ));
+            }
+            if clock_ident.is_some() {
+                return Err(syn::Error::new_spanned(
+                    pi,
+                    "component fn can have at most one #[clock] argument",
+                ));
+            }
+            clock_ident = Some(&pi.ident);
+            clock_type = Some(ty.as_ref());
             continue;
         }
 
@@ -354,60 +458,121 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
     }
 
     let body = &func.block;
-    let (trait_path, graphic_path) = (kind.component_trait(), kind.graphic());
-    let (render_sig, render_args) = kind.render_sig();
+    let trait_path = kind.component_trait();
     let build_method = Ident::new("__tellur_build", fn_ident.span());
 
-    let (build_fn, build_call_layout, build_call_render, build_call_paint_bounds) =
-        if let (Some(av_ident), Some(av_type)) = (available_ident, available_type) {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self, #av_ident: #av_type) -> impl #trait_path + 'static {
-                        let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote! {
-                    let __available = ::tellur_core::geometry::Vec2(
-                        if constraints.max.0.is_finite() { constraints.max.0 } else { 0.0 },
-                        if constraints.max.1.is_finite() { constraints.max.1 } else { 0.0 },
-                    );
-                    let __child = self.#build_method(__available);
-                    #trait_path::layout(&__child, constraints)
-                },
-                quote! {
-                    let __child = self.#build_method(size);
-                    #trait_path::render(&__child, #render_args)
-                },
-                quote! {
-                    let __child = self.#build_method(size);
-                    #trait_path::paint_bounds(&__child, size)
-                },
-            )
-        } else {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self) -> impl #trait_path + 'static {
-                        let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::layout(&__child, constraints)
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::render(&__child, #render_args)
-                },
-                quote! {
-                    let __child = self.#build_method();
-                    #trait_path::paint_bounds(&__child, size)
-                },
-            )
+    // The display name surfaced in the live UI's arrangement tree: either the
+    // auto-derived component name, or an interpolated `name = "..."` template.
+    // The `#[available]`/`#[clock]` idents are stripped (not stored fields), so
+    // referencing them in a template is rejected with a tailored message.
+    let stripped_idents: Vec<&Ident> = available_ident.into_iter().chain(clock_ident).collect();
+    let name_expr = build_name_expr(
+        &struct_ident,
+        name_template.as_ref(),
+        &field_idents,
+        &stripped_idents,
+    )?;
+
+    // `#[available]` and `#[clock]` are mutually exclusive injection paths —
+    // the former belongs to the raster/vector layout protocol, the latter to
+    // the timeline frame protocol — but they never coexist on one fn (the
+    // timeline arm has no `#[available]` and the others reject `#[clock]`).
+    let (build_fn, trait_impl) = if kind == Kind::Timeline {
+        timeline_codegen(
+            &struct_ident,
+            &trait_path,
+            &build_method,
+            field_idents.iter().copied(),
+            clock_ident.zip(clock_type),
+            body,
+            &name_expr,
+        )
+    } else {
+        let (render_sig, render_args) = kind.render_sig();
+        let graphic_path = kind.graphic();
+        let (build_fn, build_call_layout, build_call_render, build_call_paint_bounds) =
+            if let (Some(av_ident), Some(av_type)) = (available_ident, available_type) {
+                (
+                    quote! {
+                        #[doc(hidden)]
+                        fn #build_method(&self, #av_ident: #av_type) -> impl #trait_path + 'static {
+                            let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
+                            #body
+                        }
+                    },
+                    quote! {
+                        let __available = ::tellur_core::geometry::Vec2(
+                            if constraints.max.0.is_finite() { constraints.max.0 } else { 0.0 },
+                            if constraints.max.1.is_finite() { constraints.max.1 } else { 0.0 },
+                        );
+                        let __child = self.#build_method(__available);
+                        #trait_path::layout(&__child, constraints)
+                    },
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #trait_path::render(&__child, #render_args)
+                    },
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #trait_path::paint_bounds(&__child, size)
+                    },
+                )
+            } else {
+                (
+                    quote! {
+                        #[doc(hidden)]
+                        fn #build_method(&self) -> impl #trait_path + 'static {
+                            let Self { #( #field_idents ),* } = ::core::clone::Clone::clone(self);
+                            #body
+                        }
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::layout(&__child, constraints)
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::render(&__child, #render_args)
+                    },
+                    quote! {
+                        let __child = self.#build_method();
+                        #trait_path::paint_bounds(&__child, size)
+                    },
+                )
+            };
+        let trait_impl = quote! {
+            impl #trait_path for #struct_ident {
+                fn layout(
+                    &self,
+                    constraints: ::tellur_core::geometry::Constraints,
+                ) -> ::tellur_core::geometry::Vec2 {
+                    #build_call_layout
+                }
+
+                fn paint_bounds(
+                    &self,
+                    size: ::tellur_core::geometry::Vec2,
+                ) -> ::tellur_core::geometry::Rect {
+                    #build_call_paint_bounds
+                }
+
+                fn render(&self, #render_sig) -> #graphic_path {
+                    #build_call_render
+                }
+
+                // Surfaces this component's display name to the timeline
+                // arrangement tree. For a raster component this flows through the
+                // `RasterComponent -> TimelineComponent` blanket; a vector
+                // component only reaches the timeline after `.rasterize()`, which
+                // does NOT carry this name forward (documented limitation), so the
+                // override is harmless there.
+                fn arrangement_name(&self) -> ::core::option::Option<::std::string::String> {
+                    ::core::option::Option::Some(#name_expr)
+                }
+            }
         };
+        (build_fn, trait_impl)
+    };
 
     // Float-aware `PartialEq`/`Eq`/`Hash` so the synthesized component is a
     // consistent cache key even with bare `f32`/`f64` fields (which are neither
@@ -453,28 +618,244 @@ fn expand_fn(func: ItemFn, kind: Kind) -> syn::Result<TokenStream2> {
             #build_fn
         }
 
-        impl #trait_path for #struct_ident {
-            fn layout(
-                &self,
-                constraints: ::tellur_core::geometry::Constraints,
-            ) -> ::tellur_core::geometry::Vec2 {
-                #build_call_layout
-            }
-
-            fn paint_bounds(
-                &self,
-                size: ::tellur_core::geometry::Vec2,
-            ) -> ::tellur_core::geometry::Rect {
-                #build_call_paint_bounds
-            }
-
-            fn render(&self, #render_sig) -> #graphic_path {
-                #build_call_render
-            }
-        }
+        #trait_impl
 
         #glue
     })
+}
+
+/// Builds the `String`-typed expression that yields a component instance's
+/// display name at arrangement-time.
+///
+/// - With no `name = "..."` template: a `String` literal of the component's
+///   PascalCase name (e.g. `Backdrop`).
+/// - With a template: a [`format!`] over the template's literal text where each
+///   `{ident}` placeholder binds to the matching STORED field (`self.ident`).
+///   `{{` / `}}` are literal braces. Every `{ident}` is validated at expansion
+///   time against `field_idents`; an unknown name — or one of the stripped
+///   `#[available]` / `#[clock]` idents (which are not stored fields) — produces
+///   a `compile_error!` with a clear message.
+fn build_name_expr(
+    struct_ident: &Ident,
+    name_template: Option<&LitStr>,
+    field_idents: &[&Ident],
+    stripped_idents: &[&Ident],
+) -> syn::Result<TokenStream2> {
+    let Some(template) = name_template else {
+        let lit = struct_ident.to_string();
+        return Ok(quote!(::std::string::String::from(#lit)));
+    };
+
+    let raw = template.value();
+    let span = template.span();
+
+    // Walk the template, splitting it into a `format!` literal (with `{}` holes)
+    // and the ordered list of field idents that fill those holes.
+    let mut fmt_literal = String::with_capacity(raw.len());
+    let mut placeholders: Vec<Ident> = Vec::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    fmt_literal.push_str("{{");
+                    continue;
+                }
+                // Read the placeholder name up to the closing `}`.
+                let mut name = String::new();
+                let mut closed = false;
+                for nc in chars.by_ref() {
+                    if nc == '}' {
+                        closed = true;
+                        break;
+                    }
+                    name.push(nc);
+                }
+                if !closed {
+                    return Err(syn::Error::new(
+                        span,
+                        format!("unterminated `{{` in `name` template; expected a closing `}}` after `{name}`"),
+                    ));
+                }
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(syn::Error::new(
+                        span,
+                        "empty `{}` placeholder in `name` template; name a stored field",
+                    ));
+                }
+                let field = field_idents.iter().find(|f| **f == name);
+                if field.is_none() {
+                    // Distinguish a stripped `#[available]`/`#[clock]` arg (not
+                    // stored, so never interpolable) from a plain typo.
+                    if stripped_idents.iter().any(|s| **s == name) {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "`{{{name}}}` refers to a `#[available]`/`#[clock]` argument, which is not a stored field and cannot be interpolated"
+                            ),
+                        ));
+                    }
+                    let known = field_idents
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "`{{{name}}}` in `name` template does not match any stored field (available fields: {known})"
+                        ),
+                    ));
+                }
+                fmt_literal.push_str("{}");
+                placeholders.push(Ident::new(name, span));
+            }
+            '}' => {
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                    fmt_literal.push_str("}}");
+                } else {
+                    return Err(syn::Error::new(
+                        span,
+                        "stray `}` in `name` template; write `}}` for a literal brace",
+                    ));
+                }
+            }
+            other => fmt_literal.push(other),
+        }
+    }
+
+    Ok(quote! {
+        ::std::format!(#fmt_literal #( , self.#placeholders )*)
+    })
+}
+
+/// Emits the `__tellur_build` helper and the full `TimelineComponent` impl for a
+/// `#[component(timeline)]` fn (audit M3): every query
+/// (`duration`/`measure`/`resolve`/`frame`/`samples`/`cues`/`arrangement`)
+/// build-then-delegates to the body, mirroring how the raster arm delegates
+/// `layout`/`render`. Without this, a `#[component(timeline)]` is an opaque leaf
+/// and its inner children's starts never compose.
+///
+/// `frame`/`samples` forward the framework-supplied clock; the clock-less
+/// queries build with [`Clock::structural`] — sound because a component's
+/// resolved STRUCTURE must not depend on the clock value (only its baked
+/// per-frame fields may).
+fn timeline_codegen<'a>(
+    struct_ident: &Ident,
+    trait_path: &TokenStream2,
+    build_method: &Ident,
+    field_idents: impl Iterator<Item = &'a Ident> + Clone,
+    clock: Option<(&Ident, &Type)>,
+    body: &syn::Block,
+    name_expr: &TokenStream2,
+) -> (TokenStream2, TokenStream2) {
+    let destructure_idents: Vec<&Ident> = field_idents.collect();
+
+    // The body is built either with the real clock (when `#[clock]` is present)
+    // or with no clock at all. `__tellur_build` takes a clock by value in the
+    // first case so every delegator forwards exactly the clock it has.
+    let (build_fn, build_with_clock, build_structural) = if let Some((ck_ident, ck_type)) = clock {
+        (
+            quote! {
+                #[doc(hidden)]
+                fn #build_method(&self, #ck_ident: #ck_type) -> impl #trait_path + 'static {
+                    let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                    #body
+                }
+            },
+            quote!(self.#build_method(clock)),
+            quote!(self.#build_method(::tellur_core::timeline_component::Clock::structural())),
+        )
+    } else {
+        (
+            quote! {
+                #[doc(hidden)]
+                fn #build_method(&self) -> impl #trait_path + 'static {
+                    let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                    #body
+                }
+            },
+            quote!(self.#build_method()),
+            quote!(self.#build_method()),
+        )
+    };
+
+    let trait_impl = quote! {
+        impl #trait_path for #struct_ident {
+            fn duration(&self) -> ::core::option::Option<f32> {
+                let __child = #build_structural;
+                #trait_path::duration(&__child)
+            }
+
+            fn measure(&self) -> ::core::option::Option<f32> {
+                let __child = #build_structural;
+                #trait_path::measure(&__child)
+            }
+
+            fn resolve(
+                &self,
+                abs_start: f32,
+                out: &mut ::tellur_core::timeline_component::ResolveCtx,
+            ) -> f32 {
+                let __child = #build_structural;
+                #trait_path::resolve(&__child, abs_start, out)
+            }
+
+            fn frame(
+                &self,
+                clock: ::tellur_core::timeline_component::Clock<'_>,
+                canvas: ::tellur_core::geometry::Vec2,
+                target: ::tellur_core::raster::Resolution,
+                ctx: &mut dyn ::tellur_core::render_context::RenderContext,
+            ) -> ::core::option::Option<::tellur_core::raster::RasterImage> {
+                let __child = #build_with_clock;
+                #trait_path::frame(&__child, clock, canvas, target, ctx)
+            }
+
+            fn samples(
+                &self,
+                clock: ::tellur_core::timeline_component::Clock<'_>,
+                window: f32,
+            ) -> ::core::option::Option<::tellur_core::timeline_component::AudioBuffer> {
+                let __child = #build_with_clock;
+                #trait_path::samples(&__child, clock, window)
+            }
+
+            fn mix_into(
+                &self,
+                mix: &mut ::tellur_core::audio::AudioMix,
+                start_secs: f32,
+                speed: f32,
+            ) {
+                // Delegate the eager audio mix-down to the body, exactly like
+                // `cues`/`arrangement`. Without this the generated impl falls back
+                // to the trait's silent default, muting any fn-form component that
+                // composes audio (e.g. a `Dialogue(voice: AudioFile)`).
+                let __child = #build_structural;
+                #trait_path::mix_into(&__child, mix, start_secs, speed);
+            }
+
+            fn cues(&self, offset: f32) -> ::std::vec::Vec<::tellur_core::timeline_component::Cue> {
+                let __child = #build_structural;
+                #trait_path::cues(&__child, offset)
+            }
+
+            fn arrangement(&self, offset: f32) -> ::tellur_core::timeline_component::Arrangement {
+                // Relabel the delegated node IN PLACE: build the child node, then
+                // stamp this component's display name onto it. No extra tree level
+                // is introduced — the inner kind/interval/children are preserved.
+                let __child = #build_structural;
+                let mut __node = #trait_path::arrangement(&__child, offset);
+                __node.name = ::core::option::Option::Some(#name_expr);
+                __node
+            }
+        }
+    };
+
+    (build_fn, trait_impl)
 }
 
 // ─── shared builder glue ─────────────────────────────────────────────────────
@@ -491,9 +872,11 @@ fn emit_glue(
 ) -> TokenStream2 {
     let builder_ty = format_ident!("{}Builder", ident);
     let state_mod = Ident::new(&pascal_to_snake(&builder_ty.to_string()), ident.span());
-    let comp = kind.component_trait();
     let bld = kind.builder_trait();
-    let box_dyn = quote!(::std::boxed::Box<dyn #comp>);
+    // The timeline arm boxes as `Box<dyn TimelineComponent + Send>` (audit M2);
+    // the raster/vector arms keep their plain `Box<dyn _Component>` (no `+ Send`,
+    // which would break existing `!Send` components).
+    let box_dyn = kind.box_dyn();
 
     // For a raster component whose child field is tagged `#[effect]`, implement
     // `Effect` on the builder *while that child slot is still unset*: `apply`
@@ -527,21 +910,75 @@ fn emit_glue(
         let field = &c.field;
         let item_ty = &c.item_ty;
         let maybe_field = format_ident!("maybe_{}", field);
+
+        // TIMELINE kind only: the child setter captures its `.child(...)` call
+        // site (`#[track_caller]` + `Location::caller()`) and wraps the boxed
+        // child in a `Sourced` so each arrangement node can be traced back to its
+        // authoring line. Raster/vector kinds keep the plain push UNCHANGED —
+        // `Sourced` is a `TimelineComponent`-only decorator.
+        let push_one = |child: TokenStream2| {
+            if kind == Kind::Timeline {
+                quote! {
+                    self.#field.push(::std::boxed::Box::new(
+                        ::tellur_core::timeline_component::Sourced::new(
+                            ::core::panic::Location::caller(),
+                            ::core::convert::Into::into(#child),
+                        ),
+                    ));
+                }
+            } else {
+                quote! {
+                    self.#field.push(::core::convert::Into::into(#child));
+                }
+            }
+        };
+        // `#[track_caller]` so `Location::caller()` resolves to the user's
+        // `.child(...)` line; harmless (and omitted) for non-timeline kinds.
+        let track_caller = if kind == Kind::Timeline {
+            quote!(#[track_caller])
+        } else {
+            quote!()
+        };
+        let push_each = push_one(quote!(child));
+        // The plural extend setters share ONE call line for every item; the
+        // timeline kind wraps each item with that same location.
+        let extend_field = if kind == Kind::Timeline {
+            quote! {
+                let __loc = ::core::panic::Location::caller();
+                self.#field.extend(children.into_iter().map(|__c| {
+                    let __boxed: #box_dyn = ::std::boxed::Box::new(
+                        ::tellur_core::timeline_component::Sourced::new(
+                            __loc,
+                            ::core::convert::Into::into(__c),
+                        ),
+                    );
+                    __boxed
+                }));
+            }
+        } else {
+            quote! {
+                self.#field
+                    .extend(children.into_iter().map(::core::convert::Into::into));
+            }
+        };
+
         let each_method = c.each.as_ref().map(|each| {
             let maybe_each = format_ident!("maybe_{}", each);
             quote! {
+                #track_caller
                 pub fn #each(mut self, child: impl ::core::convert::Into<#item_ty>) -> Self {
-                    self.#field.push(::core::convert::Into::into(child));
+                    #push_each
                     self
                 }
 
                 /// Pushes one child, or nothing when `child` is `None`.
+                #track_caller
                 pub fn #maybe_each(
                     mut self,
                     child: ::core::option::Option<impl ::core::convert::Into<#item_ty>>,
                 ) -> Self {
                     if let ::core::option::Option::Some(child) = child {
-                        self.#field.push(::core::convert::Into::into(child));
+                        #push_each
                     }
                     self
                 }
@@ -551,17 +988,18 @@ fn emit_glue(
             impl<__S: #state_mod::State> #builder_ty<__S> {
                 #each_method
 
+                #track_caller
                 pub fn #field<__I, __T>(mut self, children: __I) -> Self
                 where
                     __I: ::core::iter::IntoIterator<Item = __T>,
                     __T: ::core::convert::Into<#item_ty>,
                 {
-                    self.#field
-                        .extend(children.into_iter().map(::core::convert::Into::into));
+                    #extend_field
                     self
                 }
 
                 /// Extends with the iterator, or nothing when `children` is `None`.
+                #track_caller
                 pub fn #maybe_field<__I, __T>(
                     mut self,
                     children: ::core::option::Option<__I>,
@@ -571,8 +1009,7 @@ fn emit_glue(
                     __T: ::core::convert::Into<#item_ty>,
                 {
                     if let ::core::option::Option::Some(children) = children {
-                        self.#field
-                            .extend(children.into_iter().map(::core::convert::Into::into));
+                        #extend_field
                     }
                     self
                 }

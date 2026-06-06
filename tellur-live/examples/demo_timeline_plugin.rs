@@ -6,4 +6,13 @@
 #[path = "demo_scene/mod.rs"]
 mod scene;
 
-tellur_live::export_timeline!("main", scene::TITLE, scene::build_timeline);
+// The demo scene now builds a native `TimelineComponent` (`Scene`), so it is
+// exported directly through the v2 collection. The scene is authored against the
+// 1920x1080 logical canvas (`SCENE_CANVAS`), passed here so the resolve pass
+// lays the tree out at SCENE_SIZE — matching the original `.render(SCENE_SIZE,…)`.
+tellur_live::export_timeline!(
+    "main",
+    scene::TITLE,
+    scene::build_timeline,
+    canvas = (1920.0, 1080.0)
+);

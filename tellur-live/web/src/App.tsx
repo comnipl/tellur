@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchInfo } from "./api";
 import { Header } from "./components/Header";
+import { Inspector, type SelectedNode } from "./components/Inspector";
 import { Preview } from "./components/Preview";
 import { PreviewScrubber } from "./components/PreviewScrubber";
 import { TabsRow } from "./components/TabsRow";
@@ -8,9 +9,9 @@ import { Timeline } from "./components/Timeline";
 import { TimelineViewportBar } from "./components/TimelineViewportBar";
 import { Transport } from "./components/Transport";
 import { usePreview } from "./preview/usePreview";
-import { cleanupLegacyMediaCaches } from "./cache";
 import {
   clampTimelineViewport,
+  DEFAULT_TIMELINE_ZOOM,
   type TimelineViewport,
   type TimelineViewportChange,
 } from "./timelineViewport";
@@ -20,9 +21,9 @@ const FALLBACK_TIMELINE: TimelineInfo = {
   id: "demo",
   title: "Demo Timeline",
   duration: 150,
+  error: null,
 };
 const INFO_FALLBACK_POLL_MS = 2000;
-const LEGACY_CACHE_RELOAD_KEY = "tellur-live:legacy-cache-reloaded";
 const DEFAULT_PREVIEW_RESOLUTION: PreviewResolution = {
   width: 1280,
   height: 720,
@@ -51,29 +52,15 @@ export function App() {
   const [fps, setFps] = useState(30);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
-    zoom: 1,
+    zoom: DEFAULT_TIMELINE_ZOOM,
   });
+  // The timeline node currently selected by click, lifted here so the Inspector
+  // (a sibling of the timeline) can render its details. Timeline reports clicks
+  // via `onSelect` and reads the highlight back from `selectedNode.id`.
+  const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
   const [measuredFps, setMeasuredFps] = useState(0);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
   const userSelectedResolutionRef = useRef(false);
-
-  useEffect(() => {
-    cleanupLegacyMediaCaches()
-      .then((needsReload) => {
-        if (
-          !needsReload ||
-          typeof window === "undefined" ||
-          window.sessionStorage.getItem(LEGACY_CACHE_RELOAD_KEY)
-        ) {
-          return;
-        }
-        window.sessionStorage.setItem(LEGACY_CACHE_RELOAD_KEY, "1");
-        window.location.reload();
-      })
-      .catch((e) => {
-        console.warn("tellur-live legacy media cache cleanup failed", e);
-      });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,11 +127,17 @@ export function App() {
   });
 
   useEffect(() => {
-    const isInteractiveTarget = (target: EventTarget | null) => {
+    // Only suppress the global shortcuts when focus is in a GENUINE text-entry
+    // field — typing there must not trigger play/step. Buttons and <select>s are
+    // deliberately NOT here: they blur themselves after activation (so focus
+    // can't get stuck stealing Space/arrows), and while focused a <select>'s own
+    // arrow-key option navigation should win, which it does because the keydown
+    // still reaches it natively. Text inputs without a `type` default to text.
+    const isTextEntryTarget = (target: EventTarget | null) => {
       if (!(target instanceof HTMLElement)) return false;
       return Boolean(
         target.closest(
-          'button, input, textarea, select, a[href], [contenteditable="true"], [role="textbox"]',
+          'input[type="text"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"], input[type="number"], input:not([type]), textarea, [contenteditable="true"], [role="textbox"]',
         ),
       );
     };
@@ -155,7 +148,7 @@ export function App() {
         event.altKey ||
         event.ctrlKey ||
         event.metaKey ||
-        isInteractiveTarget(event.target)
+        isTextEntryTarget(event.target)
       ) {
         return;
       }
@@ -244,37 +237,42 @@ export function App() {
         compileError={loadError ?? info?.compileError ?? null}
       />
       <div className="workspace">
-        <section className="viewer-panel">
-          <Preview
-            imageSrc={preview.state.imageSrc}
-            imageVisible={preview.state.imageVisible}
-            videoVisible={preview.state.videoVisible}
-            activeVideoSlot={preview.state.activeVideoSlot}
-            aspect={aspect}
-            error={loadError ?? info?.lastError ?? preview.state.error}
-            videoRefs={preview.videoRefs}
-            imgRef={preview.imgRef}
-          />
-          <PreviewScrubber
-            seconds={preview.state.seconds}
-            duration={displayTimeline.duration}
-            onSeek={preview.setSeconds}
-          />
-          <Transport
-            seconds={preview.state.seconds}
-            duration={displayTimeline.duration}
-            fps={fps}
-            measuredFps={preview.state.playing ? measuredFps : fps}
-            resolution={resolution}
-            resolutionOptions={resolutionOptions}
-            playing={preview.state.playing}
-            onTogglePlay={preview.togglePlay}
-            onStep={preview.stepFrame}
-            onRewind={preview.rewindToStart}
-            onResolutionChange={changeResolution}
-            onFpsChange={setFps}
-          />
-        </section>
+        {/* Top row: preview (left, keeps its fixed viewer width) and the
+            Inspector (fills the leftover space to its right). The timeline
+            below stays full-width in the next row. */}
+        <div className="workspace-top">
+          <section className="viewer-panel">
+            <Preview
+              imageSrc={preview.state.imageSrc}
+              imageVisible={preview.state.imageVisible}
+              aspect={aspect}
+              error={loadError ?? info?.lastError ?? preview.state.error}
+              cacheNotice={preview.state.cacheNotice}
+              videoRef={preview.videoRef}
+              imgRef={preview.imgRef}
+            />
+            <PreviewScrubber
+              seconds={preview.state.seconds}
+              duration={displayTimeline.duration}
+              onSeek={preview.setSeconds}
+            />
+            <Transport
+              seconds={preview.state.seconds}
+              duration={displayTimeline.duration}
+              fps={fps}
+              measuredFps={preview.state.playing ? measuredFps : fps}
+              resolution={resolution}
+              resolutionOptions={resolutionOptions}
+              playing={preview.state.playing}
+              onTogglePlay={preview.togglePlay}
+              onStep={preview.stepFrame}
+              onRewind={preview.rewindToStart}
+              onResolutionChange={changeResolution}
+              onFpsChange={setFps}
+            />
+          </section>
+          <Inspector node={selectedNode} fps={fps} />
+        </div>
         <section className="timeline-panel">
           <TabsRow
             timeline={displayTimeline}
@@ -290,8 +288,14 @@ export function App() {
             timeline={displayTimeline}
             seconds={preview.state.seconds}
             viewport={timelineViewport}
+            selectedId={selectedNode?.id ?? null}
+            // Hot-reload signal: the server bumps `cacheKey` on every reload, and
+            // `/api/arrangement` re-resolves per request, so re-fetching when this
+            // changes refreshes the lanes without the timeline id changing.
+            reloadKey={info?.cacheKey ?? null}
             onSeek={preview.setSeconds}
             onViewportChange={updateTimelineViewport}
+            onSelect={setSelectedNode}
           />
           <TimelineViewportBar
             duration={timelineDuration}

@@ -210,6 +210,16 @@ pub trait RasterComponent: DynEq + DynHash {
         CachePolicy::Memoize
     }
 
+    /// Display name surfaced when this raster component is placed in a timeline
+    /// (via the one-way `RasterComponent → TimelineComponent` blanket). `None`
+    /// for plain raster primitives; a `#[component(...)]` fn overrides this to
+    /// return its auto-derived or templated name, which the blanket
+    /// [`arrangement`](crate::timeline_component::TimelineComponent::arrangement)
+    /// stamps onto the node's [`name`](crate::timeline_component::Arrangement::name).
+    fn arrangement_name(&self) -> Option<String> {
+        None
+    }
+
     /// Type-erases `self` into a heap-allocated trait object. Useful for
     /// constructing heterogeneous containers like `Layer.children` in
     /// struct-literal form.

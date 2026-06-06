@@ -11,5 +11,9 @@ fontdb = "0.23"
 lru = "0.12"
 png = "0.18.1"
 rustybuzz = "0.20"
+# Pure-Rust audio decode for the timeline AUDIO leaf (`AudioFile`). The `wav`
+# + `pcm` features cover the WAV fixtures the tests synthesize; the defaults
+# pull in the other common pure-Rust codecs (mp3/flac/ogg/aac/...).
+symphonia = { version = "0.5.4", features = ["wav", "pcm"] }
 tellur-macros = { path = "../tellur-macros", version = "0.1.0" }
 thiserror = "2.0.18"
