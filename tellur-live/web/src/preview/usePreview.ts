@@ -20,6 +20,9 @@ export interface PreviewState {
   error: string | null;
   imageSrc: string | null;
   imageVisible: boolean;
+  // Set when the IndexedDB segment cache can't persist (write failing / unavailable), so
+  // the UI can hint why the green bar isn't sticking. null when caching is healthy.
+  cacheNotice: string | null;
 }
 
 export interface PreviewControls {
@@ -67,13 +70,28 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const [error, setError] = useState<string | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [imageVisible, setImageVisible] = useState(true);
+  const [cacheNotice, setCacheNotice] = useState<string | null>(null);
 
   const secondsRef = useRef(0);
   const playingRef = useRef(false);
   const playerRef = useRef<TimelinePlayer | null>(null);
 
   const cacheRef = useRef<MediaCache | null>(null);
-  if (!cacheRef.current) cacheRef.current = createMediaCache();
+  if (!cacheRef.current) {
+    cacheRef.current = createMediaCache({
+      // Surface a failing/unavailable segment cache so a silent IndexedDB problem (private
+      // window, storage eviction on Arc, quota) is visible rather than looking like a bug.
+      onDiagnostic: (d) => {
+        if (d.kind === "write-failed") {
+          setCacheNotice(`Preview cache off (${d.reason}) — frames re-stream each time`);
+        } else if (d.kind === "unavailable") {
+          setCacheNotice("Preview cache unavailable (IndexedDB blocked)");
+        } else if (d.kind === "write-recovered") {
+          setCacheNotice(null);
+        }
+      },
+    });
+  }
 
   // PNG still-frame state. A monotonic token coalesces rapid scrub requests to the
   // latest, and the object URL is revoked only after the next one is swapped in.
@@ -284,6 +302,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       error,
       imageSrc,
       imageVisible,
+      cacheNotice,
     },
     videoRef,
     imgRef,

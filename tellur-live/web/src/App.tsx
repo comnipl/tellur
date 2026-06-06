@@ -247,6 +247,7 @@ export function App() {
               imageVisible={preview.state.imageVisible}
               aspect={aspect}
               error={loadError ?? info?.lastError ?? preview.state.error}
+              cacheNotice={preview.state.cacheNotice}
               videoRef={preview.videoRef}
               imgRef={preview.imgRef}
             />

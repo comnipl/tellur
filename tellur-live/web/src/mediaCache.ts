@@ -40,9 +40,25 @@ let activePluginKey = "";
 // One-time legacy cleanup; memoized so it only runs once per page load.
 let legacyCleanupPromise: Promise<boolean> | null = null;
 
+// One-time persistent-storage request; memoized.
+let persistRequested: Promise<boolean> | null = null;
+
+// Optional diagnostic sink (set by createMediaCache) plus a one-shot latch so a
+// persistently-failing write reports ONCE rather than on every streamed piece. Without
+// this a silently-failing IndexedDB (private window, or storage eviction — seen on Arc)
+// looks like "nothing ever caches" with no clue why.
+let diagnosticSink: ((d: CacheDiagnostic) => void) | null = null;
+let writeFailureReported = false;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+export type CacheDiagnostic =
+  | { kind: "write-failed"; reason: "quota" | "blocked" | "unknown"; detail: string }
+  | { kind: "write-recovered" }
+  | { kind: "unavailable" }
+  | { kind: "persisted"; granted: boolean };
 
 export interface ChunkGroupParams {
   /** Server cacheKey; "" when unknown. */
@@ -125,13 +141,24 @@ export interface MediaCache {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createMediaCache(): MediaCache {
+export function createMediaCache(options?: {
+  onDiagnostic?: (d: CacheDiagnostic) => void;
+}): MediaCache {
+  diagnosticSink = options?.onDiagnostic ?? null;
   return {
     segmentAt,
     putSegment,
     cachedRanges,
     activatePlugin,
   };
+}
+
+function emitDiagnostic(d: CacheDiagnostic): void {
+  try {
+    diagnosticSink?.(d);
+  } catch {
+    // a broken sink must never break caching
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +215,11 @@ async function putSegment(
   end: number,
   blob: Blob,
 ): Promise<boolean> {
-  if (!groupKey || !pluginKey || !canUseIndexedDb()) return false;
+  if (!groupKey || !pluginKey) return false;
+  if (!canUseIndexedDb()) {
+    emitDiagnostic({ kind: "unavailable" });
+    return false;
+  }
   // Ignore degenerate segments.
   if (!(end > start + EPS)) return false;
   try {
@@ -218,11 +249,43 @@ async function putSegment(
     // Subsume any existing segments of the same group fully contained within
     // [start-EPS, end+EPS] so duplicates do not accumulate.
     await deleteSubsumedSegments(db, groupKey, start, end, entry.id);
+    if (writeFailureReported) {
+      writeFailureReported = false;
+      emitDiagnostic({ kind: "write-recovered" });
+    }
     return true;
   } catch (e) {
-    console.warn("tellur-live segment cache write failed", e);
+    reportWriteFailure(e);
     return false;
   }
+}
+
+// Surface a write failure LOUDLY (and to the UI) the first time, then stay quiet so a
+// persistently-failing cache doesn't spam the console on every streamed piece. A later
+// success re-arms this and emits "write-recovered".
+function reportWriteFailure(e: unknown): void {
+  const name = e instanceof DOMException || e instanceof Error ? e.name : "";
+  const reason: "quota" | "blocked" | "unknown" = isQuotaError(e)
+    ? "quota"
+    : name === "InvalidStateError" || name === "UnknownError" || name === "NotFoundError"
+      ? "blocked"
+      : "unknown";
+  if (writeFailureReported) return;
+  writeFailureReported = true;
+  console.error(
+    "tellur-live: IndexedDB segment write failed — the preview cache is NOT persisting " +
+      `(reason: ${reason}${name ? `, ${name}` : ""}). Common causes: a private window, ` +
+      "storage eviction (Arc / best-effort storage), or quota.",
+    e,
+  );
+  emitDiagnostic({ kind: "write-failed", reason, detail: name || String(e) });
+}
+
+function isQuotaError(e: unknown): boolean {
+  return (
+    e instanceof DOMException &&
+    (e.name === "QuotaExceededError" || e.code === 22)
+  );
 }
 
 async function cachedRanges(groupKey: string): Promise<CacheRange[]> {
@@ -288,7 +351,34 @@ async function activatePlugin(pluginKey: string): Promise<void> {
   await Promise.all([
     purgeOtherPlugins(pluginKey),
     cleanupLegacyMediaCaches(),
+    requestPersistentStorage(),
   ]);
+}
+
+// Ask the UA for persistent (not best-effort) storage so it won't silently evict the
+// IndexedDB segment cache under storage pressure. Memoized; result is logged. Granting is
+// up to the UA (Chromium/Arc usually grants it for engaged/installed sites silently).
+function requestPersistentStorage(): Promise<boolean> {
+  if (persistRequested) return persistRequested;
+  persistRequested = (async () => {
+    try {
+      const storage =
+        typeof navigator !== "undefined" ? navigator.storage : undefined;
+      if (!storage?.persist) return false;
+      const granted = (await storage.persisted?.()) || (await storage.persist());
+      if (!granted) {
+        console.warn(
+          "tellur-live: persistent storage was not granted — the preview cache may be " +
+            "evicted by the browser under storage pressure.",
+        );
+      }
+      emitDiagnostic({ kind: "persisted", granted });
+      return granted;
+    } catch {
+      return false;
+    }
+  })();
+  return persistRequested;
 }
 
 // ---------------------------------------------------------------------------
