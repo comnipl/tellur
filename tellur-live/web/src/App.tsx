@@ -9,7 +9,6 @@ import { Timeline } from "./components/Timeline";
 import { TimelineViewportBar } from "./components/TimelineViewportBar";
 import { Transport } from "./components/Transport";
 import { usePreview } from "./preview/usePreview";
-import { cleanupLegacyMediaCaches } from "./cache";
 import {
   clampTimelineViewport,
   DEFAULT_TIMELINE_ZOOM,
@@ -25,7 +24,6 @@ const FALLBACK_TIMELINE: TimelineInfo = {
   error: null,
 };
 const INFO_FALLBACK_POLL_MS = 2000;
-const LEGACY_CACHE_RELOAD_KEY = "tellur-live:legacy-cache-reloaded";
 const DEFAULT_PREVIEW_RESOLUTION: PreviewResolution = {
   width: 1280,
   height: 720,
@@ -63,24 +61,6 @@ export function App() {
   const [measuredFps, setMeasuredFps] = useState(0);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
   const userSelectedResolutionRef = useRef(false);
-
-  useEffect(() => {
-    cleanupLegacyMediaCaches()
-      .then((needsReload) => {
-        if (
-          !needsReload ||
-          typeof window === "undefined" ||
-          window.sessionStorage.getItem(LEGACY_CACHE_RELOAD_KEY)
-        ) {
-          return;
-        }
-        window.sessionStorage.setItem(LEGACY_CACHE_RELOAD_KEY, "1");
-        window.location.reload();
-      })
-      .catch((e) => {
-        console.warn("tellur-live legacy media cache cleanup failed", e);
-      });
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -265,11 +245,9 @@ export function App() {
             <Preview
               imageSrc={preview.state.imageSrc}
               imageVisible={preview.state.imageVisible}
-              videoVisible={preview.state.videoVisible}
-              activeVideoSlot={preview.state.activeVideoSlot}
               aspect={aspect}
               error={loadError ?? info?.lastError ?? preview.state.error}
-              videoRefs={preview.videoRefs}
+              videoRef={preview.videoRef}
               imgRef={preview.imgRef}
             />
             <PreviewScrubber

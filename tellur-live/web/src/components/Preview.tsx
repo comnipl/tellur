@@ -3,34 +3,22 @@ import { forwardRef, type CSSProperties } from "react";
 interface PreviewProps {
   imageSrc: string | null;
   imageVisible: boolean;
-  videoVisible: boolean;
-  activeVideoSlot: 0 | 1;
   aspect: number;
   error: string | null;
 }
 
 interface PreviewRefs {
-  videoRefs: [
-    React.RefObject<HTMLVideoElement>,
-    React.RefObject<HTMLVideoElement>,
-  ];
+  videoRef: React.RefObject<HTMLVideoElement>;
   imgRef: React.RefObject<HTMLImageElement>;
 }
 
+// The <video> is ALWAYS rendered (never `.hidden`) so power-managed browsers (Arc /
+// battery-saver Chromium) keep decoding it — a visibility:hidden video stalls at
+// HAVE_METADATA and its seeks never complete. The PNG still <img> is stacked ON TOP
+// (same grid cell, later in DOM) and toggles via `.hidden`: shown it covers the video
+// during paused/seek rebuffer; hidden it reveals the playing video underneath.
 export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
-  function Preview(
-    {
-      imageSrc,
-      imageVisible,
-      videoVisible,
-      activeVideoSlot,
-      aspect,
-      error,
-      videoRefs,
-      imgRef,
-    },
-    ref,
-  ) {
+  function Preview({ imageSrc, imageVisible, aspect, error, videoRef, imgRef }, ref) {
     const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 16 / 9;
     const previewStyle: CSSProperties & { "--preview-aspect": string } = {
       "--preview-aspect": String(safeAspect),
@@ -40,18 +28,7 @@ export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
       <section className="preview" ref={ref} style={previewStyle}>
         <div className="preview__frame">
           <div className="preview__media">
-            {videoRefs.map((videoRef, slot) => (
-              <video
-                key={slot}
-                ref={videoRef}
-                className={
-                  videoVisible && activeVideoSlot === slot ? "" : "hidden"
-                }
-                muted
-                playsInline
-                preload="auto"
-              />
-            ))}
+            <video ref={videoRef} muted playsInline preload="auto" />
             <img
               ref={imgRef}
               className={imageVisible ? "" : "hidden"}
