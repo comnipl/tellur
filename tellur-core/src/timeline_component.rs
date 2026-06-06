@@ -450,7 +450,10 @@ impl TimelineComponent for Placed {
         // point.
         match self.placement.end {
             Some(end) => Some(end),
-            None => self.child.measure().map(|inner| self.placement.start + inner),
+            None => self
+                .child
+                .measure()
+                .map(|inner| self.placement.start + inner),
         }
     }
 
@@ -1492,11 +1495,7 @@ impl ResolvedTimeline {
     /// The eager mix-down ([`render_audio`](Self::render_audio)) is the path the
     /// encoder uses; this per-window pull is the (unused) `samples(Clock,
     /// window)` seam, which forwards to the source's still-`None` `samples`.
-    pub fn samples(
-        &self,
-        t: TimelineTime,
-        window: f32,
-    ) -> Option<AudioBuffer> {
+    pub fn samples(&self, t: TimelineTime, window: f32) -> Option<AudioBuffer> {
         let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
         self.source().samples(clock, window)
     }
@@ -1710,7 +1709,12 @@ mod tests {
             Vec2(1.0, 1.0)
         }
 
-        fn render(&self, _size: Vec2, _target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            _size: Vec2,
+            _target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0u8, 0, 0, 0])
         }
     }
@@ -1781,7 +1785,12 @@ mod tests {
             Self::BOX
         }
 
-        fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             let scale_x = target.width as f32 / size.0;
             let scale_y = target.height as f32 / size.1;
             // A `SIDE`-by-`SIDE` logical square, centered in the logical box.
@@ -1972,7 +1981,9 @@ mod tests {
     // load-bearing assertions: the generated types implement the right traits.
     fn assert_timeline_component<T: TimelineComponent>(_: &T) {}
     fn assert_timeline_builder<B: TimelineBuilder>(_: &B) {}
-    fn assert_boxable<T: TimelineComponent + Send + 'static>(value: T) -> Box<dyn TimelineComponent + Send> {
+    fn assert_boxable<T: TimelineComponent + Send + 'static>(
+        value: T,
+    ) -> Box<dyn TimelineComponent + Send> {
         Box::new(value)
     }
 
@@ -2007,8 +2018,16 @@ mod tests {
     #[test]
     fn timeline_component_name_template_interpolates_stored_fields() {
         // Two instances with distinct stored fields surface distinct names.
-        let a = NamedBeat::builder().label("intro").take(1).start(0.0).build();
-        let b = NamedBeat::builder().label("outro").take(7).start(0.0).build();
+        let a = NamedBeat::builder()
+            .label("intro")
+            .take(1)
+            .start(0.0)
+            .build();
+        let b = NamedBeat::builder()
+            .label("outro")
+            .take(7)
+            .start(0.0)
+            .build();
         assert_eq!(a.arrangement(0.0).name.as_deref(), Some("Shot 1: intro"));
         assert_eq!(b.arrangement(0.0).name.as_deref(), Some("Shot 7: outro"));
         // The template only relabels — it adds no tree level and preserves kind.
@@ -2048,18 +2067,36 @@ mod tests {
         let open = base.with_local_window(LocalTime::new(5.0), None);
         assert_eq!(open.window(), None);
         assert!(open.remaining().is_none());
-        assert_eq!(open.envelope(0.4, 0.4).get(), 1.0, "open-ended holds after fade-in");
+        assert_eq!(
+            open.envelope(0.4, 0.4).get(),
+            1.0,
+            "open-ended holds after fade-in"
+        );
 
         // A 3s window: remaining counts down and clamps at 0; envelope rises over
         // the first 0.5s, holds, falls over the last 0.5s, 0 at/after the end.
         let at = |t: f32| base.with_local_window(LocalTime::new(t), Some(3.0));
         assert!((at(1.0).remaining().unwrap().seconds() - 2.0).abs() < 1e-6);
-        assert_eq!(at(4.0).remaining().unwrap().seconds(), 0.0, "remaining clamps at 0");
+        assert_eq!(
+            at(4.0).remaining().unwrap().seconds(),
+            0.0,
+            "remaining clamps at 0"
+        );
         assert_eq!(at(0.0).envelope(0.5, 0.5).get(), 0.0, "0 at start");
-        assert!((at(0.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6, "full after fade-in");
-        assert!((at(1.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6, "held at full");
+        assert!(
+            (at(0.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6,
+            "full after fade-in"
+        );
+        assert!(
+            (at(1.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6,
+            "held at full"
+        );
         assert_eq!(at(3.0).envelope(0.5, 0.5).get(), 0.0, "0 at the window end");
-        assert_eq!(at(4.0).envelope(0.5, 0.5).get(), 0.0, "stays 0 past the window");
+        assert_eq!(
+            at(4.0).envelope(0.5, 0.5).get(),
+            0.0,
+            "stays 0 past the window"
+        );
     }
 
     #[test]
@@ -2128,8 +2165,14 @@ mod tests {
         // un-stretched 1.0s. (`trigger_at` first, so the `Triggered` is INSIDE
         // the stretched `Placed`.)
         let e = Event::new();
-        let resolved = resolve(Beat::builder().start(0.0).build().trigger_at(1.0, e).at(0.0..1.0))
-            .expect("windowed timed child is not timeless");
+        let resolved = resolve(
+            Beat::builder()
+                .start(0.0)
+                .build()
+                .trigger_at(1.0, e)
+                .at(0.0..1.0),
+        )
+        .expect("windowed timed child is not timeless");
         assert_eq!(resolved.duration(), 1.0);
         assert!(
             (resolved.triggers().get(e.id()).seconds() - 0.5).abs() < 1e-6,
@@ -2282,12 +2325,7 @@ mod event_path_tests {
                     .child(Dialogue::builder().voice(voice(line3)).build())
                     .build(),
             )
-            .child(
-                Reveal::builder()
-                    .line("Chapter II")
-                    .event(reveal)
-                    .fill(),
-            )
+            .child(Reveal::builder().line("Chapter II").event(reveal).fill())
             .build()
     }
 
@@ -2304,8 +2342,8 @@ mod event_path_tests {
     #[test]
     fn trigger_glued_to_resolved_start() {
         let reveal = Event::new();
-        let resolved = resolve(build_piece(reveal, 3.0, 4.0, 5.0))
-            .expect("voices give the piece a length");
+        let resolved =
+            resolve(build_piece(reveal, 3.0, 4.0, 5.0)).expect("voices give the piece a length");
         // Line 2 starts at the line-1 voice length (3.0); the reveal fires there.
         assert_eq!(resolved.triggers().get(reveal.id()).seconds(), 3.0);
         // The whole piece is 3 + 4 + 5 = 12s (the Sequence sums the voices).
@@ -2347,7 +2385,10 @@ mod event_path_tests {
         assert_eq!(alpha_at(&resolved, 3.0), 0, "at the trigger ⇒ phase 0");
         // Halfway through the 0.5s ramp (t = 3.25): ~0.5 ⇒ alpha ~128.
         let mid = alpha_at(&resolved, 3.25);
-        assert!((120..=136).contains(&mid), "mid-ramp opacity ~0.5, got {mid}");
+        assert!(
+            (120..=136).contains(&mid),
+            "mid-ramp opacity ~0.5, got {mid}"
+        );
         // Past the ramp: fully opaque (1.0 ⇒ 255).
         assert_eq!(alpha_at(&resolved, 3.5), 255, "ramp end ⇒ 1.0");
         assert_eq!(alpha_at(&resolved, 9.0), 255, "well after ⇒ stays 1.0");

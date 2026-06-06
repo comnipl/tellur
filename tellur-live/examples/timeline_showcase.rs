@@ -32,7 +32,9 @@ use tellur_core::placement::{Positioned, RasterPlacement};
 use tellur_core::shapes::{Circle, Rectangle};
 use tellur_core::text::{Text, Weight, SANS_SERIF};
 use tellur_core::time::Time;
-use tellur_core::timeline_component::{Clock, Event, TimedBuilder, TimelineComponent, TriggersBuilder};
+use tellur_core::timeline_component::{
+    Clock, Event, TimedBuilder, TimelineComponent, TriggersBuilder,
+};
 use tellur_core::timeline_container::{Sequence, Subtitle, Timeline};
 use tellur_core::vector::{Paint, Stroke};
 
@@ -240,7 +242,11 @@ fn Backdrop(#[clock] clock: Clock) -> impl TimelineComponent {
 
 // ── Heading: the chapter number + the primitive's name, near the top ─────────
 #[tellur_core::component(timeline)]
-fn Heading(#[clock] clock: Clock, #[builder(into)] label: String, index: u32) -> impl TimelineComponent {
+fn Heading(
+    #[clock] clock: Clock,
+    #[builder(into)] label: String,
+    index: u32,
+) -> impl TimelineComponent {
     let (a, slide) = transition(&clock);
     let dy = slide * 22.0;
     Layer::builder()
@@ -253,7 +259,14 @@ fn Heading(#[clock] clock: Clock, #[builder(into)] label: String, index: u32) ->
             Weight::BOLD,
             fade(AMBER, a),
         ))
-        .child(text_at(&label, CX, 232.0 + dy, 104.0, Weight::BLACK, fade(INK, a)))
+        .child(text_at(
+            &label,
+            CX,
+            232.0 + dy,
+            104.0,
+            Weight::BLACK,
+            fade(INK, a),
+        ))
         .build()
 }
 
@@ -276,7 +289,10 @@ fn Telop(#[clock] clock: Clock, #[builder(into)] line: String) -> impl TimelineC
         )
         .anchored(Anchor::CENTER)
         .snap_to(Vec2(CX, 838.0 + slide * 16.0));
-    Layer::builder().size(Vec2(CANVAS_W, CANVAS_H)).child(text).build()
+    Layer::builder()
+        .size(Vec2(CANVAS_W, CANVAS_H))
+        .child(text)
+        .build()
 }
 
 // ── Ruler: a persistent live timeline of the whole piece (GLOBAL axis) ───────
@@ -294,12 +310,24 @@ fn Ruler(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
     let mut s: Vec<Positioned> = Vec::new();
 
     // Baseline.
-    s.push(fill_rect((RULER_X0 + RULER_X1) * 0.5, y, RULER_X1 - RULER_X0, 4.0, TRACK));
+    s.push(fill_rect(
+        (RULER_X0 + RULER_X1) * 0.5,
+        y,
+        RULER_X1 - RULER_X0,
+        4.0,
+        TRACK,
+    ));
     // Tint the section the playhead is currently inside ("you are here").
     for i in 0..bounds.len() - 1 {
         let (b0, b1) = (bounds[i], bounds[i + 1]);
         if g >= b0 && g < b1 {
-            s.push(fill_rect((ruler_x(b0) + ruler_x(b1)) * 0.5, y, ruler_x(b1) - ruler_x(b0), 5.0, fade(CYAN, 0.45)));
+            s.push(fill_rect(
+                (ruler_x(b0) + ruler_x(b1)) * 0.5,
+                y,
+                ruler_x(b1) - ruler_x(b0),
+                5.0,
+                fade(CYAN, 0.45),
+            ));
         }
     }
     // Section boundary ticks (intro · 5 chapters · outro).
@@ -311,9 +339,24 @@ fn Ruler(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
     let ex = ruler_x(EVENT_AT_GLOBAL);
     let ph = event.phase(&clock, 0.0, 0.6).get();
     let fired = event.is_after(&clock);
-    s.push(fill_circle(ex, y, 9.0, if fired { AMBER } else { Color::rgb_u8(92, 82, 58) }));
+    s.push(fill_circle(
+        ex,
+        y,
+        9.0,
+        if fired {
+            AMBER
+        } else {
+            Color::rgb_u8(92, 82, 58)
+        },
+    ));
     if ph > 0.0 && ph < 1.0 {
-        s.push(stroke_circle(ex, y, 9.0 + 36.0 * ease(ph), fade(AMBER, 1.0 - ph), 3.0));
+        s.push(stroke_circle(
+            ex,
+            y,
+            9.0 + 36.0 * ease(ph),
+            fade(AMBER, 1.0 - ph),
+            3.0,
+        ));
     }
 
     // The playhead.
@@ -324,7 +367,14 @@ fn Ruler(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
     Layer::builder()
         .size(Vec2(CANVAS_W, CANVAS_H))
         .child(shapes_layer(s, 0.0))
-        .child(text_at(&format!("{g:>4.1}s"), RULER_X1 + 60.0, y, 30.0, Weight::BOLD, MUTED))
+        .child(text_at(
+            &format!("{g:>4.1}s"),
+            RULER_X1 + 60.0,
+            y,
+            30.0,
+            Weight::BOLD,
+            MUTED,
+        ))
         .build()
 }
 
@@ -356,8 +406,20 @@ fn FrameDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let (hw, hh) = (314.0, 194.0);
     for &(sx, sy) in &[(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
         let (xc, yc) = (CX + sx * hw, cy + sy * hh);
-        s.push(fill_rect(xc - sx * 17.0, yc, 34.0, 4.0, fade(AMBER, a * 0.7)));
-        s.push(fill_rect(xc, yc - sy * 17.0, 4.0, 34.0, fade(AMBER, a * 0.7)));
+        s.push(fill_rect(
+            xc - sx * 17.0,
+            yc,
+            34.0,
+            4.0,
+            fade(AMBER, a * 0.7),
+        ));
+        s.push(fill_rect(
+            xc,
+            yc - sy * 17.0,
+            4.0,
+            34.0,
+            fade(AMBER, a * 0.7),
+        ));
     }
 
     Layer::builder()
@@ -387,7 +449,12 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     s.push(stroke_circle(cx, cy, r, fade(INK, a), 6.0));
     for k in 0..12 {
         let ang = k as f32 / 12.0 * TAU - PI * 0.5;
-        s.push(fill_circle(cx + ang.cos() * r * 0.86, cy + ang.sin() * r * 0.86, 5.0, fade(MUTED, a)));
+        s.push(fill_circle(
+            cx + ang.cos() * r * 0.86,
+            cy + ang.sin() * r * 0.86,
+            5.0,
+            fade(MUTED, a),
+        ));
     }
     // A faint arc from 12 o'clock to the timeline hand, tracing how much of the
     // whole piece has elapsed (it ends exactly where the amber hand points).
@@ -395,7 +462,12 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let arc_dots = (prog * 40.0).ceil() as usize;
     for k in 0..arc_dots {
         let ang = -PI * 0.5 + (k as f32 / 40.0) * TAU;
-        s.push(fill_circle(cx + ang.cos() * r * 0.94, cy + ang.sin() * r * 0.94, 3.0, fade(AMBER, a * 0.32)));
+        s.push(fill_circle(
+            cx + ang.cos() * r * 0.94,
+            cy + ang.sin() * r * 0.94,
+            3.0,
+            fade(AMBER, a * 0.32),
+        ));
     }
 
     // Two hands off the hub. The closure borrows `s`, so it lives in its own
@@ -405,16 +477,33 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
         let mut hand = |hx: f32, hy: f32, dots: usize, base: f32, c: Color| {
             for j in 1..=dots {
                 let f = j as f32 / dots as f32;
-                s.push(fill_circle(cx + (hx - cx) * f, cy + (hy - cy) * f, base - f * base * 0.45, fade(c, a)));
+                s.push(fill_circle(
+                    cx + (hx - cx) * f,
+                    cy + (hy - cy) * f,
+                    base - f * base * 0.45,
+                    fade(c, a),
+                ));
             }
             s.push(fill_circle(hx, hy, base * 1.35, fade(c, a)));
         };
         // Timeline (global) hand: slow + short, one revolution per whole piece.
         let ga = global * (TAU / TOTAL) - PI * 0.5;
-        hand(cx + ga.cos() * r * 0.52, cy + ga.sin() * r * 0.52, 5, 8.5, AMBER);
+        hand(
+            cx + ga.cos() * r * 0.52,
+            cy + ga.sin() * r * 0.52,
+            5,
+            8.5,
+            AMBER,
+        );
         // Local hand: fast + long, one revolution / 2s, drawn on top.
         let la = local * (TAU / 2.0) - PI * 0.5;
-        hand(cx + la.cos() * r * 0.80, cy + la.sin() * r * 0.80, 7, 7.5, CYAN);
+        hand(
+            cx + la.cos() * r * 0.80,
+            cy + la.sin() * r * 0.80,
+            7,
+            7.5,
+            CYAN,
+        );
     }
     s.push(fill_circle(cx, cy, 10.0, fade(INK, a)));
 
@@ -425,15 +514,34 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let (sx, sy) = (cx, cy + r + 150.0);
     for j in 0..=9 {
         let f = j as f32 / 9.0;
-        s.push(fill_circle(sx + (rx - sx) * f, sy + (RULER_Y - sy) * f, 2.5, fade(AMBER, a * 0.45)));
+        s.push(fill_circle(
+            sx + (rx - sx) * f,
+            sy + (RULER_Y - sy) * f,
+            2.5,
+            fade(AMBER, a * 0.45),
+        ));
     }
     s.push(stroke_circle(rx, RULER_Y, 15.0, fade(AMBER, a * 0.75), 3.0));
 
     Layer::builder()
         .size(Vec2(CANVAS_W, CANVAS_H))
         .child(shapes_layer(s, dy))
-        .child(text_at(&format!("local   {local:.1}s"), cx, cy + r + 68.0 + dy, 40.0, Weight::BOLD, fade(CYAN, a)))
-        .child(text_at(&format!("timeline   {global:.1}s"), cx, cy + r + 116.0 + dy, 40.0, Weight::BOLD, fade(AMBER, a)))
+        .child(text_at(
+            &format!("local   {local:.1}s"),
+            cx,
+            cy + r + 68.0 + dy,
+            40.0,
+            Weight::BOLD,
+            fade(CYAN, a),
+        ))
+        .child(text_at(
+            &format!("timeline   {global:.1}s"),
+            cx,
+            cy + r + 116.0 + dy,
+            40.0,
+            Weight::BOLD,
+            fade(AMBER, a),
+        ))
         .build()
 }
 
@@ -457,7 +565,13 @@ fn SequenceDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let mut letters: Vec<RasterPositioned> = Vec::new();
     // Baseline grows in from the left as the blocks land on it.
     let base_w = row_w * ease_out(l / 1.7);
-    shapes.push(fill_rect(left + base_w * 0.5, cy + bh * 0.5 + 24.0, base_w, 4.0, fade(TRACK, a)));
+    shapes.push(fill_rect(
+        left + base_w * 0.5,
+        cy + bh * 0.5 + 24.0,
+        base_w,
+        4.0,
+        fade(TRACK, a),
+    ));
     for i in 0..3 {
         let slot_x = left + bw * 0.5 + i as f32 * (bw + gap);
         let local = l - i as f32 * 0.5; // staggered entry
@@ -467,7 +581,14 @@ fn SequenceDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
         let alpha = a * (local / 0.22).clamp(0.0, 1.0);
         shapes.push(fill_rect(cx, cy, bw, bh, fade(colors[i], alpha)));
         shapes.push(stroke_rect(cx, cy, bw, bh, fade(INK, alpha * 0.7), 2.0));
-        letters.push(text_at(labels[i], cx, cy + dy, 58.0, Weight::BLACK, fade(INK, alpha)));
+        letters.push(text_at(
+            labels[i],
+            cx,
+            cy + dy,
+            58.0,
+            Weight::BLACK,
+            fade(INK, alpha),
+        ));
     }
 
     let mut layer = Layer::builder()
@@ -506,9 +627,20 @@ fn EventDiagram(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
 
     s.push(fill_rect((x0 + x1) * 0.5, ty, span, 5.0, fade(TRACK, a)));
     // Marker (lit amber once fired) + expanding ring on fire.
-    s.push(fill_circle(mx, ty, 14.0, fade(if fired { AMBER } else { MUTED }, a)));
+    s.push(fill_circle(
+        mx,
+        ty,
+        14.0,
+        fade(if fired { AMBER } else { MUTED }, a),
+    ));
     if ph > 0.0 && ph < 1.0 {
-        s.push(stroke_circle(mx, ty, 14.0 + 80.0 * ease(ph), fade(AMBER, a * (1.0 - ph)), 4.0));
+        s.push(stroke_circle(
+            mx,
+            ty,
+            14.0 + 80.0 * ease(ph),
+            fade(AMBER, a * (1.0 - ph)),
+            4.0,
+        ));
     }
     // Playhead: a tall thin bar with a knob.
     s.push(fill_rect(px, ty, 4.0, 150.0, fade(CYAN, a)));
@@ -520,9 +652,30 @@ fn EventDiagram(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
         // "event" labels the marker; on fire the SAME twin-axis readout as the
         // Clock chapter fades in — an Event is one instant, named on both axes
         // (`timeline = local + the chapter's start`).
-        .child(text_at("event", mx, ty + 96.0 + dy, 30.0, Weight::BOLD, fade(if fired { AMBER } else { MUTED }, a)))
-        .child(text_at(&format!("local   {EVENT_LOCAL:.2}s"), mx, ty + 142.0 + dy, 32.0, Weight::BOLD, fade(CYAN, a * appear)))
-        .child(text_at(&format!("timeline   {EVENT_AT_GLOBAL:.2}s"), mx, ty + 184.0 + dy, 32.0, Weight::BOLD, fade(AMBER, a * appear)))
+        .child(text_at(
+            "event",
+            mx,
+            ty + 96.0 + dy,
+            30.0,
+            Weight::BOLD,
+            fade(if fired { AMBER } else { MUTED }, a),
+        ))
+        .child(text_at(
+            &format!("local   {EVENT_LOCAL:.2}s"),
+            mx,
+            ty + 142.0 + dy,
+            32.0,
+            Weight::BOLD,
+            fade(CYAN, a * appear),
+        ))
+        .child(text_at(
+            &format!("timeline   {EVENT_AT_GLOBAL:.2}s"),
+            mx,
+            ty + 184.0 + dy,
+            32.0,
+            Weight::BOLD,
+            fade(AMBER, a * appear),
+        ))
         .build()
 }
 
@@ -552,16 +705,42 @@ fn TimelineDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let mut labels: Vec<RasterPositioned> = Vec::new();
     for (li, clips) in lanes.iter().enumerate() {
         let ly = top + li as f32 * (lane_h + gap);
-        shapes.push(fill_rect(lane_x + lane_w * 0.5, ly, lane_w, 3.0, fade(TRACK, a * 0.7)));
-        labels.push(text_at(names[li], lane_x - 86.0, ly + dy, 26.0, Weight::BOLD, fade(MUTED, a)));
+        shapes.push(fill_rect(
+            lane_x + lane_w * 0.5,
+            ly,
+            lane_w,
+            3.0,
+            fade(TRACK, a * 0.7),
+        ));
+        labels.push(text_at(
+            names[li],
+            lane_x - 86.0,
+            ly + dy,
+            26.0,
+            Weight::BOLD,
+            fade(MUTED, a),
+        ));
         let e = ease_out((l - li as f32 * 0.3) / 0.5); // wipe progress
         for (sf, wf) in clips.iter() {
             let full = (lane_w * wf - 6.0).max(0.0);
             let w_now = full * e;
             let x_left = lane_x + lane_w * sf;
-            shapes.push(fill_rect(x_left + w_now * 0.5, ly, w_now, lane_h * 0.72, fade(colors[li], a)));
+            shapes.push(fill_rect(
+                x_left + w_now * 0.5,
+                ly,
+                w_now,
+                lane_h * 0.72,
+                fade(colors[li], a),
+            ));
             if w_now > 6.0 && px >= x_left && px <= x_left + w_now {
-                shapes.push(stroke_rect(x_left + w_now * 0.5, ly, w_now, lane_h * 0.72, fade(CYAN, a), 2.5));
+                shapes.push(stroke_rect(
+                    x_left + w_now * 0.5,
+                    ly,
+                    w_now,
+                    lane_h * 0.72,
+                    fade(CYAN, a),
+                    2.5,
+                ));
             }
         }
     }
@@ -613,7 +792,12 @@ fn ClockChapter() -> impl TimelineComponent {
 fn SequenceChapter() -> impl TimelineComponent {
     const LINE: &str = "Lay clips end to end — that's a Sequence.";
     Timeline::builder()
-        .child(Heading::builder().label("Sequence").index(3).at(0.0..SEGMENT))
+        .child(
+            Heading::builder()
+                .label("Sequence")
+                .index(3)
+                .at(0.0..SEGMENT),
+        )
         .child(SequenceDiagram::builder().at(0.0..SEGMENT))
         .child(Telop::builder().line(LINE).at(0.0..SEGMENT))
         .child(Subtitle::builder().text(LINE).at(0.0..SEGMENT))
@@ -635,7 +819,12 @@ fn EventChapter(event: Event) -> impl TimelineComponent {
 fn TimelineChapter() -> impl TimelineComponent {
     const LINE: &str = "Stack them in layers — that's a Timeline.";
     Timeline::builder()
-        .child(Heading::builder().label("Timeline").index(5).at(0.0..SEGMENT))
+        .child(
+            Heading::builder()
+                .label("Timeline")
+                .index(5)
+                .at(0.0..SEGMENT),
+        )
         .child(TimelineDiagram::builder().at(0.0..SEGMENT))
         .child(Telop::builder().line(LINE).at(0.0..SEGMENT))
         .child(Subtitle::builder().text(LINE).at(0.0..SEGMENT))
@@ -660,7 +849,11 @@ pub fn build() -> impl TimelineComponent + Send {
                 // Fire `mark` partway into the Event chapter; the Sequence hands
                 // the chapter its resolved start, so `mark` lands at
                 // `EVENT_AT_GLOBAL` on the global axis.
-                .child(EventChapter::builder().event(mark).trigger_at(EVENT_LOCAL, mark))
+                .child(
+                    EventChapter::builder()
+                        .event(mark)
+                        .trigger_at(EVENT_LOCAL, mark),
+                )
                 .child(TimelineChapter::builder().build())
                 .build(),
         )

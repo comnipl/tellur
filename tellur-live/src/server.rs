@@ -652,7 +652,11 @@ impl Drop for TempFile {
 fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
     let seq = AUDIO_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut path = std::env::temp_dir();
-    path.push(format!("tellur_live_audio_{}_{}.wav", std::process::id(), seq));
+    path.push(format!(
+        "tellur_live_audio_{}_{}.wav",
+        std::process::id(),
+        seq
+    ));
 
     let channels = buf.channels.max(1);
     let rate = buf.rate.max(1);
@@ -889,10 +893,7 @@ fn handle_video_stream(
         // (baseMediaDecodeTime), which MSE chokes on: the audio track stalls and,
         // since playback needs both tracks, the video freezes a frame or two in.
         // GOP fragments hold whole audio frames with strictly increasing `tfdt`.
-        .args([
-            "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof",
-        ])
+        .args(["-movflags", "frag_keyframe+empty_moov+default_base_moof"])
         .arg("pipe:1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

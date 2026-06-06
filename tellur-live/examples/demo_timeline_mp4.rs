@@ -42,7 +42,12 @@ impl Timeline for ResolvedAdapter {
         self.resolved.duration()
     }
 
-    fn build(&self, t: TimelineTime, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+    fn build(
+        &self,
+        t: TimelineTime,
+        target: Resolution,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         self.resolved
             .frame(t, target, ctx)
             .unwrap_or_else(|| transparent(target))

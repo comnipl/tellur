@@ -683,8 +683,7 @@ impl TimelineComponent for AudioFile {
         // rate / channel layout (applying gain + the placement speed), and sum
         // it in at the resolved start. Decode failure ⇒ contribute silence.
         if let Ok(buf) = audio::decode_file(&self.path, self.trim) {
-            let conformed =
-                audio::conform(buf, mix.rate(), mix.channels(), self.gain, speed);
+            let conformed = audio::conform(buf, mix.rate(), mix.channels(), self.gain, speed);
             mix.add(&conformed, start_secs);
         }
     }
@@ -864,7 +863,10 @@ mod tests {
 
         // The fill subtitle's cue spans the whole container length.
         let cues = resolved.source().cues(0.0);
-        let sub = cues.iter().find(|c| c.text == "spanning").expect("subtitle cue");
+        let sub = cues
+            .iter()
+            .find(|c| c.text == "spanning")
+            .expect("subtitle cue");
         assert_eq!(sub.start, 0.0);
         assert_eq!(sub.end, 3.0);
     }
@@ -899,7 +901,10 @@ mod tests {
         let outer = Timeline::builder().child(inner).build();
         let resolved = resolve(outer).expect("media-backed");
         let cues = resolved.source().cues(0.0);
-        let hello = cues.iter().find(|c| c.text == "hello").expect("subtitle cue");
+        let hello = cues
+            .iter()
+            .find(|c| c.text == "hello")
+            .expect("subtitle cue");
         assert_eq!(hello.start, 2.0);
         assert_eq!(hello.end, 4.0);
     }
@@ -921,7 +926,10 @@ mod tests {
 
         // The 字幕 spans the dialogue's whole resolved length.
         let cues = resolved.source().cues(0.0);
-        let line = cues.iter().find(|c| c.text == "a line").expect("subtitle cue");
+        let line = cues
+            .iter()
+            .find(|c| c.text == "a line")
+            .expect("subtitle cue");
         assert_eq!(line.start, 0.0);
         assert_eq!(line.end, 4.5);
     }
@@ -1005,11 +1013,7 @@ mod tests {
         let seq_line = line!() + 3; // the `.child(` of the Sequence
         let fill_line = line!() + 7; // the `.child(` of the `.fill()` subtitle
         let root = Timeline::builder()
-            .child(
-                Sequence::builder()
-                    .child(Caption.at(0.0..3.0))
-                    .build(),
-            )
+            .child(Sequence::builder().child(Caption.at(0.0..3.0)).build())
             .child(Subtitle::builder().text("overlay").fill())
             .build();
 
@@ -1023,7 +1027,11 @@ mod tests {
         let seq = &arr.children[0];
         assert_eq!(seq.kind, NodeKind::Sequence);
         let seq_src = seq.source.as_ref().expect("sequence child has a source");
-        assert!(seq_src.file.ends_with("timeline_container.rs"), "{}", seq_src.file);
+        assert!(
+            seq_src.file.ends_with("timeline_container.rs"),
+            "{}",
+            seq_src.file
+        );
         assert_eq!(seq_src.line, seq_line);
 
         // The nested placed caption is stamped with ITS own `.child(...)` line
@@ -1042,13 +1050,25 @@ mod tests {
     // The leaf duration/probe seam: an injected `duration` overrides the stub.
     #[test]
     fn media_leaf_probe_seam_is_injectable() {
-        assert_eq!(VideoFile::builder().path("x.mp4").build().duration(), Some(STUB_PROBE_SECONDS));
         assert_eq!(
-            VideoFile::builder().path("x.mp4").duration(7.0).build().duration(),
+            VideoFile::builder().path("x.mp4").build().duration(),
+            Some(STUB_PROBE_SECONDS)
+        );
+        assert_eq!(
+            VideoFile::builder()
+                .path("x.mp4")
+                .duration(7.0)
+                .build()
+                .duration(),
             Some(7.0)
         );
         assert_eq!(
-            AudioFile::builder().path("x.wav").gain(0.5).duration(9.0).build().duration(),
+            AudioFile::builder()
+                .path("x.wav")
+                .gain(0.5)
+                .duration(9.0)
+                .build()
+                .duration(),
             Some(9.0)
         );
         // Subtitle is timeless.
@@ -1061,8 +1081,7 @@ mod tests {
     fn containers_and_leaves_box_via_from() {
         let _boxed: Box<dyn TimelineComponent + Send> =
             Timeline::builder().child(Caption.at(0.0..1.0)).into();
-        let _boxed2: Box<dyn TimelineComponent + Send> =
-            VideoFile::builder().path("x.mp4").into();
+        let _boxed2: Box<dyn TimelineComponent + Send> = VideoFile::builder().path("x.mp4").into();
     }
 
     // ── Per-frame sampling (step 5) ──────────────────────────────────────────
@@ -1108,11 +1127,26 @@ mod tests {
     fn timeline_overlays_two_solids_source_over() {
         // Bottom is fully opaque red; top is semi-transparent green over it.
         let tl = Timeline::builder()
-            .child(SolidColor { rgba: [255, 0, 0, 255] }.fill())
-            .child(SolidColor { rgba: [0, 255, 0, 128] }.fill())
+            .child(
+                SolidColor {
+                    rgba: [255, 0, 0, 255],
+                }
+                .fill(),
+            )
+            .child(
+                SolidColor {
+                    rgba: [0, 255, 0, 128],
+                }
+                .fill(),
+            )
             // A bare windowed solid gives the timeline a non-fill length so the
             // two fills have something to span.
-            .child(SolidColor { rgba: [0, 0, 255, 0] }.at(0.0..2.0))
+            .child(
+                SolidColor {
+                    rgba: [0, 0, 255, 0],
+                }
+                .at(0.0..2.0),
+            )
             .build();
         let resolved = resolve_root(tl).expect("windowed, not timeless");
 
@@ -1138,7 +1172,9 @@ mod tests {
     #[crate::component(timeline)]
     fn LocalProbe(#[clock] clock: Clock) -> impl TimelineComponent {
         let secs = clock.local().seconds().round().clamp(0.0, 255.0) as u8;
-        SolidColor { rgba: [secs, 0, 0, 255] }
+        SolidColor {
+            rgba: [secs, 0, 0, 255],
+        }
     }
 
     // (b) Clock rebasing: a visual placed `.at(2.0..)` sees `local ≈ 0` at
@@ -1182,19 +1218,27 @@ mod tests {
         let mut ctx = crate::render_context::PassThrough;
 
         assert!(
-            resolved.frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "before the window: nothing",
         );
         assert!(
-            resolved.frame(TimelineTime::new(1.5), Resolution::new(2, 2), &mut ctx).is_some(),
+            resolved
+                .frame(TimelineTime::new(1.5), Resolution::new(2, 2), &mut ctx)
+                .is_some(),
             "inside the window: contributes",
         );
         assert!(
-            resolved.frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "exclusive end (half-open): nothing",
         );
         assert!(
-            resolved.frame(TimelineTime::new(3.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(3.5), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "past the window: nothing",
         );
     }
@@ -1206,23 +1250,39 @@ mod tests {
     fn timeline_caps_fill_child_at_container_length() {
         let tl = Timeline::builder()
             // Non-fill sibling fixes the container length at 2.0s.
-            .child(SolidColor { rgba: [0, 0, 0, 255] }.at(0.0..2.0))
+            .child(
+                SolidColor {
+                    rgba: [0, 0, 0, 255],
+                }
+                .at(0.0..2.0),
+            )
             // A fill visual takes the container length.
-            .child(SolidColor { rgba: [255, 0, 0, 255] }.fill())
+            .child(
+                SolidColor {
+                    rgba: [255, 0, 0, 255],
+                }
+                .fill(),
+            )
             .build();
         let resolved = resolve_root(tl).expect("windowed, not timeless");
         let mut ctx = crate::render_context::PassThrough;
 
         assert!(
-            resolved.frame(TimelineTime::new(1.0), Resolution::new(2, 2), &mut ctx).is_some(),
+            resolved
+                .frame(TimelineTime::new(1.0), Resolution::new(2, 2), &mut ctx)
+                .is_some(),
             "inside [0,2): the fill renders",
         );
         assert!(
-            resolved.frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "exclusive container end: hard cut (even for a fill)",
         );
         assert!(
-            resolved.frame(TimelineTime::new(2.5), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(2.5), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "past the container length: nothing",
         );
     }
@@ -1239,7 +1299,9 @@ mod tests {
         let mut ctx = crate::render_context::PassThrough;
 
         assert!(
-            resolved.frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx).is_some(),
+            resolved
+                .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+                .is_some(),
             "slot 1 active at 0.5",
         );
         // Slot 2 active at global 3.0 → local rebased to 1.0 → red round(1.0)=1.
@@ -1248,7 +1310,9 @@ mod tests {
             .expect("slot 2 active");
         assert_eq!(first_pixel(&f)[0], 1, "slot 2 local = 3.0 - 2.0 = 1.0");
         assert!(
-            resolved.frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx).is_none(),
+            resolved
+                .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
+                .is_none(),
             "past both slots: nothing",
         );
     }
@@ -1310,7 +1374,10 @@ mod tests {
     #[test]
     fn placed_surfaces_post_stretch_window_to_the_clock() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let leaf = WindowProbe { log: Arc::clone(&log), duration: 2.0 };
+        let leaf = WindowProbe {
+            log: Arc::clone(&log),
+            duration: 2.0,
+        };
         let resolved = resolve_root(leaf.at(0.0..1.0)).expect("windowed, not timeless");
         let mut ctx = crate::render_context::PassThrough;
         resolved.frame(TimelineTime::new(0.5), Resolution::new(1, 1), &mut ctx);
@@ -1338,7 +1405,11 @@ mod tests {
         let f = resolved
             .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
             .expect("contributes");
-        assert_eq!(first_pixel(&f)[0], 0, "second child's local ≈ 0 at the cursor");
+        assert_eq!(
+            first_pixel(&f)[0],
+            0,
+            "second child's local ≈ 0 at the cursor"
+        );
 
         // At global 4.0 the second child's local is ≈ 2.0 → red 2.
         let f2 = resolved
@@ -1433,7 +1504,10 @@ mod tests {
         // And at global 0.25 → source-local ≈ 0.5.
         resolved.frame(TimelineTime::new(0.25), Resolution::new(1, 1), &mut ctx);
         let recorded = *log.lock().unwrap().last().expect("leaf was sampled");
-        assert!((recorded - 0.5).abs() < 1e-5, "source-local {recorded} (want 0.5)");
+        assert!(
+            (recorded - 0.5).abs() < 1e-5,
+            "source-local {recorded} (want 0.5)"
+        );
     }
 
     // The timeless-visual path: a bare `RasterComponent` reached through the
@@ -1447,13 +1521,19 @@ mod tests {
         let mut ctx = crate::render_context::PassThrough;
 
         // Bare RasterComponent via the blanket.
-        let solid = SolidColor { rgba: [10, 20, 30, 255] };
-        let f = solid.frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx).expect("renders");
+        let solid = SolidColor {
+            rgba: [10, 20, 30, 255],
+        };
+        let f = solid
+            .frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+            .expect("renders");
         assert_eq!(first_pixel(&f), [10, 20, 30, 255]);
 
         // A timeline component whose body builds a timeless visual.
         let probe = LocalProbe::builder().build();
-        let f = probe.frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx).expect("renders");
+        let f = probe
+            .frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+            .expect("renders");
         assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
     }
 
@@ -1551,7 +1631,10 @@ mod tests {
 
         // In the overlap, each source is ~+0.5, summed to ~+1.0.
         let mid = mixed.samples[frames / 2];
-        assert!((mid - 1.0).abs() < 0.02, "two +0.5 tones sum to ~1.0, got {mid}");
+        assert!(
+            (mid - 1.0).abs() < 0.02,
+            "two +0.5 tones sum to ~1.0, got {mid}"
+        );
         assert_eq!(mixed.rate, TEST_RATE);
         assert_eq!(mixed.channels, 1);
         let _ = std::fs::remove_file(&a);
@@ -1608,8 +1691,14 @@ mod tests {
         // First half ≈ 0.3 (child 1), second half ≈ 0.6 (child 2 at the cursor).
         let first = mixed.samples[frames / 2];
         let second = mixed.samples[frames + frames / 2];
-        assert!((first - 0.3).abs() < 0.02, "child 1 region ~0.3, got {first}");
-        assert!((second - 0.6).abs() < 0.02, "child 2 region ~0.6, got {second}");
+        assert!(
+            (first - 0.3).abs() < 0.02,
+            "child 1 region ~0.3, got {first}"
+        );
+        assert!(
+            (second - 0.6).abs() < 0.02,
+            "child 2 region ~0.6, got {second}"
+        );
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);
     }
@@ -1629,7 +1718,10 @@ mod tests {
 
         // 0.8 source at gain 0.5 ⇒ ~0.4.
         let mid = mixed.samples[frames / 2];
-        assert!((mid - 0.4).abs() < 0.02, "gain 0.5 over 0.8 ⇒ ~0.4, got {mid}");
+        assert!(
+            (mid - 0.4).abs() < 0.02,
+            "gain 0.5 over 0.8 ⇒ ~0.4, got {mid}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1643,8 +1735,8 @@ mod tests {
 
         // Native (1.0s): the mix is ~1.0s long.
         let native = AudioFile::builder().path(path.to_str().unwrap());
-        let r_native = resolve_audio(Timeline::builder().child(native).build())
-            .expect("media-backed");
+        let r_native =
+            resolve_audio(Timeline::builder().child(native).build()).expect("media-backed");
         let mix_native = r_native.render_audio(TEST_RATE, 1);
 
         // Stretched into a 0.5s window ⇒ speed 2.0 ⇒ the resolved length is 0.5s,
@@ -1727,7 +1819,11 @@ mod tests {
         let target = Resolution::new(64, 48);
 
         let tl = Timeline::builder()
-            .child(VideoFile::builder().path(path.to_str().unwrap()).at(0.0..2.0))
+            .child(
+                VideoFile::builder()
+                    .path(path.to_str().unwrap())
+                    .at(0.0..2.0),
+            )
             .build();
         let resolved = resolve_root(tl).expect("media-backed");
         let mut ctx = crate::render_context::PassThrough;
@@ -1745,9 +1841,11 @@ mod tests {
         let back = resolved
             .frame(TimelineTime::new(0.0), target, &mut ctx)
             .expect("backward scrub decodes");
-        assert!(frame_has_color(&back), "scrubbed-back frame has real pixels");
+        assert!(
+            frame_has_color(&back),
+            "scrubbed-back frame has real pixels"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
 }
-

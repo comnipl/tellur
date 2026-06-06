@@ -88,7 +88,12 @@ struct Frame {
 impl Frame {
     /// Wraps the decoded bytes as a CPU [`RasterImage`] for the leaf to return.
     fn to_image(&self) -> RasterImage {
-        RasterImage::cpu(self.width, self.height, PixelFormat::Rgba8, self.pixels.clone())
+        RasterImage::cpu(
+            self.width,
+            self.height,
+            PixelFormat::Rgba8,
+            self.pixels.clone(),
+        )
     }
 }
 
@@ -112,10 +117,7 @@ pub fn probe_duration(path: &str) -> Option<f32> {
         return Some(d);
     }
     let d = run_ffprobe_duration(path)?;
-    duration_cache()
-        .lock()
-        .unwrap()
-        .insert(path.to_string(), d);
+    duration_cache().lock().unwrap().insert(path.to_string(), d);
     Some(d)
 }
 
@@ -281,10 +283,12 @@ impl VideoDecoder {
             .cursors
             .iter()
             .enumerate()
-            .filter_map(|(i, c)| match decide(target_index, Some(c.next_index), false) {
-                Action::Advance(n) => Some((i, n)),
-                _ => None,
-            })
+            .filter_map(
+                |(i, c)| match decide(target_index, Some(c.next_index), false) {
+                    Action::Advance(n) => Some((i, n)),
+                    _ => None,
+                },
+            )
             .min_by_key(|&(_, n)| n);
 
         match best {
@@ -527,7 +531,10 @@ mod tests {
         let times: Vec<f32> = (0..30).map(|i| i as f32 / DECODE_FPS as f32).collect();
 
         // Monotonic baseline on copy A: every request is a forward advance.
-        let monotonic: Vec<Vec<u8>> = times.iter().map(|&t| frame_bytes_at(a_str, t, target)).collect();
+        let monotonic: Vec<Vec<u8>> = times
+            .iter()
+            .map(|&t| frame_bytes_at(a_str, t, target))
+            .collect();
 
         // Thrash order on copy B: 0, 29, 1, 28, 2, 27, … — alternating far-forward
         // and backward jumps, each beyond MAX_ADVANCE_FRAMES, so `decide` picks
@@ -631,6 +638,9 @@ mod tests {
     #[test]
     fn far_forward_jump_seeks() {
         // A jump past the advance window is cheaper to reach by an `-ss` seek.
-        assert_eq!(decide(5 + MAX_ADVANCE_FRAMES + 1, Some(5), false), Action::Seek);
+        assert_eq!(
+            decide(5 + MAX_ADVANCE_FRAMES + 1, Some(5), false),
+            Action::Seek
+        );
     }
 }

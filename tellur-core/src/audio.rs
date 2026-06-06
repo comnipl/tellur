@@ -52,7 +52,10 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
     // Hint the demuxer with the file extension; symphonia still falls back to
     // content sniffing if the extension is absent or wrong.
     let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+    if let Some(ext) = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+    {
         hint.with_extension(ext);
     }
 

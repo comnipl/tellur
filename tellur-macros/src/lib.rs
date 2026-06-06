@@ -187,10 +187,7 @@ impl Parse for ComponentAttr {
                 ));
             }
             if name_template.is_some() {
-                return Err(syn::Error::new_spanned(
-                    &key,
-                    "duplicate `name` argument",
-                ));
+                return Err(syn::Error::new_spanned(&key, "duplicate `name` argument"));
             }
             input.parse::<Token![=]>()?;
             name_template = Some(input.parse::<LitStr>()?);
@@ -481,7 +478,15 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
     // the timeline frame protocol — but they never coexist on one fn (the
     // timeline arm has no `#[available]` and the others reject `#[clock]`).
     let (build_fn, trait_impl) = if kind == Kind::Timeline {
-        timeline_codegen(&struct_ident, &trait_path, &build_method, field_idents.iter().copied(), clock_ident.zip(clock_type), body, &name_expr)
+        timeline_codegen(
+            &struct_ident,
+            &trait_path,
+            &build_method,
+            field_idents.iter().copied(),
+            clock_ident.zip(clock_type),
+            body,
+            &name_expr,
+        )
     } else {
         let (render_sig, render_args) = kind.render_sig();
         let graphic_path = kind.graphic();
@@ -752,32 +757,31 @@ fn timeline_codegen<'a>(
     // The body is built either with the real clock (when `#[clock]` is present)
     // or with no clock at all. `__tellur_build` takes a clock by value in the
     // first case so every delegator forwards exactly the clock it has.
-    let (build_fn, build_with_clock, build_structural) =
-        if let Some((ck_ident, ck_type)) = clock {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self, #ck_ident: #ck_type) -> impl #trait_path + 'static {
-                        let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote!(self.#build_method(clock)),
-                quote!(self.#build_method(::tellur_core::timeline_component::Clock::structural())),
-            )
-        } else {
-            (
-                quote! {
-                    #[doc(hidden)]
-                    fn #build_method(&self) -> impl #trait_path + 'static {
-                        let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
-                        #body
-                    }
-                },
-                quote!(self.#build_method()),
-                quote!(self.#build_method()),
-            )
-        };
+    let (build_fn, build_with_clock, build_structural) = if let Some((ck_ident, ck_type)) = clock {
+        (
+            quote! {
+                #[doc(hidden)]
+                fn #build_method(&self, #ck_ident: #ck_type) -> impl #trait_path + 'static {
+                    let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                    #body
+                }
+            },
+            quote!(self.#build_method(clock)),
+            quote!(self.#build_method(::tellur_core::timeline_component::Clock::structural())),
+        )
+    } else {
+        (
+            quote! {
+                #[doc(hidden)]
+                fn #build_method(&self) -> impl #trait_path + 'static {
+                    let Self { #( #destructure_idents ),* } = ::core::clone::Clone::clone(self);
+                    #body
+                }
+            },
+            quote!(self.#build_method()),
+            quote!(self.#build_method()),
+        )
+    };
 
     let trait_impl = quote! {
         impl #trait_path for #struct_ident {

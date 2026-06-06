@@ -20,7 +20,7 @@ use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::{
-    resolve, resolve_with_canvas, Arrangement, AudioBuffer, NodeKind, Clock, ResolveError,
+    resolve, resolve_with_canvas, Arrangement, AudioBuffer, Clock, NodeKind, ResolveError,
     ResolvedTimeline, TimelineComponent,
 };
 
@@ -274,7 +274,9 @@ macro_rules! export_timeline {
         pub extern "Rust" fn tellur_timeline_collection_v2(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
-                $id, $title, $builder(),
+                $id,
+                $title,
+                $builder(),
                 ::tellur_core::geometry::Vec2($w, $h),
             ))
         }

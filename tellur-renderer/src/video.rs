@@ -204,7 +204,11 @@ impl FfmpegEncoder {
     /// The WAV is sized to `ceil(duration * fps) / fps` seconds (the video's
     /// frame-quantized length), NOT `duration`, so a `-shortest` in the caller's
     /// args never tail-clips the audio against a slightly longer video.
-    pub fn encode_timeline(&self, resolved: &ResolvedTimeline, out: &Path) -> Result<(), FfmpegError> {
+    pub fn encode_timeline(
+        &self,
+        resolved: &ResolvedTimeline,
+        out: &Path,
+    ) -> Result<(), FfmpegError> {
         if self.fps == 0 {
             return Err(FfmpegError::ZeroFps);
         }
@@ -219,7 +223,12 @@ impl FfmpegEncoder {
 
         // Render + write the mixed audio track to a temp WAV.
         let mut mixed = resolved.render_audio(AUDIO_RATE, AUDIO_CHANNELS);
-        fit_audio_to_seconds(&mut mixed.samples, AUDIO_RATE, AUDIO_CHANNELS, video_seconds);
+        fit_audio_to_seconds(
+            &mut mixed.samples,
+            AUDIO_RATE,
+            AUDIO_CHANNELS,
+            video_seconds,
+        );
         let wav_path = unique_temp_wav();
         write_wav_s16le(&wav_path, &mixed.samples, AUDIO_RATE, AUDIO_CHANNELS)
             .map_err(FfmpegError::Spawn)?;
@@ -502,7 +511,12 @@ impl FfmpegEncoder {
 /// gets a well-formed rawvideo frame.
 fn transparent_frame(res: Resolution) -> tellur_core::raster::RasterImage {
     let count = (res.width as usize) * (res.height as usize) * 4;
-    tellur_core::raster::RasterImage::cpu(res.width, res.height, PixelFormat::Rgba8, vec![0u8; count])
+    tellur_core::raster::RasterImage::cpu(
+        res.width,
+        res.height,
+        PixelFormat::Rgba8,
+        vec![0u8; count],
+    )
 }
 
 /// A process- and time-unique temp WAV path, so concurrent encodes never clash.
@@ -1001,9 +1015,15 @@ mod av_mux_tests {
             .arg(&out)
             .output()
             .expect("ffprobe runs");
-        let count: usize = String::from_utf8_lossy(&probe.stdout).trim().parse().unwrap_or(0);
+        let count: usize = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
         let expected = (dur * fps as f32).ceil() as usize;
-        assert_eq!(count, expected, "export contains every frame (no dropped tail)");
+        assert_eq!(
+            count, expected,
+            "export contains every frame (no dropped tail)"
+        );
 
         // PTS spacing must be a uniform 1/fps (no startup gap).
         let pts_out = Command::new("ffprobe")
@@ -1026,6 +1046,9 @@ mod av_mux_tests {
                 "uniform 1/fps cadence; found a {d:.5}s gap (expected {step:.5})"
             );
         }
-        eprintln!("EXPORT OK: {count} frames, uniform {step:.5}s cadence -> {}", out.display());
+        eprintln!(
+            "EXPORT OK: {count} frames, uniform {step:.5}s cadence -> {}",
+            out.display()
+        );
     }
 }
