@@ -95,11 +95,6 @@ export interface MediaCache {
    */
   segmentAt(groupKey: string, t: number): Promise<CachedSegment | null>;
   /**
-   * The smallest segment start strictly greater than t (start > t+EPS),
-   * or null if none exists.
-   */
-  nextSegmentStart(groupKey: string, t: number): Promise<number | null>;
-  /**
    * Persist a streamed segment [start, end).
    * Returns true iff persisted AND the plugin is still active. Re-checks
    * activePluginKey AFTER the put; if it changed, deletes this entry only
@@ -133,7 +128,6 @@ export interface MediaCache {
 export function createMediaCache(): MediaCache {
   return {
     segmentAt,
-    nextSegmentStart,
     putSegment,
     cachedRanges,
     activatePlugin,
@@ -183,46 +177,6 @@ async function segmentAt(
     });
   } catch (e) {
     console.warn("tellur-live segment cache segmentAt failed", e);
-    return null;
-  }
-}
-
-async function nextSegmentStart(
-  groupKey: string,
-  t: number,
-): Promise<number | null> {
-  if (!groupKey || !canUseIndexedDb()) return null;
-  try {
-    const db = await openSegmentDb();
-    return await new Promise<number | null>((resolve, reject) => {
-      let best: number | null = null;
-      const tx = db.transaction(SEGMENT_STORE, "readonly");
-      const request = tx
-        .objectStore(SEGMENT_STORE)
-        .index("groupKey")
-        .openCursor(IDBKeyRange.only(groupKey));
-      request.onerror = () =>
-        reject(request.error ?? new Error("IndexedDB cursor failed"));
-      request.onsuccess = () => {
-        const cursor = request.result;
-        if (!cursor) {
-          resolve(best);
-          return;
-        }
-        const entry = cursor.value as Partial<SegmentEntry>;
-        if (
-          typeof entry.start === "number" &&
-          entry.start > t + EPS
-        ) {
-          if (best === null || entry.start < best) {
-            best = entry.start;
-          }
-        }
-        cursor.continue();
-      };
-    });
-  } catch (e) {
-    console.warn("tellur-live segment cache nextSegmentStart failed", e);
     return null;
   }
 }

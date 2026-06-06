@@ -113,7 +113,11 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       });
     };
 
-    const requestStill = (time: number) => {
+    // Fetch + decode the still for `time`. When `revealOnLoad` is set the <img> is only
+    // shown once THIS frame has decoded (the caller is holding the correct video frame in
+    // the meantime), so we never reveal a stale still; otherwise the <img> is already
+    // visible and we just refine its src.
+    const requestStill = (time: number, revealOnLoad: boolean) => {
       const clamped = Math.min(
         Math.max(0, time),
         Math.max(0, duration - EPSILON),
@@ -146,13 +150,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
             const previous = stillUrlRef.current;
             stillUrlRef.current = objectUrl;
             setImageSrc(objectUrl);
+            // Reveal only now — the still matches the intended time, so swapping the held
+            // video frame for it is seamless (same frame, no flash).
+            if (revealOnLoad) setImageVisible(true);
             if (previous && previous !== objectUrl) URL.revokeObjectURL(previous);
           };
           image.onerror = () => URL.revokeObjectURL(objectUrl);
           image.src = objectUrl;
         })
         .catch(() => {
-          // A failed still leaves the previous frame up; the player surfaces real errors.
+          // A failed still leaves the held frame up; the player surfaces real errors.
         });
     };
 
@@ -180,12 +187,30 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           onEnded: () => {
             // The player already parked the playhead + emitted the still; nothing to do.
           },
-          onDisplayMode: (mode, stillTime) => {
+          onDisplayMode: (mode, stillTime, cover) => {
             if (mode === "video") {
               setImageVisible(false);
-            } else {
-              requestStill(stillTime);
+              // Invalidate any in-flight still load so a late "hold"/"trailing" decode
+              // (e.g. the still requested as play() began) can't re-cover the now-running
+              // video by firing its revealOnLoad after we switched to video.
+              stillTokenRef.current++;
+            } else if (cover === "hold") {
+              // The video shows the correct frame (pause / end / play): keep it on screen
+              // and reveal the still only when its fresh frame for this time decodes, so
+              // there is no stale-frame flash and the swap is seamless.
+              requestStill(stillTime, true);
+            } else if (cover === "blank") {
+              // The video shows a DIFFERENT time (seek while playing into a cold region):
+              // clear to the neutral background at once — never flash a recognizable stale
+              // frame — and fill in the fresh still when it loads.
+              setImageSrc(null);
               setImageVisible(true);
+              requestStill(stillTime, false);
+            } else {
+              // "trailing" (paused scrub / mount): keep whatever still is up for drag
+              // continuity and refine it to the fresh frame as each load completes.
+              setImageVisible(true);
+              requestStill(stillTime, false);
             }
           },
         },

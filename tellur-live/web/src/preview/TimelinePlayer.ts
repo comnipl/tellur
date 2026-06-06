@@ -54,11 +54,27 @@ const MP4_MIME_TYPES = [
 
 export type DisplayMode = "video" | "still";
 
+// How the shell should cover the <video> when switching to a still, chosen so the user
+// never sees a frame for the WRONG time:
+// - "hold":     the <video> already shows the correct frame (pause / end-stop / play from
+//               a parked frame). Keep it on screen and swap to the still only once the
+//               fresh still for stillTime has decoded — a seamless same-frame swap.
+// - "blank":    the <video> shows a DIFFERENT time (a seek while playing into a cold
+//               region). Clear to the neutral background immediately — never flash a
+//               recognizable stale frame — then show the fresh still when it decodes.
+// - "trailing": a paused scrub. Keep whatever still is already up for drag continuity and
+//               refine it to the fresh frame as each debounced still loads.
+export type StillCover = "hold" | "blank" | "trailing";
+
 export interface TimelinePlayerEvents {
   onTime?: (seconds: number) => void;
   onRanges?: (ranges: CacheRange[]) => void;
   onPlaying?: (playing: boolean) => void;
-  onDisplayMode?: (mode: DisplayMode, stillTime: number) => void;
+  onDisplayMode?: (
+    mode: DisplayMode,
+    stillTime: number,
+    cover: StillCover,
+  ) => void;
   onEnded?: () => void;
   onError?: (message: string | null) => void;
 }
@@ -159,12 +175,15 @@ export class TimelinePlayer {
     this.mediaSource = new MediaSource();
     this.objectUrl = URL.createObjectURL(this.mediaSource);
     this.ready = this.init();
-    void this.loadCommitted();
+    const committed = this.loadCommitted();
     // Cover the element with the paused still immediately; prime ahead from the start
     // so play() is instant (requirement 1).
     this.setDisplayMode("still", this.position);
     this.emitTime(this.position);
-    void this.ready.then(() => {
+    // Start filling only once BOTH the SourceBuffer is open AND the committed ranges are
+    // loaded from IndexedDB. Otherwise, on a warm-cache reload, runFill would start with an
+    // empty committedRanges mirror and re-stream a region that is already cached (req 7).
+    void Promise.all([this.ready, committed]).then(() => {
       if (!this.disposed) this.kickFill();
     });
   }
@@ -186,24 +205,41 @@ export class TimelinePlayer {
     this.emitTime(target);
 
     if (this.mode === "playing") {
+      // Seeking to the very end while playing is an end-stop: nothing is renderable at
+      // duration, so the fill loop has no work and a reveal would never fire — playback
+      // would hang forever on the still. Settle at the end instead.
+      if (target >= this.config.duration - EPSILON) {
+        this.settleAtEnd();
+        return;
+      }
       // Keep playing through the seek. If the target is already buffered, reposition
       // instantly; else cover with the still and reveal once its chunk arrives.
       if (this.isTimeBuffered(target) && !this.video.paused) {
         this.pendingReveal = null;
         this.video.currentTime = this.clampToBufferedStart(target);
         this.setDisplayMode("video", target);
+        // Re-arm the ticker under the NEW fillGen: the old ticker bails on the gen change
+        // and stops rescheduling, but the element keeps playing — without this the
+        // playhead readout, eviction, and the end-stall watchdog would all freeze while
+        // the video advances.
+        this.startTicker(this.fillGen);
         this.kickFill();
       } else {
-        this.setDisplayMode("still", target);
+        // Target not buffered: pause the element so the OLD region's audio/video stops at
+        // once (it is hidden behind the cover anyway), and cover to the neutral background
+        // rather than flashing a stale frame. revealAt re-seeks and resumes playback once
+        // the target chunk has streamed in.
+        this.video.pause();
+        this.setDisplayMode("still", target, "blank");
         this.pendingReveal = { target, fillGen: this.fillGen };
         this.kickFill();
       }
     } else {
-      // Paused: show the crisp still and prime ahead. The fetch is debounced so a drag
-      // doesn't storm the server; the display already updated above.
+      // Paused scrub: keep the trailing still up for drag continuity and prime ahead. The
+      // fetch is debounced so a drag doesn't storm the server.
       this.mode = "priming";
       this.pendingReveal = null;
-      this.setDisplayMode("still", target);
+      this.setDisplayMode("still", target, "trailing");
       this.scheduleDebouncedFill();
     }
   }
@@ -235,7 +271,9 @@ export class TimelinePlayer {
     this.mode = "playing";
     this.events.onPlaying?.(true);
     this.pendingReveal = { target: this.position, fillGen: this.fillGen };
-    this.setDisplayMode("still", this.position);
+    // The element is parked on the play frame: hold it (don't flash the previous still)
+    // and let revealAt swap straight to running video, usually before any still loads.
+    this.setDisplayMode("still", this.position, "hold");
     this.tryResolveReveal();
     this.kickFill();
   }
@@ -243,15 +281,21 @@ export class TimelinePlayer {
   pause(): void {
     if (this.disposed) return;
     this.position = this.currentPlaybackSeconds();
-    this.fillGen++;
     this.video.pause();
     this.stopTicker();
     this.mode = "priming";
     this.pendingReveal = null;
     this.events.onPlaying?.(false);
     this.emitTime(this.position);
-    this.setDisplayMode("still", this.position);
-    // Keep the cursor where it is so already-fetched-ahead work is retained (req 7).
+    // The video is parked on the correct frame: hold it and swap to the still only once a
+    // fresh still for THIS time decodes, so pausing never flashes a stale frame.
+    this.setDisplayMode("still", this.position, "hold");
+    // Deliberately do NOT bump fillGen or abort the in-flight stream. The piece being
+    // streamed when the user paused must finish and persist so the just-played region is
+    // cached without waste (req 7) — bumping fillGen would make streamSegment bail before
+    // putSegment. The fill loop re-reads `mode` each iteration, so it transparently
+    // downshifts to the priming look-ahead; the cursor stays put so fetched-ahead work is
+    // retained. (If the loop already idled, kickFill restarts it in priming mode.)
     this.kickFill();
   }
 
@@ -331,7 +375,10 @@ export class TimelinePlayer {
   private async loadCommitted(): Promise<void> {
     const ranges = await this.config.cache.cachedRanges(this.config.groupKey);
     if (this.disposed) return;
-    this.committedRanges = ranges;
+    // MERGE, never overwrite: a streamed piece can finish and recordCommitted() between the
+    // cachedRanges() read snapshot and this assignment, and a blind `= ranges` would drop
+    // that fresh range (shrinking the green bar and forcing a re-stream).
+    this.committedRanges = mergeRanges([...this.committedRanges, ...ranges]);
     this.emitRanges();
   }
 
@@ -670,7 +717,16 @@ export class TimelinePlayer {
       const cleanup = () => {
         sb.removeEventListener("updateend", onEnd);
         sb.removeEventListener("error", onErr);
+        clearTimeout(timer);
       };
+      // Teardown guard: if the MediaSource detaches mid-append, neither updateend nor error
+      // ever fires; resolve after a bound so the pump and its streamSegment awaiter can't
+      // hang forever. Normal slice appends complete in well under this, so it never fires
+      // during real playback.
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, SETTLE_TIMEOUT_MS);
       sb.addEventListener("updateend", onEnd);
       sb.addEventListener("error", onErr);
       try {
@@ -691,14 +747,16 @@ export class TimelinePlayer {
     await new Promise<void>((resolve) => {
       const onEnd = () => {
         sb.removeEventListener("updateend", onEnd);
+        clearTimeout(timer);
         resolve();
       };
+      // Teardown guard (see appendOne): a detached buffer never fires updateend.
+      const timer = setTimeout(onEnd, SETTLE_TIMEOUT_MS);
       sb.addEventListener("updateend", onEnd);
       try {
         sb.remove(start, end);
       } catch {
-        sb.removeEventListener("updateend", onEnd);
-        resolve();
+        onEnd();
       }
     });
   }
@@ -810,8 +868,13 @@ export class TimelinePlayer {
     this.events.onPlaying?.(false);
     this.events.onEnded?.();
     // The timeline is half-open [0,duration); the last representable frame is at
-    // duration-EPSILON (exact =duration returns 500).
-    this.setDisplayMode("still", Math.max(0, this.config.duration - EPSILON));
+    // duration-EPSILON (exact =duration returns 500). The video is parked on its final
+    // frame, so hold it until the fresh end still decodes rather than flashing a stale one.
+    this.setDisplayMode(
+      "still",
+      Math.max(0, this.config.duration - EPSILON),
+      "hold",
+    );
   }
 
   private endOfStreamIfOpen(): void {
@@ -827,7 +890,12 @@ export class TimelinePlayer {
   // ---- helpers ----------------------------------------------------------------
 
   private currentPlaybackSeconds(): number {
-    if (this.mode === "playing") {
+    // video.currentTime is authoritative ONLY once the playhead is actually revealed and
+    // running at the logical position. While a reveal is pending (e.g. a seek-while-playing
+    // into a cold region, where the element is paused/covered and currentTime still sits at
+    // the OLD position) the logical `position` is the truth — otherwise pausing or eviction
+    // would snap back to the stale pre-seek time.
+    if (this.mode === "playing" && this.pendingReveal == null) {
       return clamp(this.video.currentTime, 0, this.config.duration);
     }
     return this.position;
@@ -837,8 +905,12 @@ export class TimelinePlayer {
     this.events.onTime?.(seconds);
   }
 
-  private setDisplayMode(mode: DisplayMode, stillTime: number): void {
-    this.events.onDisplayMode?.(mode, stillTime);
+  private setDisplayMode(
+    mode: DisplayMode,
+    stillTime: number,
+    cover: StillCover = "trailing",
+  ): void {
+    this.events.onDisplayMode?.(mode, stillTime, cover);
   }
 
   private emitRanges(): void {
@@ -944,16 +1016,25 @@ export class TimelinePlayer {
     }
     return new Promise((resolve) => {
       const finish = () => {
-        video.removeEventListener("seeked", finish);
-        video.removeEventListener("canplay", finish);
-        video.removeEventListener("loadeddata", finish);
+        video.removeEventListener("seeked", onSeeked);
+        video.removeEventListener("canplay", onReady);
+        video.removeEventListener("loadeddata", onReady);
         clearTimeout(timer);
         resolve();
       };
+      // `seeked` is authoritative: the seek to the target frame is done. canplay/loadeddata
+      // can fire for a CONCURRENT fill append while the seek is still in progress — resolving
+      // on those would let revealAt unhide the video on the PRE-seek frame, so accept them
+      // only once the seek itself has settled. The timeout is the last resort for the (Arc)
+      // edge where `seeked` never fires at a buffer boundary.
+      const onSeeked = () => finish();
+      const onReady = () => {
+        if (!video.seeking) finish();
+      };
       const timer = setTimeout(finish, SETTLE_TIMEOUT_MS);
-      video.addEventListener("seeked", finish, { once: true });
-      video.addEventListener("canplay", finish, { once: true });
-      video.addEventListener("loadeddata", finish, { once: true });
+      video.addEventListener("seeked", onSeeked);
+      video.addEventListener("canplay", onReady);
+      video.addEventListener("loadeddata", onReady);
     });
   }
 
@@ -1016,7 +1097,15 @@ function waitForSourceOpen(mediaSource: MediaSource): Promise<void> {
 function waitForSourceBufferIdle(sourceBuffer: SourceBuffer): Promise<void> {
   if (!sourceBuffer.updating) return Promise.resolve();
   return new Promise<void>((resolve) => {
-    sourceBuffer.addEventListener("updateend", () => resolve(), { once: true });
+    const done = () => {
+      sourceBuffer.removeEventListener("updateend", done);
+      clearTimeout(timer);
+      resolve();
+    };
+    // Teardown guard: a SourceBuffer detached during dispose never fires updateend, which
+    // would otherwise hang the pump (and the streamSegment append it backs) forever.
+    const timer = setTimeout(done, SETTLE_TIMEOUT_MS);
+    sourceBuffer.addEventListener("updateend", done);
   });
 }
 
