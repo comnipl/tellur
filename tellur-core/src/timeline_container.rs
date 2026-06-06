@@ -1004,6 +1004,11 @@ mod tests {
     // of its `.child(...)` call — for a bare placement, a placed segment under a
     // nested container, and a `.fill()` overlay alike.
     #[test]
+    // The assertions below check each `.child(...)` call's captured source line via offsets
+    // from `line!()`, so the builder's exact line layout is load-bearing. Pin it against
+    // rustfmt, which would otherwise collapse the Sequence builder onto one line — putting
+    // the nested `.child(` on the SAME line as the outer one and breaking the offsets.
+    #[rustfmt::skip]
     fn arrangement_captures_child_call_site_source() {
         use crate::timeline_component::NodeKind;
 
@@ -1013,7 +1018,11 @@ mod tests {
         let seq_line = line!() + 3; // the `.child(` of the Sequence
         let fill_line = line!() + 7; // the `.child(` of the `.fill()` subtitle
         let root = Timeline::builder()
-            .child(Sequence::builder().child(Caption.at(0.0..3.0)).build())
+            .child(
+                Sequence::builder()
+                    .child(Caption.at(0.0..3.0))
+                    .build(),
+            )
             .child(Subtitle::builder().text("overlay").fill())
             .build();
 
