@@ -1,12 +1,5 @@
 import type { CacheRange } from "../types";
-import {
-  CHUNK_SECONDS,
-  chunkCount,
-  chunkIndexAt,
-  chunkRange,
-  indicesToRanges,
-  type MediaCache,
-} from "../mediaCache";
+import type { MediaCache } from "../mediaCache";
 
 // All time comparisons are EPSILON-tolerant: with per-segment timestampOffset the
 // buffered timeline is exact only to within a frame, so equality/containment must
@@ -22,8 +15,13 @@ const PLAY_AHEAD = 10;
 // Buffered history kept behind the playhead before eviction frees it. The persistent
 // green bar comes from IndexedDB, so evicting MSE never shrinks it.
 const KEEP_BEHIND = 6;
-// Paused scrubbing fires many seeks; defer the actual chunk FETCH until the playhead
-// has been quiet this long so a drag issues ~1 fetch at its resting point, not 120.
+// Max seconds streamed (and cached) per /api/video.mp4 request. The fill loop streams
+// FORWARD from the playhead in pieces of at most this length, so an interrupted fetch
+// (seek away) wastes at most this much, and a completed piece is a self-contained,
+// frame-aligned cached segment.
+const STREAM_PIECE = 3;
+// Paused scrubbing fires many seeks; defer the actual FETCH until the playhead has been
+// quiet this long so a drag issues ~1 fetch at its resting point, not 120.
 const SEEK_DEBOUNCE_MS = 150;
 // `seeked` can never fire when the target sits at the very edge of a freshly-appended
 // MSE buffer (observed in Arc); the settle wait resolves on the first of several
@@ -69,8 +67,9 @@ export interface TimelinePlayerConfig {
   groupKey: string;
   pluginKey: string;
   duration: number;
+  fps: number;
   initialPosition: number;
-  // Builds the /api/video.mp4 URL for the half-open chunk [start, end). When
+  // Builds the /api/video.mp4 URL for the half-open segment [start, end). When
   // end >= duration the caller should omit the `duration` param (stream to the tail);
   // this closure handles that.
   videoUrl: (start: number, end: number) => string;
@@ -80,7 +79,8 @@ export interface TimelinePlayerConfig {
 type PlayMode = "idle" | "priming" | "playing";
 
 interface InFlight {
-  index: number;
+  start: number;
+  end: number;
   controller: AbortController;
   fillGen: number;
   received: ArrayBuffer[];
@@ -88,7 +88,8 @@ interface InFlight {
 }
 
 interface AppendJob {
-  index: number;
+  // timestampOffset for this segment = its frame-aligned start time.
+  offset: number;
   data: ArrayBuffer;
   fillGen: number;
 }
@@ -126,15 +127,18 @@ export class TimelinePlayer {
   // paused still time. During playback the ticker advances it from video.currentTime.
   private position: number;
 
-  // Committed cache = the set of chunk indices durably stored in IndexedDB. This — NOT
-  // sourceBuffer.buffered — is the persistent green bar, so UA/eviction never shrinks it.
-  private readonly committed = new Set<number>();
+  // Committed cache = the cached ranges durably stored in IndexedDB (a mirror of the
+  // segment store). This — NOT sourceBuffer.buffered — is the persistent green bar, so
+  // UA/eviction never shrinks it.
+  private committedRanges: CacheRange[] = [];
   private inflight: InFlight | null = null;
 
   // Serialized op queue: the ONLY code that mutates the SourceBuffer.
   private readonly opQueue: QueuedOp[] = [];
   private pumping = false;
-  private lastAppliedIndex = -1;
+  // The timestampOffset currently applied to the SourceBuffer, so we only re-set it when
+  // a different segment is appended.
+  private lastAppliedOffset: number | null = null;
 
   private fillActiveGen = -1;
   private lastEvictedTo = 0;
@@ -212,13 +216,21 @@ export class TimelinePlayer {
     this.video.muted = false;
     // Play-from-the-end replays from the start: at duration the cursor loop has no work
     // and playback would silently never begin.
-    if (this.position >= this.config.duration - EPSILON) {
+    const replayFromEnd = this.position >= this.config.duration - EPSILON;
+    if (replayFromEnd) {
       this.position = 0;
       this.emitTime(0);
     }
-    this.fillGen++;
-    this.lastEvictedTo = 0;
-    this.abortInflight();
+    // Only invalidate the fill cursor + drop the in-flight stream when the playhead
+    // actually MOVES (replay-from-end). For a plain paused->playing at the same spot,
+    // let the in-flight prime keep streaming FORWARD — it is already exactly what
+    // playback wants. This avoids re-streaming from the buffer edge AND avoids the green
+    // bar flashing to 0 when an unfinished prime would otherwise be dropped (req 7/8).
+    if (replayFromEnd) {
+      this.fillGen++;
+      this.lastEvictedTo = 0;
+      this.abortInflight();
+    }
     this.clearSeekDebounce();
     this.mode = "playing";
     this.events.onPlaying?.(true);
@@ -317,10 +329,45 @@ export class TimelinePlayer {
   }
 
   private async loadCommitted(): Promise<void> {
-    const indices = await this.config.cache.cachedIndices(this.config.groupKey);
+    const ranges = await this.config.cache.cachedRanges(this.config.groupKey);
     if (this.disposed) return;
-    for (const i of indices) this.committed.add(i);
+    this.committedRanges = ranges;
     this.emitRanges();
+  }
+
+  private recordCommitted(start: number, end: number): void {
+    if (!(end > start + EPSILON)) return;
+    this.committedRanges = mergeRanges([...this.committedRanges, { start, end }]);
+  }
+
+  // Quantize a time DOWN to the frame boundary at or before t, so every streamed segment
+  // starts exactly on a frame boundary. Two reasons: (1) segments from DIFFERENT seek
+  // points stay sample-aligned where they meet (an off-grid start would shift a whole
+  // segment by a sub-frame and overlap its neighbour at the seam — a click/stutter);
+  // (2) flooring (never rounding up past t) guarantees the segment CONTAINS the playhead,
+  // so the reveal's `isTimeBuffered(position)` succeeds (rounding up could leave the
+  // playhead in a sub-frame gap before the segment start, stranding playback).
+  private frameAlign(t: number): number {
+    const fps = this.config.fps;
+    if (!(fps > 0)) return t;
+    return Math.floor(t * fps + EPSILON) / fps;
+  }
+
+  // In-memory committed-cache queries (the green-bar mirror), so the fill loop's
+  // gap-finding does NO IndexedDB work on the cold-streaming hot path.
+  private cachedRangeContaining(t: number): CacheRange | null {
+    for (const r of this.committedRanges) {
+      if (r.start <= t + EPSILON && r.end > t + EPSILON) return r;
+    }
+    return null;
+  }
+
+  private nextCachedStart(t: number): number {
+    let best = Infinity;
+    for (const r of this.committedRanges) {
+      if (r.start > t + EPSILON && r.start < best) best = r.start;
+    }
+    return best;
   }
 
   // ---- fill loop --------------------------------------------------------------
@@ -357,8 +404,8 @@ export class TimelinePlayer {
   }
 
   private async runFill(gen: number): Promise<void> {
-    const { duration } = this.config;
-    const total = chunkCount(duration);
+    const { duration, groupKey, cache } = this.config;
+    let cursor = this.position;
     while (!this.disposed && gen === this.fillGen) {
       const lookahead =
         this.mode === "playing"
@@ -368,51 +415,74 @@ export class TimelinePlayer {
             : 0;
       if (lookahead <= 0) return;
 
-      const from = chunkIndexAt(this.position);
-      const targetTime = Math.min(duration, this.position + lookahead);
-      const to = chunkIndexAt(Math.max(0, targetTime - EPSILON));
-
-      let next = -1;
-      for (let i = from; i <= to && i < total; i++) {
-        if (!this.isChunkBuffered(i)) {
-          next = i;
-          break;
-        }
-      }
-      if (next < 0) {
-        // The whole lookahead window is buffered. If we're playing and the window
-        // reaches the timeline end, finalize so native `ended` can fire.
-        if (this.mode === "playing" && to >= total - 1) {
+      // Always fill FORWARD from the playhead; if it advanced past the cursor, catch up.
+      if (cursor < this.position) cursor = this.position;
+      const targetEnd = Math.min(duration, this.position + lookahead);
+      if (cursor >= targetEnd - EPSILON || cursor >= duration - EPSILON) {
+        // Lookahead window satisfied. If we played to the end, finalize so native
+        // `ended` can fire.
+        if (this.mode === "playing" && cursor >= duration - EPSILON) {
           this.endOfStreamIfOpen();
         }
         return;
       }
 
-      const blob = await this.config.cache.getChunk(this.config.groupKey, next);
-      if (this.disposed || gen !== this.fillGen) return;
-      if (blob) {
-        await this.appendChunk(next, await blobToArrayBuffer(blob), gen);
-        if (this.disposed || gen !== this.fillGen) return;
-        // If the append could not land (buffer full and nothing is evictable behind a
-        // paused playhead), stop filling instead of re-trying the same chunk in a tight
-        // loop. The chunk stays green (it IS in IndexedDB) and re-appends from cache
-        // once the playhead advances and eviction frees room.
-        if (!this.isChunkBuffered(next)) return;
-        this.committed.add(next);
-        this.emitRanges();
-        this.tryResolveReveal();
-      } else {
-        await this.streamChunk(next, gen);
-        if (this.disposed || gen !== this.fillGen) return;
+      // Already in the live MSE buffer? Skip past it (don't re-fetch). In-memory.
+      if (this.isTimeBuffered(cursor)) {
+        cursor = Math.max(cursor + EPSILON, this.bufferedEndContaining(cursor));
+        continue;
       }
+
+      // Covered by a committed cache range (in-memory check — NO IndexedDB on the hot /
+      // cold-streaming path)? Only then fetch the exact segment blob to re-append it
+      // (this only happens for a cached segment the UA evicted from MSE).
+      if (this.cachedRangeContaining(cursor)) {
+        const seg = await cache.segmentAt(groupKey, cursor);
+        if (this.disposed || gen !== this.fillGen) return;
+        if (seg && seg.end > cursor + EPSILON) {
+          await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
+          if (this.disposed || gen !== this.fillGen) return;
+          // If the append couldn't land (buffer full, nothing evictable) stop rather than
+          // spin; the segment stays green (it IS in IndexedDB) and re-appends once the
+          // playhead advances and eviction frees room.
+          if (!this.isTimeBuffered(cursor)) return;
+          this.emitRanges();
+          this.tryResolveReveal();
+          cursor = Math.max(cursor + EPSILON, seg.end);
+          continue;
+        }
+        // segment unexpectedly missing — fall through and stream the gap.
+      }
+
+      // Cache miss: stream FORWARD from the cursor (frame-aligned), bounded by the next
+      // committed cache range (in-memory), the lookahead target, and STREAM_PIECE.
+      const start = this.frameAlign(cursor);
+      const end = Math.min(
+        this.nextCachedStart(cursor),
+        targetEnd,
+        start + STREAM_PIECE,
+        duration,
+      );
+      if (end <= start + EPSILON) {
+        cursor = Math.max(cursor + EPSILON, end);
+        continue;
+      }
+      const reachedTo = await this.streamSegment(start, end, gen);
+      if (this.disposed || gen !== this.fillGen) return;
+      cursor = Math.max(cursor + EPSILON, reachedTo);
     }
   }
 
-  private async streamChunk(index: number, gen: number): Promise<void> {
-    const { start, end } = chunkRange(index, this.config.duration);
+  // Stream a segment FORWARD from `start` to `end`, appending each slice as it arrives and
+  // persisting the WHOLE piece on natural EOF. A partial (aborted) fetch is NOT persisted
+  // — a truncated fMP4 isn't a self-contained segment and could overlap a neighbour — so a
+  // cached segment is always frame-aligned and gap-free; STREAM_PIECE keeps the dropped
+  // amount small. Returns how far it actually reached (frame-aligned buffered end).
+  private async streamSegment(start: number, end: number, gen: number): Promise<number> {
     const controller = new AbortController();
     const inflight: InFlight = {
-      index,
+      start,
+      end,
       controller,
       fillGen: gen,
       received: [],
@@ -420,16 +490,17 @@ export class TimelinePlayer {
     };
     this.inflight = inflight;
     const url = this.config.videoUrl(start, end);
+    let reached = start;
     try {
       const response = await fetch(url, { cache: "no-store", signal: controller.signal });
-      if (this.disposed || gen !== this.fillGen) return;
+      if (this.disposed || gen !== this.fillGen) return reached;
       if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
       const reader = response.body?.getReader();
       if (!reader) throw new Error("video stream has no body");
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (this.disposed || gen !== this.fillGen) return;
+        if (this.disposed || gen !== this.fillGen) return reached;
         if (!value) continue;
         // Copy exactly the view's region; the reader reuses one backing buffer, so
         // appending value.buffer directly would splice in bytes from other reads.
@@ -438,49 +509,55 @@ export class TimelinePlayer {
           value.byteOffset + value.byteLength,
         ) as ArrayBuffer;
         inflight.received.push(slice);
-        await this.appendChunk(index, slice.slice(0), gen);
-        if (this.disposed || gen !== this.fillGen) return;
-        // The live green edge is the buffered end of THIS chunk only — never bytes
+        await this.appendSegment(start, slice.slice(0), gen);
+        if (this.disposed || gen !== this.fillGen) return reached;
+        // The live green edge is the buffered end of THIS segment only — never bytes
         // received (which over-report before parse) and never the global buffered end
         // (contaminated by lookahead / eviction). buffered advances per GOP fragment.
-        inflight.liveEnd = this.liveEndOf(index);
+        inflight.liveEnd = this.liveEndOf(start, end);
+        reached = inflight.liveEnd;
         this.emitRanges();
         this.tryResolveReveal();
       }
-      // Natural EOF only: persist the WHOLE chunk. A partial (aborted) fetch is never
-      // persisted — a truncated fMP4 isn't independently decodable and would poison
-      // the cache. The accumulated bytes are byte-identical to what played, so the
-      // cached blob == the stream (requirement 7, no waste on a completed chunk).
-      const blob = new Blob(inflight.received, { type: "video/mp4" });
-      const persisted = await this.config.cache.putChunk(
-        this.config.groupKey,
-        this.config.pluginKey,
-        index,
-        blob,
-      );
-      if (this.disposed) return;
+      // Natural EOF: persist [start, actual buffered end]. The recorded end is the last
+      // complete fragment (frame-aligned) so the next segment butts up gaplessly.
+      const persistedEnd = Math.max(this.liveEndOf(start, end), start);
+      reached = persistedEnd;
       if (this.inflight === inflight) this.inflight = null;
-      if (persisted) this.committed.add(index);
+      if (persistedEnd > start + EPSILON) {
+        const blob = new Blob(inflight.received, { type: "video/mp4" });
+        const ok = await this.config.cache.putSegment(
+          this.config.groupKey,
+          this.config.pluginKey,
+          start,
+          persistedEnd,
+          blob,
+        );
+        if (this.disposed) return reached;
+        if (ok) this.recordCommitted(start, persistedEnd);
+      }
       this.emitRanges();
+      return reached;
     } catch (e) {
       if (this.inflight === inflight) this.inflight = null;
       if (isAbortError(e)) {
-        // Intentional interruption (seek/pause/dispose): drop the partial, recede the
-        // live edge to the last committed boundary.
+        // Intentional interruption (seek/pause/dispose): drop the partial and recede the
+        // live edge. The bounded STREAM_PIECE keeps the re-streamed amount small.
         this.emitRanges();
-        return;
+        return reached;
       }
-      if (this.disposed || gen !== this.fillGen) return;
+      if (this.disposed || gen !== this.fillGen) return reached;
       this.events.onError?.(String(e));
+      return reached;
     }
   }
 
-  // Enqueue an append for a chunk slice and resolve once it has drained (backpressure
+  // Enqueue an append for a segment slice and resolve once it has drained (backpressure
   // so the reader can't outrun the SourceBuffer). The op carries fillGen so a stale
   // cursor's slices are dropped by the pump rather than polluting buffered ranges.
-  private appendChunk(index: number, data: ArrayBuffer, fillGen: number): Promise<void> {
+  private appendSegment(offset: number, data: ArrayBuffer, fillGen: number): Promise<void> {
     return new Promise<void>((resolve) => {
-      this.opQueue.push({ kind: "append", index, data, fillGen, settle: resolve });
+      this.opQueue.push({ kind: "append", offset, data, fillGen, settle: resolve });
       void this.pump();
     });
   }
@@ -505,7 +582,7 @@ export class TimelinePlayer {
         }
         try {
           if (op.kind === "append") {
-            await this.appendWithQuota(sb, op.index, op.data);
+            await this.appendWithQuota(sb, op.offset, op.data);
           } else {
             await this.removeRange(sb, op.start, op.end);
           }
@@ -533,12 +610,12 @@ export class TimelinePlayer {
 
   private async appendWithQuota(
     sb: SourceBuffer,
-    index: number,
+    offset: number,
     data: ArrayBuffer,
   ): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.appendOne(sb, index, data);
+        await this.appendOne(sb, offset, data);
         return;
       } catch (e) {
         // QuotaExceededError is thrown synchronously when the buffer is full. Evict the
@@ -565,20 +642,21 @@ export class TimelinePlayer {
 
   private async appendOne(
     sb: SourceBuffer,
-    index: number,
+    offset: number,
     data: ArrayBuffer,
   ): Promise<void> {
     await waitForSourceBufferIdle(sb);
     // "ended" is fine here — setting timestampOffset / appendBuffer transitions the
     // MediaSource back to "open". Bail only when it's "closed" (detached on teardown).
     if (this.disposed || this.mediaSource.readyState === "closed") return;
-    if (index !== this.lastAppliedIndex) {
-      // Position this chunk so buffered-time == timeline-time. Each chunk is a
-      // self-contained encode with its own IDR and an exact integer number of FLAC
-      // packets, so leaving appendWindow at its defaults (open) butts adjacent chunks
-      // up sample-exact with no overlap and no dropped boundary frame.
-      sb.timestampOffset = index * CHUNK_SECONDS;
-      this.lastAppliedIndex = index;
+    if (offset !== this.lastAppliedOffset) {
+      // Position this segment so buffered-time == timeline-time. Each segment is a
+      // self-contained encode with its own IDR at `offset` (a frame-aligned time) and an
+      // exact integer number of FLAC packets, so leaving appendWindow at its defaults
+      // (open) butts adjacent segments up sample-exact with no overlap and no dropped
+      // boundary frame.
+      sb.timestampOffset = offset;
+      this.lastAppliedOffset = offset;
     }
     await new Promise<void>((resolve, reject) => {
       const onEnd = () => {
@@ -764,37 +842,28 @@ export class TimelinePlayer {
   }
 
   private emitRanges(): void {
-    const ranges = indicesToRanges(this.committed, this.config.duration);
+    // Persistent green = IndexedDB-committed ranges (never shrinks under eviction). Plus
+    // the single in-flight segment's growing live edge.
+    const ranges = [...this.committedRanges];
     const inflight = this.inflight;
-    if (inflight) {
-      const { start } = chunkRange(inflight.index, this.config.duration);
-      if (inflight.liveEnd > start + EPSILON) {
-        ranges.push({ start, end: inflight.liveEnd });
-      }
+    if (inflight && inflight.liveEnd > inflight.start + EPSILON) {
+      ranges.push({ start: inflight.start, end: inflight.liveEnd });
     }
     this.events.onRanges?.(mergeRanges(ranges));
   }
 
-  // Whether the chunk's full range is currently present in MSE (consult LIVE buffered,
-  // because the UA may have evicted a chunk we committed to IndexedDB).
-  private isChunkBuffered(index: number): boolean {
-    const { start, end } = chunkRange(index, this.config.duration);
-    return this.isRangeBuffered(start, end);
-  }
-
-  private isRangeBuffered(start: number, end: number): boolean {
+  // The end of the buffered range containing t (consult LIVE buffered — the UA may have
+  // evicted a segment we committed to IndexedDB), or t if t isn't buffered.
+  private bufferedEndContaining(t: number): number {
     const sb = this.sourceBuffer;
-    if (!sb) return false;
+    if (!sb) return t;
     const buffered = sb.buffered;
     for (let i = 0; i < buffered.length; i++) {
-      if (
-        buffered.start(i) <= start + EPSILON &&
-        buffered.end(i) >= end - EPSILON
-      ) {
-        return true;
+      if (buffered.start(i) <= t + EPSILON && buffered.end(i) > t + EPSILON) {
+        return buffered.end(i);
       }
     }
-    return false;
+    return t;
   }
 
   private isTimeBuffered(t: number): boolean {
@@ -826,8 +895,10 @@ export class TimelinePlayer {
     return t;
   }
 
-  private liveEndOf(index: number): number {
-    const { start, end } = chunkRange(index, this.config.duration);
+  // The buffered end of the in-flight segment [start,end] — clamped to its nominal end,
+  // scoped to the range containing `start` so lookahead/eviction of OTHER segments never
+  // moves the live green edge.
+  private liveEndOf(start: number, end: number): number {
     const sb = this.sourceBuffer;
     if (!sb) return start;
     const buffered = sb.buffered;

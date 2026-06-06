@@ -164,6 +164,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           groupKey,
           pluginKey,
           duration,
+          fps,
           initialPosition: secondsRef.current,
           videoUrl: buildVideoUrl,
           cache,

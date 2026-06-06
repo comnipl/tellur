@@ -1,32 +1,28 @@
 import type { CacheRange } from "./types";
 
-// Fixed chunk duration in seconds. Every cached unit is exactly this long
-// (the last chunk of a timeline may be shorter — see chunkRange).
-export const CHUNK_SECONDS = 2;
-
-// Bump this whenever the server's encode format changes, even if the plugin
-// .so (and thus pluginKey) is unchanged. The chunk-grid scheme is brand new,
-// so all old arbitrary-range blobs are incompatible; start at a fresh value.
-export const ENCODE_FORMAT_VERSION = "chunks-v1";
+// Bump whenever the server's encode format changes. "segments-v1" is a fresh
+// value that abandons all data from the old fixed-grid "chunks-v1" scheme.
+export const ENCODE_FORMAT_VERSION = "segments-v1";
 
 // Small tolerance used in floating-point boundary comparisons.
 const EPS = 1e-4;
 
-const CHUNK_DB_NAME = "tellur-live-chunks";
-const CHUNK_DB_VERSION = 1;
-const CHUNK_STORE = "chunks";
+const SEGMENT_DB_NAME = "tellur-live-segments";
+const SEGMENT_DB_VERSION = 1;
+const SEGMENT_STORE = "segments";
 const LEGACY_MEDIA_CACHE_PREFIX = "tellur-live-media-v1-";
 
 // ---------------------------------------------------------------------------
 // Entry shape stored in IndexedDB
 // ---------------------------------------------------------------------------
 
-interface ChunkEntry {
-  /** Compound key: `${groupKey}\n${index}` */
+interface SegmentEntry {
+  /** Compound key: `${groupKey}\n${start.toFixed(4)}\n${end.toFixed(4)}` */
   id: string;
   groupKey: string;
   pluginKey: string;
-  index: number;
+  start: number;
+  end: number;
   blob: Blob;
   createdAt: number;
 }
@@ -37,9 +33,8 @@ interface ChunkEntry {
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
-// The currently active plugin key. putChunk re-checks this after the await
-// and rolls back its write when the plugin changed mid-flight (same pattern
-// as activeMediaCacheKey in cache.ts).
+// The currently active plugin key. putSegment re-checks this after the await
+// and rolls back its write when the plugin changed mid-flight.
 let activePluginKey = "";
 
 // One-time legacy cleanup; memoized so it only runs once per page load.
@@ -58,6 +53,12 @@ export interface ChunkGroupParams {
   fps: number;
   gop: number;
   crf: number;
+}
+
+export interface CachedSegment {
+  start: number;
+  end: number;
+  blob: Blob;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,108 +83,45 @@ export function groupKeyOf(p: ChunkGroupParams): string {
   ].join("|");
 }
 
-/** Zero-based chunk index for a given timeline position in seconds. */
-export function chunkIndexAt(t: number): number {
-  return Math.floor(Math.max(0, t) / CHUNK_SECONDS);
-}
-
-/**
- * Total number of chunks needed to cover a timeline of the given duration.
- * Returns 0 when duration is non-positive.
- */
-export function chunkCount(duration: number): number {
-  if (duration <= 0) return 0;
-  return Math.max(0, Math.ceil((duration - EPS) / CHUNK_SECONDS));
-}
-
-/**
- * Half-open time interval [start, end) for chunk at `index`, clamped so that
- * the last chunk does not exceed `duration`.
- */
-export function chunkRange(
-  index: number,
-  duration: number,
-): { start: number; end: number } {
-  const start = index * CHUNK_SECONDS;
-  const end = Math.min((index + 1) * CHUNK_SECONDS, duration);
-  return { start, end };
-}
-
-/**
- * Convert a set of cached chunk indices into sorted, contiguous half-open
- * [start, end) ranges (in seconds), clamped by `duration`.
- * Consecutive indices (e.g. 0, 1, 2) merge into one range.
- * Used by the green progress-bar overlay.
- */
-export function indicesToRanges(
-  indices: Iterable<number>,
-  duration: number,
-): CacheRange[] {
-  const total = chunkCount(duration);
-  if (total === 0) return [];
-
-  // Sort a copy of the indices so we can walk them in order.
-  const sorted = Array.from(indices)
-    .map((i) => Math.floor(i))
-    .filter((i) => i >= 0 && i < total)
-    .sort((a, b) => a - b);
-
-  if (sorted.length === 0) return [];
-
-  const result: CacheRange[] = [];
-  let runStart = sorted[0];
-  let runEnd = sorted[0];
-
-  for (let k = 1; k < sorted.length; k++) {
-    const idx = sorted[k];
-    if (idx === runEnd + 1) {
-      // Extend the current run.
-      runEnd = idx;
-    } else {
-      result.push(makeRange(runStart, runEnd, duration));
-      runStart = idx;
-      runEnd = idx;
-    }
-  }
-  result.push(makeRange(runStart, runEnd, duration));
-  return result;
-}
-
-function makeRange(
-  firstIdx: number,
-  lastIdx: number,
-  duration: number,
-): CacheRange {
-  return {
-    start: firstIdx * CHUNK_SECONDS,
-    end: Math.min((lastIdx + 1) * CHUNK_SECONDS, duration),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
 
 export interface MediaCache {
-  getChunk(groupKey: string, index: number): Promise<Blob | null>;
   /**
-   * Persist a fully-received chunk blob.
-   * Returns true iff persisted AND the plugin is still active.
-   * Re-checks the module-level activePluginKey AFTER the put resolves; if it
-   * changed mid-write, deletes the entry and returns false.
+   * The cached segment whose [start, end) brackets t
+   * (start <= t+EPS && end > t+EPS). If several match, the one with the
+   * largest start wins. Returns null when none match.
    */
-  putChunk(
+  segmentAt(groupKey: string, t: number): Promise<CachedSegment | null>;
+  /**
+   * The smallest segment start strictly greater than t (start > t+EPS),
+   * or null if none exists.
+   */
+  nextSegmentStart(groupKey: string, t: number): Promise<number | null>;
+  /**
+   * Persist a streamed segment [start, end).
+   * Returns true iff persisted AND the plugin is still active. Re-checks
+   * activePluginKey AFTER the put; if it changed, deletes this entry only
+   * and returns false. After a successful put, subsumes any existing segments
+   * of the same group fully contained in [start-EPS, end+EPS] so duplicates
+   * do not accumulate. Ignores calls where !(end > start + EPS).
+   */
+  putSegment(
     groupKey: string,
     pluginKey: string,
-    index: number,
+    start: number,
+    end: number,
     blob: Blob,
   ): Promise<boolean>;
-  /** Returns an empty Set on unavailable/error. */
-  cachedIndices(groupKey: string): Promise<Set<number>>;
   /**
-   * Mark pluginKey active and purge entries belonging to OTHER plugins.
-   * Also runs the one-time legacy ServiceWorker/CacheStorage cleanup.
-   * Safe to call repeatedly; no-op when pluginKey is "".
+   * Merged, sorted, non-overlapping cached ranges for the green bar.
+   * Adjacent segments touching within EPS are coalesced. Returns [] on error.
+   */
+  cachedRanges(groupKey: string): Promise<CacheRange[]>;
+  /**
+   * Mark pluginKey active and purge entries of OTHER plugins; also runs the
+   * one-time legacy ServiceWorker/CacheStorage cleanup. No-op when "".
    */
   activatePlugin(pluginKey: string): Promise<void>;
 }
@@ -194,9 +132,10 @@ export interface MediaCache {
 
 export function createMediaCache(): MediaCache {
   return {
-    getChunk,
-    putChunk,
-    cachedIndices,
+    segmentAt,
+    nextSegmentStart,
+    putSegment,
+    cachedRanges,
     activatePlugin,
   };
 }
@@ -205,67 +144,18 @@ export function createMediaCache(): MediaCache {
 // Implementation
 // ---------------------------------------------------------------------------
 
-async function getChunk(groupKey: string, index: number): Promise<Blob | null> {
+async function segmentAt(
+  groupKey: string,
+  t: number,
+): Promise<CachedSegment | null> {
   if (!groupKey || !canUseIndexedDb()) return null;
   try {
-    const db = await openChunkDb();
-    const id = chunkId(groupKey, index);
-    const entry = await requestToPromise<ChunkEntry | undefined>(
-      db.transaction(CHUNK_STORE, "readonly").objectStore(CHUNK_STORE).get(id),
-    );
-    return entry?.blob ?? null;
-  } catch (e) {
-    console.warn("tellur-live chunk cache read failed", e);
-    return null;
-  }
-}
-
-async function putChunk(
-  groupKey: string,
-  pluginKey: string,
-  index: number,
-  blob: Blob,
-): Promise<boolean> {
-  if (!groupKey || !pluginKey || !canUseIndexedDb()) return false;
-  try {
-    const db = await openChunkDb();
-    const entry: ChunkEntry = {
-      id: chunkId(groupKey, index),
-      groupKey,
-      pluginKey,
-      index,
-      blob,
-      createdAt: Date.now(),
-    };
-    const tx = db.transaction(CHUNK_STORE, "readwrite");
-    const done = transactionDone(tx);
-    await requestToPromise(tx.objectStore(CHUNK_STORE).put(entry));
-    await done;
-
-    // Re-check after the await: if the plugin changed mid-write, roll back ONLY this
-    // just-written entry. Bulk-purging the whole (now-inactive) plugin is
-    // activatePlugin's job; doing it here would wipe entries an A->B->A flip may still
-    // want, and any genuinely stale entries are already covered by that purge.
-    if (activePluginKey && activePluginKey !== pluginKey) {
-      await deleteChunkById(db, entry.id);
-      return false;
-    }
-    return true;
-  } catch (e) {
-    console.warn("tellur-live chunk cache write failed", e);
-    return false;
-  }
-}
-
-async function cachedIndices(groupKey: string): Promise<Set<number>> {
-  if (!groupKey || !canUseIndexedDb()) return new Set();
-  try {
-    const db = await openChunkDb();
-    return await new Promise<Set<number>>((resolve, reject) => {
-      const result = new Set<number>();
-      const tx = db.transaction(CHUNK_STORE, "readonly");
+    const db = await openSegmentDb();
+    return await new Promise<CachedSegment | null>((resolve, reject) => {
+      let best: CachedSegment | null = null;
+      const tx = db.transaction(SEGMENT_STORE, "readonly");
       const request = tx
-        .objectStore(CHUNK_STORE)
+        .objectStore(SEGMENT_STORE)
         .index("groupKey")
         .openCursor(IDBKeyRange.only(groupKey));
       request.onerror = () =>
@@ -273,19 +163,168 @@ async function cachedIndices(groupKey: string): Promise<Set<number>> {
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor) {
-          resolve(result);
+          resolve(best);
           return;
         }
-        const entry = cursor.value as Partial<ChunkEntry>;
-        if (typeof entry.index === "number") {
-          result.add(entry.index);
+        const entry = cursor.value as Partial<SegmentEntry>;
+        if (
+          typeof entry.start === "number" &&
+          typeof entry.end === "number" &&
+          entry.blob instanceof Blob &&
+          entry.start <= t + EPS &&
+          entry.end > t + EPS
+        ) {
+          if (best === null || entry.start > best.start) {
+            best = { start: entry.start, end: entry.end, blob: entry.blob };
+          }
         }
         cursor.continue();
       };
     });
   } catch (e) {
-    console.warn("tellur-live chunk cachedIndices failed", e);
-    return new Set();
+    console.warn("tellur-live segment cache segmentAt failed", e);
+    return null;
+  }
+}
+
+async function nextSegmentStart(
+  groupKey: string,
+  t: number,
+): Promise<number | null> {
+  if (!groupKey || !canUseIndexedDb()) return null;
+  try {
+    const db = await openSegmentDb();
+    return await new Promise<number | null>((resolve, reject) => {
+      let best: number | null = null;
+      const tx = db.transaction(SEGMENT_STORE, "readonly");
+      const request = tx
+        .objectStore(SEGMENT_STORE)
+        .index("groupKey")
+        .openCursor(IDBKeyRange.only(groupKey));
+      request.onerror = () =>
+        reject(request.error ?? new Error("IndexedDB cursor failed"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) {
+          resolve(best);
+          return;
+        }
+        const entry = cursor.value as Partial<SegmentEntry>;
+        if (
+          typeof entry.start === "number" &&
+          entry.start > t + EPS
+        ) {
+          if (best === null || entry.start < best) {
+            best = entry.start;
+          }
+        }
+        cursor.continue();
+      };
+    });
+  } catch (e) {
+    console.warn("tellur-live segment cache nextSegmentStart failed", e);
+    return null;
+  }
+}
+
+async function putSegment(
+  groupKey: string,
+  pluginKey: string,
+  start: number,
+  end: number,
+  blob: Blob,
+): Promise<boolean> {
+  if (!groupKey || !pluginKey || !canUseIndexedDb()) return false;
+  // Ignore degenerate segments.
+  if (!(end > start + EPS)) return false;
+  try {
+    const db = await openSegmentDb();
+    const entry: SegmentEntry = {
+      id: segmentId(groupKey, start, end),
+      groupKey,
+      pluginKey,
+      start,
+      end,
+      blob,
+      createdAt: Date.now(),
+    };
+    const tx = db.transaction(SEGMENT_STORE, "readwrite");
+    const done = transactionDone(tx);
+    await requestToPromise(tx.objectStore(SEGMENT_STORE).put(entry));
+    await done;
+
+    // Re-check after the await: if the plugin changed mid-write, roll back ONLY
+    // this just-written entry. Bulk-purging the whole (now-inactive) plugin is
+    // activatePlugin's job.
+    if (activePluginKey && activePluginKey !== pluginKey) {
+      await deleteSegmentById(db, entry.id);
+      return false;
+    }
+
+    // Subsume any existing segments of the same group fully contained within
+    // [start-EPS, end+EPS] so duplicates do not accumulate.
+    await deleteSubsumedSegments(db, groupKey, start, end, entry.id);
+    return true;
+  } catch (e) {
+    console.warn("tellur-live segment cache write failed", e);
+    return false;
+  }
+}
+
+async function cachedRanges(groupKey: string): Promise<CacheRange[]> {
+  if (!groupKey || !canUseIndexedDb()) return [];
+  try {
+    const db = await openSegmentDb();
+    const pairs = await new Promise<{ start: number; end: number }[]>(
+      (resolve, reject) => {
+        const result: { start: number; end: number }[] = [];
+        const tx = db.transaction(SEGMENT_STORE, "readonly");
+        const request = tx
+          .objectStore(SEGMENT_STORE)
+          .index("groupKey")
+          .openCursor(IDBKeyRange.only(groupKey));
+        request.onerror = () =>
+          reject(request.error ?? new Error("IndexedDB cursor failed"));
+        request.onsuccess = () => {
+          const cursor = request.result;
+          if (!cursor) {
+            resolve(result);
+            return;
+          }
+          const entry = cursor.value as Partial<SegmentEntry>;
+          if (
+            typeof entry.start === "number" &&
+            typeof entry.end === "number"
+          ) {
+            result.push({ start: entry.start, end: entry.end });
+          }
+          cursor.continue();
+        };
+      },
+    );
+
+    if (pairs.length === 0) return [];
+
+    pairs.sort((a, b) => a.start - b.start);
+
+    // Coalesce segments whose boundaries touch within EPS.
+    const ranges: CacheRange[] = [];
+    let current = { start: pairs[0].start, end: pairs[0].end };
+    for (let i = 1; i < pairs.length; i++) {
+      const p = pairs[i];
+      if (p.start <= current.end + EPS) {
+        // Overlapping or adjacent — extend.
+        if (p.end > current.end) current.end = p.end;
+      } else {
+        ranges.push({ start: current.start, end: current.end });
+        current = { start: p.start, end: p.end };
+      }
+    }
+    ranges.push({ start: current.start, end: current.end });
+    return ranges;
+  } catch (e) {
+    console.warn("tellur-live segment cache cachedRanges failed", e);
+    return [];
   }
 }
 
@@ -303,29 +342,29 @@ async function activatePlugin(pluginKey: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Delete every chunk entry whose pluginKey differs from `keepKey`.
+ * Delete every segment entry whose pluginKey differs from `keepKey`.
  * Uses a full-store cursor rather than a per-pluginKey index, since we want
  * to remove ALL other plugins, not a single target key.
  */
 async function purgeOtherPlugins(keepKey: string): Promise<void> {
   if (!canUseIndexedDb()) return;
   try {
-    const db = await openChunkDb();
+    const db = await openSegmentDb();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(CHUNK_STORE, "readwrite");
+      const tx = db.transaction(SEGMENT_STORE, "readwrite");
       tx.oncomplete = () => resolve();
       tx.onerror = () =>
         reject(tx.error ?? new Error("IndexedDB purge failed"));
       tx.onabort = () =>
         reject(tx.error ?? new Error("IndexedDB purge aborted"));
 
-      const request = tx.objectStore(CHUNK_STORE).openCursor();
+      const request = tx.objectStore(SEGMENT_STORE).openCursor();
       request.onerror = () =>
         reject(request.error ?? new Error("IndexedDB cursor failed"));
       request.onsuccess = () => {
         const cursor = request.result;
         if (!cursor) return;
-        const entry = cursor.value as Partial<ChunkEntry>;
+        const entry = cursor.value as Partial<SegmentEntry>;
         if (entry.pluginKey !== keepKey) {
           cursor.delete();
         }
@@ -333,19 +372,67 @@ async function purgeOtherPlugins(keepKey: string): Promise<void> {
       };
     });
   } catch (e) {
-    console.warn("tellur-live chunk cache purge failed", e);
+    console.warn("tellur-live segment cache purge failed", e);
   }
 }
 
-/** Delete a single chunk entry by its id (used to roll back a raced write). */
-async function deleteChunkById(db: IDBDatabase, id: string): Promise<void> {
+/** Delete a single segment entry by its id (used to roll back a raced write). */
+async function deleteSegmentById(db: IDBDatabase, id: string): Promise<void> {
   try {
-    const tx = db.transaction(CHUNK_STORE, "readwrite");
+    const tx = db.transaction(SEGMENT_STORE, "readwrite");
     const done = transactionDone(tx);
-    tx.objectStore(CHUNK_STORE).delete(id);
+    tx.objectStore(SEGMENT_STORE).delete(id);
     await done;
   } catch (e) {
-    console.warn("tellur-live chunk cache rollback delete failed", e);
+    console.warn("tellur-live segment cache rollback delete failed", e);
+  }
+}
+
+/**
+ * Delete existing segments of the same group that are fully contained within
+ * [start-EPS, end+EPS], excluding the entry we just wrote (by `excludeId`).
+ * A segment is subsumed when its start >= start-EPS AND its end <= end+EPS.
+ */
+async function deleteSubsumedSegments(
+  db: IDBDatabase,
+  groupKey: string,
+  start: number,
+  end: number,
+  excludeId: string,
+): Promise<void> {
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(SEGMENT_STORE, "readwrite");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () =>
+        reject(tx.error ?? new Error("IndexedDB subsume failed"));
+      tx.onabort = () =>
+        reject(tx.error ?? new Error("IndexedDB subsume aborted"));
+
+      const request = tx
+        .objectStore(SEGMENT_STORE)
+        .index("groupKey")
+        .openCursor(IDBKeyRange.only(groupKey));
+      request.onerror = () =>
+        reject(request.error ?? new Error("IndexedDB cursor failed"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const entry = cursor.value as Partial<SegmentEntry>;
+        if (
+          entry.id !== excludeId &&
+          typeof entry.start === "number" &&
+          typeof entry.end === "number" &&
+          entry.start >= start - EPS &&
+          entry.end <= end + EPS
+        ) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+    });
+  } catch (e) {
+    console.warn("tellur-live segment cache subsume failed", e);
   }
 }
 
@@ -353,20 +440,23 @@ async function deleteChunkById(db: IDBDatabase, id: string): Promise<void> {
 // DB open / schema
 // ---------------------------------------------------------------------------
 
-function openChunkDb(): Promise<IDBDatabase> {
+function openSegmentDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(CHUNK_DB_NAME, CHUNK_DB_VERSION);
+    const request = indexedDB.open(SEGMENT_DB_NAME, SEGMENT_DB_VERSION);
     request.onerror = () =>
       reject(request.error ?? new Error("IndexedDB open failed"));
     request.onblocked = () => reject(new Error("IndexedDB upgrade blocked"));
     request.onupgradeneeded = (event) => {
       const db = request.result;
       // Drop + recreate on any version bump — no incremental migration.
-      if (event.oldVersion > 0 && db.objectStoreNames.contains(CHUNK_STORE)) {
-        db.deleteObjectStore(CHUNK_STORE);
+      if (
+        event.oldVersion > 0 &&
+        db.objectStoreNames.contains(SEGMENT_STORE)
+      ) {
+        db.deleteObjectStore(SEGMENT_STORE);
       }
-      const store = db.createObjectStore(CHUNK_STORE, { keyPath: "id" });
+      const store = db.createObjectStore(SEGMENT_STORE, { keyPath: "id" });
       store.createIndex("pluginKey", "pluginKey", { unique: false });
       store.createIndex("groupKey", "groupKey", { unique: false });
     };
@@ -389,7 +479,7 @@ function openChunkDb(): Promise<IDBDatabase> {
 }
 
 // ---------------------------------------------------------------------------
-// IndexedDB utility helpers (mirror of cache.ts)
+// IndexedDB utility helpers
 // ---------------------------------------------------------------------------
 
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
@@ -414,12 +504,12 @@ function canUseIndexedDb(): boolean {
   return typeof indexedDB !== "undefined" && typeof Blob !== "undefined";
 }
 
-function chunkId(groupKey: string, index: number): string {
-  return `${groupKey}\n${index}`;
+function segmentId(groupKey: string, start: number, end: number): string {
+  return `${groupKey}\n${start.toFixed(4)}\n${end.toFixed(4)}`;
 }
 
 // ---------------------------------------------------------------------------
-// Legacy cleanup (ported from cache.ts)
+// Legacy cleanup (ported from old chunk-grid scheme)
 // ---------------------------------------------------------------------------
 
 /**
