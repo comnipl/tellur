@@ -4,16 +4,21 @@
 //! (re)builds its `cdylib`, and serves the live preview through `tellur-live`,
 //! hot-reloading on source changes.
 //!
-//! This binary is the future home of the rustup-style version dispatcher
-//! (running a host built against the project's exact `tellur` version). For now
-//! it takes the fast path: the installed `tellur` is itself the host, which is
-//! correct whenever the project and the CLI share one `tellur` version — the
-//! common case when a workspace pins a single version.
+//! It is a rustup-style version dispatcher. On the **fast path** — when the
+//! project pins the same `tellur` version as this binary — the installed `tellur`
+//! is itself the host and serves in-process. On the **slow path** — when the
+//! project pins a different version — the in-process host would mismatch the
+//! plugin's Rust ABI, so it `cargo install`s a host from the project's exact
+//! `tellur` source (path / crates.io / git), caches it keyed by source + rustc,
+//! and hands off to it (`TELLUR_HOST` guards against re-dispatching).
 
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::error::Error;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::process::Command as Process;
 use std::time::Duration;
 
 use cargo_metadata::{Metadata, MetadataCommand, Package};
@@ -106,6 +111,21 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
 
     let metadata = MetadataCommand::new().exec()?;
     let package = resolve_project(&metadata, args.project.as_deref())?;
+
+    // Version dispatch (slow path): if the project pins a different `tellur`
+    // version than this binary, the in-process host would mismatch the plugin's
+    // ABI. Build (and cache) a host matched to the project's exact `tellur` and
+    // hand off to it. `TELLUR_HOST` guards against re-dispatching after handoff.
+    if env::var_os("TELLUR_HOST").is_none() {
+        if let Some(tellur) = project_tellur_package(&metadata, package) {
+            let version = tellur.version.to_string();
+            if version != env!("CARGO_PKG_VERSION") {
+                let source = tellur_source(tellur)?;
+                return dispatch_to_host(&source, &version);
+            }
+        }
+    }
+
     let lib_name = cdylib_target_name(package).ok_or_else(|| {
         format!(
             "`{}` is not a tellur timeline project \
@@ -419,4 +439,252 @@ fn register_member(
 
     fs::write(&manifest_path, doc.to_string())?;
     Ok(())
+}
+
+/// The resolved `tellur` package the target project depends on, via the lock
+/// graph — so its version/source reflects what the project actually builds with.
+fn project_tellur_package<'a>(metadata: &'a Metadata, package: &Package) -> Option<&'a Package> {
+    let node = metadata
+        .resolve
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == package.id)?;
+    node.deps.iter().find_map(|dep| {
+        let pkg = metadata.packages.iter().find(|pkg| pkg.id == dep.pkg)?;
+        (pkg.name == "tellur").then_some(pkg)
+    })
+}
+
+/// Where a project's `tellur` dependency resolves from — enough to rebuild a
+/// byte-identical host with `cargo install`.
+#[derive(Debug, PartialEq)]
+enum TellurSource {
+    Path(PathBuf),
+    CratesIo { version: String },
+    Git { url: String, rev: String },
+}
+
+fn tellur_source(package: &Package) -> Result<TellurSource, Box<dyn Error>> {
+    match &package.source {
+        // No source id → a path dependency (or workspace member).
+        None => {
+            let dir = package
+                .manifest_path
+                .parent()
+                .ok_or("the tellur path dependency has no directory")?
+                .as_std_path()
+                .to_path_buf();
+            Ok(TellurSource::Path(dir))
+        }
+        Some(source) if source.is_crates_io() => Ok(TellurSource::CratesIo {
+            version: package.version.to_string(),
+        }),
+        Some(source) => parse_git_source(&source.repr),
+    }
+}
+
+/// Parses a cargo git source id (`git+<url>[?query]#<locked-sha>`).
+fn parse_git_source(repr: &str) -> Result<TellurSource, Box<dyn Error>> {
+    let rest = repr
+        .strip_prefix("git+")
+        .ok_or_else(|| format!("unsupported tellur source for the slow path: {repr}"))?;
+    let (locator, rev) = rest
+        .rsplit_once('#')
+        .ok_or_else(|| format!("git tellur source has no locked commit: {repr}"))?;
+    let url = locator.split('?').next().unwrap_or(locator);
+    Ok(TellurSource::Git {
+        url: url.to_owned(),
+        rev: rev.to_owned(),
+    })
+}
+
+impl TellurSource {
+    /// The `cargo install` arguments that select this exact source.
+    fn install_args(&self) -> Vec<String> {
+        match self {
+            TellurSource::Path(dir) => vec!["--path".to_owned(), dir.display().to_string()],
+            TellurSource::CratesIo { version } => {
+                vec![
+                    "tellur".to_owned(),
+                    "--version".to_owned(),
+                    format!("={version}"),
+                ]
+            }
+            TellurSource::Git { url, rev } => vec![
+                "--git".to_owned(),
+                url.clone(),
+                "--rev".to_owned(),
+                rev.clone(),
+                "tellur".to_owned(),
+            ],
+        }
+    }
+
+    /// A stable string identifying this source for the host cache key.
+    fn discriminant(&self) -> String {
+        match self {
+            TellurSource::Path(dir) => format!("path:{}", dir.display()),
+            TellurSource::CratesIo { version } => format!("cratesio:{version}"),
+            TellurSource::Git { url, rev } => format!("git:{url}#{rev}"),
+        }
+    }
+}
+
+/// Builds (if needed) and hands off to a host matched to `source`/`version`.
+fn dispatch_to_host(source: &TellurSource, version: &str) -> Result<(), Box<dyn Error>> {
+    let rustc = rustc_fingerprint()?;
+    let key = host_cache_key(version, &source.discriminant(), &rustc);
+    let cache_root = host_cache_dir()?.join(&key);
+    let host_bin = cache_root.join("bin").join(host_bin_name());
+
+    if !host_bin.exists() {
+        eprintln!(
+            "tellur {version}: building a version-matched host (first run for this version)…"
+        );
+        install_host(source, &cache_root)?;
+    }
+
+    eprintln!("tellur {version}: handing off to {}", host_bin.display());
+    let status = Process::new(&host_bin)
+        .args(env::args_os().skip(1))
+        .env("TELLUR_HOST", "1")
+        .status()
+        .map_err(|e| format!("failed to run the version-matched host: {e}"))?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn install_host(source: &TellurSource, cache_root: &Path) -> Result<(), Box<dyn Error>> {
+    let status = Process::new("cargo")
+        .arg("install")
+        .args(source.install_args())
+        .arg("--bin")
+        .arg("tellur")
+        .arg("--features")
+        .arg("cli")
+        .arg("--root")
+        .arg(cache_root)
+        .status()
+        .map_err(|e| format!("failed to run cargo install: {e}"))?;
+    if !status.success() {
+        return Err(format!("cargo install for the tellur host failed with {status}").into());
+    }
+    Ok(())
+}
+
+/// The first line of `rustc -vV` — identifies the toolchain (version + commit +
+/// host triple) so a host built with a different compiler gets a distinct cache
+/// entry (the cdylib ABI depends on the compiler, not just the tellur version).
+fn rustc_fingerprint() -> Result<String, Box<dyn Error>> {
+    let output = Process::new("rustc")
+        .arg("-vV")
+        .output()
+        .map_err(|e| format!("failed to run rustc -vV: {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned())
+}
+
+fn host_cache_dir() -> Result<PathBuf, Box<dyn Error>> {
+    if let Some(dir) = env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(dir).join("tellur").join("hosts"));
+    }
+    let home = env::var_os("HOME").ok_or("neither XDG_CACHE_HOME nor HOME is set")?;
+    Ok(PathBuf::from(home)
+        .join(".cache")
+        .join("tellur")
+        .join("hosts"))
+}
+
+fn host_cache_key(version: &str, discriminant: &str, rustc: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    discriminant.hash(&mut hasher);
+    rustc.hash(&mut hasher);
+    let sanitized: String = version
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{sanitized}-{:016x}", hasher.finish())
+}
+
+fn host_bin_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "tellur.exe"
+    } else {
+        "tellur"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_git_source_with_query_and_rev() {
+        assert_eq!(
+            parse_git_source("git+https://github.com/comnipl/tellur?rev=abc#deadbeef").unwrap(),
+            TellurSource::Git {
+                url: "https://github.com/comnipl/tellur".to_owned(),
+                rev: "deadbeef".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_git_source_without_query() {
+        assert_eq!(
+            parse_git_source("git+https://github.com/comnipl/tellur#deadbeef").unwrap(),
+            TellurSource::Git {
+                url: "https://github.com/comnipl/tellur".to_owned(),
+                rev: "deadbeef".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_git_repr() {
+        assert!(parse_git_source("registry+https://github.com/rust-lang/crates.io-index").is_err());
+    }
+
+    #[test]
+    fn install_args_select_the_source() {
+        assert_eq!(
+            TellurSource::CratesIo {
+                version: "0.4.0".to_owned()
+            }
+            .install_args(),
+            vec!["tellur", "--version", "=0.4.0"]
+        );
+        assert_eq!(
+            TellurSource::Git {
+                url: "u".to_owned(),
+                rev: "r".to_owned()
+            }
+            .install_args(),
+            vec!["--git", "u", "--rev", "r", "tellur"]
+        );
+        assert_eq!(
+            TellurSource::Path(PathBuf::from("/a/b")).install_args(),
+            vec!["--path", "/a/b"]
+        );
+    }
+
+    #[test]
+    fn cache_key_is_stable_and_discriminates() {
+        let base = host_cache_key("0.4.0", "git:u#r", "rustc 1.95.0");
+        assert_eq!(base, host_cache_key("0.4.0", "git:u#r", "rustc 1.95.0"));
+        assert!(base.starts_with("0.4.0-"));
+        // A different toolchain or source must yield a different cache entry.
+        assert_ne!(base, host_cache_key("0.4.0", "git:u#r", "rustc 1.96.0"));
+        assert_ne!(base, host_cache_key("0.4.0", "path:/x", "rustc 1.95.0"));
+    }
 }
