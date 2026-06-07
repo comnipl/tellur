@@ -2,7 +2,9 @@ pub mod build_watch;
 pub mod plugin;
 pub mod server;
 
-pub use build_watch::{AutoBuildOptions, CompileSnapshot, CompileState, CompileStatus};
+pub use build_watch::{
+    run_build_once, AutoBuildOptions, CompileSnapshot, CompileState, CompileStatus,
+};
 pub use plugin::{HotReloadPlugin, PluginLoadError};
 pub use server::{serve, ServerOptions};
 
