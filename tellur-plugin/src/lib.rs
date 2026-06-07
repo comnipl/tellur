@@ -21,6 +21,14 @@ use tellur_core::timeline_component::{
     ResolvedTimeline, TimelineComponent,
 };
 
+// Re-exported under a hidden name so `export_timeline!` can reach `tellur-core`
+// through `$crate` regardless of how the plugin author depends on it — directly
+// on `tellur-core`, or only on the `tellur` facade (which pulls this crate in
+// transitively). The macro must NOT hardcode `::tellur_core`, which only
+// resolves when the author lists `tellur-core` as a direct dependency.
+#[doc(hidden)]
+pub use tellur_core as __core;
+
 /// ABI version carried by the entry symbol.
 ///
 /// Bumped to `v2` for the timeline subsystem migration: the collection now
@@ -275,7 +283,7 @@ macro_rules! export_timeline {
                 $id,
                 $title,
                 $builder(),
-                ::tellur_core::geometry::Vec2($w, $h),
+                $crate::__core::geometry::Vec2($w, $h),
             ))
         }
     };

@@ -337,7 +337,8 @@ fn hash_for(ty: &Type, v: &TokenStream2, state: &TokenStream2) -> TokenStream2 {
     }
     match classify(ty) {
         Shape::Float(FloatBits::F32) => {
-            quote!( ::tellur_core::dyn_compare::hash_f32(*#v, #state); )
+            let core = crate::core();
+            quote!( #core::dyn_compare::hash_f32(*#v, #state); )
         }
         Shape::Float(FloatBits::F64) => {
             quote!( ::core::hash::Hash::hash(&(*#v).to_bits(), #state); )

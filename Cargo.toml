@@ -1,3 +1,11 @@
 [workspace]
-members = ["tellur-core", "tellur-live", "tellur-macros", "tellur-plugin", "tellur-renderer"]
+members = [
+    "tellur",
+    "tellur-core",
+    "tellur-live",
+    "tellur-macros",
+    "tellur-plugin",
+    "tellur-renderer",
+    "examples/quickstart",
+]
 resolver = "2"

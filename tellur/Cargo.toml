@@ -1,0 +1,15 @@
+[package]
+name = "tellur"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["renderer"]
+# The GPU / encode backend (wgpu / vello / ffmpeg). Vector/raster-only projects
+# can turn this off to skip the heavy graphics stack: `default-features = false`.
+renderer = ["dep:tellur-renderer"]
+
+[dependencies]
+tellur-core = { path = "../tellur-core" }
+tellur-plugin = { path = "../tellur-plugin" }
+tellur-renderer = { path = "../tellur-renderer", optional = true }
