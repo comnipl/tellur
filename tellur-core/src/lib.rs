@@ -8,11 +8,14 @@ pub mod geometry;
 pub mod interpolate;
 pub mod layer;
 pub mod layout;
+#[cfg(feature = "latex")]
+pub mod math;
 pub mod phase;
 pub mod placement;
 pub mod raster;
 pub mod render_context;
 pub mod shapes;
+pub mod span;
 pub mod text;
 pub mod time;
 pub mod timeline;

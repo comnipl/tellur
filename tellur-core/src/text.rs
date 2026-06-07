@@ -23,6 +23,7 @@ use thiserror::Error;
 
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::placement::{Positioned, VectorPlacement};
+use crate::span::{ShapedSpan, Span, SpanContext};
 use crate::vector::{
     Fill, Group, Node, Paint, Path as VPath, PathCommand, VectorComponent, VectorGraphic,
 };
@@ -227,6 +228,21 @@ impl Font {
             .expect("font data validated in Font constructors")
     }
 
+    /// This font's `(ascent, descent)` at `size`, both as non-negative
+    /// distances from the baseline (ascent above, descent below). Used by
+    /// a [`TextSpan`] to report how far it paints around the line baseline
+    /// so the enclosing [`Text`] can size the line box to fit every span.
+    fn vertical_metrics(&self, size: f32) -> (f32, f32) {
+        let face = self.face();
+        let upem = face.units_per_em() as f32;
+        let scale = size / upem;
+        let ascent = face.ascender() as f32 * scale;
+        // `descender` is conventionally negative (below baseline); flip it
+        // to a non-negative depth.
+        let descent = -(face.descender() as f32) * scale;
+        (ascent.max(0.0), descent.max(0.0))
+    }
+
     /// Returns the memoized span-local geometry for `text` at the given
     /// style, computing and caching it on a miss. Keyed on
     /// `(weight, size, baseline, text)`; the result carries no paint, so
@@ -409,6 +425,69 @@ impl From<String> for TextSpan {
     }
 }
 
+impl Span for TextSpan {
+    fn shape(&self, ctx: &SpanContext<'_>) -> ShapedSpan {
+        let font = self.font.as_ref().unwrap_or(ctx.font);
+        let size = self.size.unwrap_or(ctx.size);
+        let weight = self.weight.unwrap_or(ctx.weight);
+        let fill = self.fill.clone().unwrap_or_else(|| ctx.fill.clone());
+
+        if self.text.is_empty() {
+            return ShapedSpan {
+                width: 0.0,
+                ascent: 0.0,
+                descent: 0.0,
+                paths: Vec::new(),
+            };
+        }
+
+        // Shape with the baseline at `y = 0`, so the geometry is
+        // baseline-relative (ink above the baseline lands at negative y).
+        // The shaping is memoized on the font; only the (possibly
+        // animating) fill is re-attached per call.
+        let shaped = font.shaped_glyphs(weight, size, 0.0, &self.text);
+        let paths = shaped
+            .glyphs
+            .iter()
+            .map(|commands| (commands.clone(), fill.clone()))
+            .collect();
+        let (ascent, descent) = font.vertical_metrics(size);
+        ShapedSpan {
+            width: shaped.width,
+            ascent,
+            descent,
+            paths,
+        }
+    }
+}
+
+impl From<TextSpan> for Box<dyn Span> {
+    fn from(span: TextSpan) -> Self {
+        Box::new(span)
+    }
+}
+
+impl From<&str> for Box<dyn Span> {
+    fn from(text: &str) -> Self {
+        Box::new(TextSpan::plain(text))
+    }
+}
+
+impl From<String> for Box<dyn Span> {
+    fn from(text: String) -> Self {
+        Box::new(TextSpan::plain(text))
+    }
+}
+
+// Lets `Text::builder().span(TextSpan::builder()…)` accept a *complete*
+// builder with no explicit `.build()`, mirroring the buildless children
+// the `#[component]` macro emits for boxed components.
+impl<S: text_span_builder::IsComplete> From<TextSpanBuilder<S>> for Box<dyn Span> {
+    fn from(builder: TextSpanBuilder<S>) -> Self {
+        Box::new(builder.build())
+    }
+}
+
 /// A single line of styled text.
 ///
 /// `font`, `size`, `weight`, and `fill` are the defaults used by every
@@ -418,7 +497,7 @@ impl From<String> for TextSpan {
 #[derive(Clone, Keyable)]
 pub struct Text {
     #[children(each = span)]
-    pub spans: Vec<TextSpan>,
+    pub spans: Vec<Box<dyn Span>>,
     pub font: Arc<Font>,
     pub size: f32,
     #[builder(default)]
@@ -428,22 +507,6 @@ pub struct Text {
 }
 
 impl Text {
-    fn effective_fill(&self, span: &TextSpan) -> Paint {
-        span.fill.clone().unwrap_or_else(|| self.fill.clone())
-    }
-
-    fn effective_font<'a>(&'a self, span: &'a TextSpan) -> &'a Arc<Font> {
-        span.font.as_ref().unwrap_or(&self.font)
-    }
-
-    fn effective_size(&self, span: &TextSpan) -> f32 {
-        span.size.unwrap_or(self.size)
-    }
-
-    fn effective_weight(&self, span: &TextSpan) -> Weight {
-        span.weight.unwrap_or(self.weight)
-    }
-
     /// Vertical metrics of the base font at `self.size`, returned as
     /// `(ascent, line_height)`.
     fn line_metrics(&self) -> (f32, f32) {
@@ -458,64 +521,54 @@ impl Text {
         (ascent, line_height)
     }
 
-    /// Shapes each span and returns one [`ShapedSpan`] per input
-    /// [`TextSpan`], with paths in local (span-relative) coordinates so
-    /// each span graphic can be used as an independent placeable
-    /// component. The line height comes from the base font; spans that
-    /// override `font`/`size` may visually paint past the line box for
-    /// now.
-    fn shape_per_span(&self) -> Vec<ShapedSpan> {
-        let (ascent, _) = self.line_metrics();
-        let baseline_y = ascent;
+    /// Shapes every span against the base style and lays them out
+    /// left-to-right. Returns each span's start-x paired with its
+    /// [`ShapedSpan`] (paths still baseline-relative), the line baseline
+    /// `y`, and the line's intrinsic `(width, height)`.
+    ///
+    /// The line box grows to fit the tallest span: its baseline sits at
+    /// `max(base ascent, span ascents)` and it extends down to
+    /// `max(base depth, span descents)`, so a span that overrides
+    /// `font`/`size` — or a [`MathSpan`](crate::math::MathSpan) taller
+    /// than the surrounding text — is enclosed rather than clipped.
+    fn shape_line(&self) -> (Vec<(f32, ShapedSpan)>, f32, Vec2) {
+        let ctx = SpanContext {
+            font: &self.font,
+            size: self.size,
+            weight: self.weight,
+            fill: &self.fill,
+        };
+        let (base_ascent, base_line_height) = self.line_metrics();
+        let base_below = (base_line_height - base_ascent).max(0.0);
 
-        let mut out = Vec::with_capacity(self.spans.len());
+        let mut placed: Vec<(f32, ShapedSpan)> = Vec::with_capacity(self.spans.len());
         let mut pen_x: f32 = 0.0;
+        let mut line_ascent = base_ascent;
+        let mut line_below = base_below;
 
         for span in &self.spans {
-            let span_start_x = pen_x;
-            let mut span_paths: Vec<(Vec<PathCommand>, Paint)> = Vec::new();
-            let mut width = 0.0;
-
-            if !span.text.is_empty() {
-                let font = self.effective_font(span);
-                let size = self.effective_size(span);
-                let fill = self.effective_fill(span);
-                let weight = self.effective_weight(span);
-
-                // The shaped geometry (face build + shaping + per-glyph
-                // outlining) is memoized on the font; only the fill — which
-                // may animate frame to frame — is re-applied here.
-                let shaped = font.shaped_glyphs(weight, size, baseline_y, &span.text);
-                span_paths.reserve(shaped.glyphs.len());
-                for commands in &shaped.glyphs {
-                    span_paths.push((commands.clone(), fill.clone()));
-                }
-                width = shaped.width;
-                pen_x += shaped.width;
-            }
-
-            out.push(ShapedSpan {
-                start_x: span_start_x,
-                width,
-                paths: span_paths,
-            });
+            let shaped = span.shape(&ctx);
+            line_ascent = line_ascent.max(shaped.ascent);
+            line_below = line_below.max(shaped.descent);
+            let start_x = pen_x;
+            pen_x += shaped.width;
+            placed.push((start_x, shaped));
         }
 
-        out
+        let size = Vec2(pen_x, line_ascent + line_below);
+        (placed, line_ascent, size)
     }
 
     /// Shapes every span and returns `(glyph paths, intrinsic size)`,
     /// with paths in the line's global coordinates (all spans
-    /// concatenated left-to-right).
+    /// concatenated left-to-right and dropped onto the baseline).
     fn shape_and_layout(&self) -> (Vec<(Vec<PathCommand>, Paint)>, Vec2) {
-        let (_, line_height) = self.line_metrics();
-        let spans = self.shape_per_span();
-        let total_width = spans.last().map(|s| s.start_x + s.width).unwrap_or(0.0);
+        let (placed, baseline_y, size) = self.shape_line();
 
         let mut all_paths: Vec<(Vec<PathCommand>, Paint)> = Vec::new();
-        for span in spans {
-            let delta = Vec2(span.start_x, 0.0);
-            for (commands, fill) in span.paths {
+        for (start_x, shaped) in placed {
+            let delta = Vec2(start_x, baseline_y);
+            for (commands, fill) in shaped.paths {
                 let shifted: Vec<PathCommand> = commands
                     .into_iter()
                     .map(|c| translate_command(c, delta))
@@ -524,14 +577,14 @@ impl Text {
             }
         }
 
-        (all_paths, Vec2(total_width, line_height))
+        (all_paths, size)
     }
 
     /// Decompose the text into per-span graphics, each placed at the
     /// position where its first glyph would land in the line. The
-    /// returned `Vec` has exactly one entry per input
-    /// [`TextSpan`] (in the same order), and entries for empty spans
-    /// are zero-width placeholders so positional indexing matches.
+    /// returned `Vec` has exactly one entry per input span (in the same
+    /// order), and entries for empty spans are zero-width placeholders so
+    /// positional indexing matches.
     ///
     /// Useful for attaching per-span effects (transforms, drop shadows
     /// on the rasterized form, outlines, ...) by composing each
@@ -545,27 +598,32 @@ impl Text {
     ///     .build();
     /// ```
     pub fn into_spans(self) -> Vec<Positioned> {
-        let (_, line_height) = self.line_metrics();
-        self.shape_per_span()
+        let (placed, baseline_y, size) = self.shape_line();
+        let line_height = size.1;
+        placed
             .into_iter()
-            .map(|s| {
+            .map(|(start_x, shaped)| {
+                // Drop the span's baseline-relative paths onto the line
+                // baseline within the span's own box.
+                let paths = shaped
+                    .paths
+                    .into_iter()
+                    .map(|(commands, fill)| {
+                        let shifted: Vec<PathCommand> = commands
+                            .into_iter()
+                            .map(|c| translate_command(c, Vec2(0.0, baseline_y)))
+                            .collect();
+                        (shifted, fill)
+                    })
+                    .collect();
                 TextSpanGraphic {
-                    paths: s.paths,
-                    size: Vec2(s.width, line_height),
+                    paths,
+                    size: Vec2(shaped.width, line_height),
                 }
-                .place_at(Vec2(s.start_x, 0.0))
+                .place_at(Vec2(start_x, 0.0))
             })
             .collect()
     }
-}
-
-/// One shaped span produced by [`Text::shape_per_span`].
-struct ShapedSpan {
-    start_x: f32,
-    width: f32,
-    /// Paths in local (span-relative) coordinates: the span starts at
-    /// `x = 0` in its own space; the line's baseline is at `y = ascent`.
-    paths: Vec<(Vec<PathCommand>, Paint)>,
 }
 
 /// Translates every coordinate in a path command by `delta`. Used when
