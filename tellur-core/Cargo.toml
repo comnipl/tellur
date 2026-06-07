@@ -3,6 +3,19 @@ name = "tellur-core"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Inline LaTeX math spans (`MathSpan`). Pulls in the RaTeX math-layout
+# crates and the embedded KaTeX fonts (~500 KB). Off by default so callers
+# that never typeset math do not pay the dependency or binary-size cost.
+latex = [
+    "dep:ratex-parser",
+    "dep:ratex-layout",
+    "dep:ratex-types",
+    "dep:ratex-font",
+    "dep:ratex-font-loader",
+    "dep:ab_glyph",
+]
+
 [dependencies]
 bon = "3.9.1"
 bytes = "1.11.1"
@@ -17,3 +30,14 @@ rustybuzz = "0.20"
 symphonia = { version = "0.5.4", features = ["wav", "pcm"] }
 tellur-macros = { path = "../tellur-macros", version = "0.1.0" }
 thiserror = "2.0.18"
+
+# LaTeX math layout (RaTeX), gated behind the `latex` feature. `ratex-layout`
+# turns a parsed formula into a flat display list of glyphs + rules in em
+# units; `ratex-font-loader`'s `embed-fonts` ships the KaTeX TTFs so glyph
+# outlines resolve without a system font, and `ab_glyph` outlines them.
+ab_glyph = { version = "0.2", optional = true }
+ratex-font = { version = "0.1.11", optional = true }
+ratex-font-loader = { version = "0.1.11", optional = true, features = ["embed-fonts"] }
+ratex-layout = { version = "0.1.11", optional = true }
+ratex-parser = { version = "0.1.11", optional = true }
+ratex-types = { version = "0.1.11", optional = true }

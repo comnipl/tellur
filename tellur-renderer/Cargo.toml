@@ -3,6 +3,15 @@ name = "tellur-renderer"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Forwards to `tellur-core/latex` so examples (and downstream renderers) can
+# typeset inline LaTeX math spans.
+latex = ["tellur-core/latex"]
+
+[[example]]
+name = "math_to_png"
+required-features = ["latex"]
+
 [dependencies]
 bytemuck = "1.25.0"
 bytes = "1.11.1"
