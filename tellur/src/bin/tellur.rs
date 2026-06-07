@@ -12,6 +12,7 @@
 
 use std::env;
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -35,8 +36,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Scaffold a new timeline project as a member of the current workspace.
+    Create(CreateArgs),
     /// Build a timeline project's cdylib and serve its live preview.
     Live(LiveArgs),
+}
+
+#[derive(Args)]
+struct CreateArgs {
+    /// Name of the new timeline project (a valid crate name).
+    name: String,
+    /// Display title for the timeline (defaults to the project name).
+    #[arg(long)]
+    title: Option<String>,
 }
 
 #[derive(Args)]
@@ -76,6 +88,7 @@ struct LiveArgs {
 
 fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
+        Command::Create(args) => create(args),
         Command::Live(args) => live(args),
     }
 }
@@ -238,4 +251,172 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
         .split_once(['x', 'X'])
         .ok_or("resolution must be WIDTHxHEIGHT")?;
     Ok(Resolution::new(w.trim().parse()?, h.trim().parse()?))
+}
+
+fn create(args: CreateArgs) -> Result<(), Box<dyn Error>> {
+    validate_crate_name(&args.name)?;
+    let title = args.title.unwrap_or_else(|| args.name.clone());
+
+    let metadata = MetadataCommand::new().exec()?;
+    let workspace_root = metadata.workspace_root.as_std_path();
+
+    let project_dir = env::current_dir()?.join(&args.name);
+    if project_dir.exists() {
+        return Err(format!("`{}` already exists", project_dir.display()).into());
+    }
+    let member = relative_to(workspace_root, &project_dir).ok_or_else(|| {
+        format!(
+            "create the project inside the workspace at {}",
+            workspace_root.display()
+        )
+    })?;
+
+    fs::create_dir_all(project_dir.join("src"))?;
+    fs::write(project_dir.join("Cargo.toml"), project_manifest(&args.name))?;
+    fs::write(project_dir.join("src/lib.rs"), starter_scene(&title))?;
+
+    // If `tellur` is itself a member of this workspace, point the new project at
+    // it by path; otherwise leave a version requirement for the user to pin.
+    let tellur_path = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "tellur")
+        .and_then(|package| package.manifest_path.parent())
+        .and_then(|dir| relative_to(workspace_root, dir.as_std_path()));
+    register_member(workspace_root, &member, tellur_path.as_deref())?;
+
+    println!("created {}", project_dir.display());
+    println!("  cd {} && tellur live", args.name);
+    Ok(())
+}
+
+fn validate_crate_name(name: &str) -> Result<(), Box<dyn Error>> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    valid
+        .then_some(())
+        .ok_or_else(|| format!("`{name}` is not a valid crate name").into())
+}
+
+/// `target` expressed relative to `base` with `/` separators, or `None` when
+/// `target` is not inside `base`.
+fn relative_to(base: &Path, target: &Path) -> Option<String> {
+    let rel = target.strip_prefix(base).ok()?;
+    Some(
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
+fn project_manifest(name: &str) -> String {
+    format!(
+        "[package]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\
+         publish = false\n\
+         \n\
+         [lib]\n\
+         crate-type = [\"cdylib\"]\n\
+         \n\
+         [dependencies]\n\
+         tellur = {{ workspace = true }}\n"
+    )
+}
+
+fn starter_scene(title: &str) -> String {
+    format!(
+        r##"//! A starter tellur timeline. Edit `build` to design your scene, then run
+//! `tellur live` in this directory to preview it.
+
+use tellur::core::geometry::{{Constraints, Vec2}};
+use tellur::core::raster::{{PixelFormat, RasterComponent, RasterImage, Resolution}};
+use tellur::core::render_context::RenderContext;
+use tellur::core::timeline_component::Timed;
+use tellur::core::timeline_container::Timeline;
+use tellur::prelude::{{component, Keyable}};
+
+/// An opaque square. Replace this with your own components — see the tellur docs
+/// for shapes, text, effects, and `#[component(timeline)]` with `#[clock]` for
+/// animation.
+#[component(raster)]
+#[derive(Clone, Keyable)]
+pub struct Block {{
+    pub size: f32,
+}}
+
+impl RasterComponent for Block {{
+    fn layout(&self, constraints: Constraints) -> Vec2 {{
+        constraints.constrain(Vec2(self.size, self.size))
+    }}
+
+    fn render(&self, size: Vec2, _target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {{
+        let w = (size.0 as u32).max(1);
+        let h = (size.1 as u32).max(1);
+        // Opaque white pixels (RGBA).
+        RasterImage::cpu(w, h, PixelFormat::Rgba8, vec![255u8; (w * h * 4) as usize])
+    }}
+}}
+
+fn build() -> Timeline {{
+    Timeline::builder()
+        .child(Block::builder().size(200.0).build().at(0.0..3.0))
+        .build()
+}}
+
+tellur::export_timeline!("main", "{title}", build, canvas = (1920.0, 1080.0));
+"##
+    )
+}
+
+/// Registers `member` in the workspace root's `[workspace].members` and ensures
+/// `[workspace.dependencies].tellur` exists, preserving the file's formatting.
+fn register_member(
+    workspace_root: &Path,
+    member: &str,
+    tellur_path: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let mut doc = fs::read_to_string(&manifest_path)?.parse::<toml_edit::DocumentMut>()?;
+
+    let workspace = doc["workspace"]
+        .as_table_mut()
+        .ok_or("workspace root Cargo.toml has no [workspace] table")?;
+
+    let members = workspace
+        .entry("members")
+        .or_insert(toml_edit::value(toml_edit::Array::new()))
+        .as_array_mut()
+        .ok_or("workspace.members is not an array")?;
+    if !members.iter().any(|value| value.as_str() == Some(member)) {
+        members.push(member);
+    }
+
+    let dependencies = workspace
+        .entry("dependencies")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("workspace.dependencies is not a table")?;
+    if !dependencies.contains_key("tellur") {
+        let value = match tellur_path {
+            Some(path) => {
+                let mut table = toml_edit::InlineTable::new();
+                table.insert("path", path.into());
+                toml_edit::value(table)
+            }
+            None => toml_edit::value("0.1"),
+        };
+        dependencies.insert("tellur", value);
+    }
+
+    fs::write(&manifest_path, doc.to_string())?;
+    Ok(())
 }
