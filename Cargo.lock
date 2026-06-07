@@ -1340,6 +1340,7 @@ name = "tellur-live"
 version = "0.1.0"
 dependencies = [
  "tellur-core",
+ "tellur-plugin",
  "tellur-renderer",
 ]
 
@@ -1350,6 +1351,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tellur-plugin"
+version = "0.1.0"
+dependencies = [
+ "tellur-core",
 ]
 
 [[package]]

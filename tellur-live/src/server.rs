@@ -20,7 +20,8 @@ use tellur_renderer::CachingRenderContext;
 use crate::build_watch::{
     run_release_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot, CompileState,
 };
-use crate::plugin::{HotReloadPlugin, TimelineInfo};
+use crate::plugin::HotReloadPlugin;
+use tellur_plugin::TimelineInfo;
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
