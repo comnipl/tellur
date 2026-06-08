@@ -30,7 +30,12 @@ impl RasterComponent for Dot {
     fn render(&self, size: Vec2, _target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
         let w = (size.0 as u32).max(1);
         let h = (size.1 as u32).max(1);
-        RasterImage::cpu(w, h, PixelFormat::Rgba8, vec![0u8; (w * h * 4) as usize])
+        RasterImage::cpu(
+            w,
+            h,
+            PixelFormat::Rgba8,
+            vec![0u8; w as usize * h as usize * 4],
+        )
     }
 }
 

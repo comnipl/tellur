@@ -188,39 +188,37 @@ fn resolve_project<'a>(
 
     if let Some(name) = name {
         return members
-            .into_iter()
+            .iter()
             .find(|package| package.name == name)
+            .copied()
             .ok_or_else(|| {
                 format!(
                     "no workspace member named `{name}`; members: {}",
-                    member_names(&metadata.workspace_packages())
+                    member_names(&members)
                 )
                 .into()
             });
     }
 
+    // The deepest member directory that contains the cwd wins (nested members).
     let cwd = env::current_dir()?;
-    let mut best: Option<(&Package, usize)> = None;
-    for package in &members {
-        let Some(dir) = package.manifest_path.parent() else {
-            continue;
-        };
-        let dir = dir.as_std_path();
-        if cwd.starts_with(dir) {
-            let depth = dir.components().count();
-            if best.map(|(_, d)| depth > d).unwrap_or(true) {
-                best = Some((package, depth));
-            }
-        }
-    }
-    best.map(|(package, _)| package).ok_or_else(|| {
-        format!(
-            "could not infer the project from the current directory; pass --project <name>. \
-             members: {}",
-            member_names(&members)
-        )
-        .into()
-    })
+    members
+        .iter()
+        .filter_map(|package| {
+            let dir = package.manifest_path.parent()?.as_std_path();
+            cwd.starts_with(dir)
+                .then(|| (*package, dir.components().count()))
+        })
+        .max_by_key(|(_, depth)| *depth)
+        .map(|(package, _)| package)
+        .ok_or_else(|| {
+            format!(
+                "could not infer the project from the current directory; pass --project <name>. \
+                 members: {}",
+                member_names(&members)
+            )
+            .into()
+        })
 }
 
 /// The name of the package's `cdylib` library target, if it has one.
@@ -228,7 +226,10 @@ fn cdylib_target_name(package: &Package) -> Option<String> {
     package
         .targets
         .iter()
-        .find(|target| target.crate_types.iter().any(|kind| kind == "cdylib"))
+        // Only the `lib` target produces the plugin `cdylib`; an `[[example]]`
+        // declared with `crate-type = ["cdylib"]` also carries `cdylib` in
+        // `crate_types` but has `kind = ["example"]`, so match on the lib kind.
+        .find(|target| target.is_lib() && target.crate_types.iter().any(|kind| kind == "cdylib"))
         .map(|target| target.name.clone())
 }
 
@@ -270,7 +271,11 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
     let (w, h) = s
         .split_once(['x', 'X'])
         .ok_or("resolution must be WIDTHxHEIGHT")?;
-    Ok(Resolution::new(w.trim().parse()?, h.trim().parse()?))
+    let (w, h): (u32, u32) = (w.trim().parse()?, h.trim().parse()?);
+    if w == 0 || h == 0 {
+        return Err("resolution width and height must be non-zero".into());
+    }
+    Ok(Resolution::new(w, h))
 }
 
 fn create(args: CreateArgs) -> Result<(), Box<dyn Error>> {
@@ -382,7 +387,12 @@ impl RasterComponent for Block {{
         let w = (size.0 as u32).max(1);
         let h = (size.1 as u32).max(1);
         // Opaque white pixels (RGBA).
-        RasterImage::cpu(w, h, PixelFormat::Rgba8, vec![255u8; (w * h * 4) as usize])
+        RasterImage::cpu(
+            w,
+            h,
+            PixelFormat::Rgba8,
+            vec![255u8; w as usize * h as usize * 4],
+        )
     }}
 }}
 
@@ -580,12 +590,22 @@ fn rustc_fingerprint() -> Result<String, Box<dyn Error>> {
         .arg("-vV")
         .output()
         .map_err(|e| format!("failed to run rustc -vV: {e}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout)
+    if !output.status.success() {
+        return Err(format!("rustc -vV failed with {}", output.status).into());
+    }
+    // An empty fingerprint would collapse distinct toolchains onto one cache
+    // entry, so a stale host could be handed off for a mismatched ABI — fail
+    // loudly instead.
+    let fingerprint = String::from_utf8_lossy(&output.stdout)
         .lines()
         .next()
         .unwrap_or_default()
         .trim()
-        .to_owned())
+        .to_owned();
+    if fingerprint.is_empty() {
+        return Err("rustc -vV produced no version line to fingerprint the toolchain".into());
+    }
+    Ok(fingerprint)
 }
 
 fn host_cache_dir() -> Result<PathBuf, Box<dyn Error>> {

@@ -136,7 +136,9 @@ fn watch_loop(options: AutoBuildOptions, state: CompileState) {
     }
 }
 
-fn run_build(options: &AutoBuildOptions) -> Result<(), String> {
+/// The `cargo build` invocation these options describe. Single source of truth
+/// so the watcher, the one-shot build, and the server banner all agree.
+fn build_command(options: &AutoBuildOptions) -> Command {
     let mut command = Command::new("cargo");
     command.arg("build");
     if options.release {
@@ -152,6 +154,16 @@ fn run_build(options: &AutoBuildOptions) -> Result<(), String> {
     if let Some(example) = &options.example {
         command.arg("--example").arg(example);
     }
+    command
+}
+
+/// A human-readable rendering of the `cargo build` these options will run.
+pub fn describe_build(options: &AutoBuildOptions) -> String {
+    describe_command(&build_command(options))
+}
+
+fn run_build(options: &AutoBuildOptions) -> Result<(), String> {
+    let mut command = build_command(options);
 
     let description = describe_command(&command);
     eprintln!("{description}");
