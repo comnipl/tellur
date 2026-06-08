@@ -11,11 +11,12 @@
 //! path-qualified here: `shapes::Rectangle` / `shapes::Circle` and the
 //! `Aabb` alias for `geometry::Rect`.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
 
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
+use tellur_core::easing;
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Rect as Aabb, Transform, Vec2};
 use tellur_core::phase::Phase;
@@ -114,52 +115,27 @@ pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
 // --- easing functions ---
 
 pub fn ease_out_cubic(p: Phase) -> f32 {
-    1.0 - (1.0 - p.get()).powi(3)
+    easing::out_cubic(p).get()
 }
 
 pub fn ease_out_quint(p: Phase) -> f32 {
-    1.0 - (1.0 - p.get()).powi(5)
+    easing::out_quint(p).get()
 }
 
 pub fn ease_in_out_quint(p: Phase) -> f32 {
-    let x = p.get();
-    if x < 0.5 {
-        16.0 * x.powi(5)
-    } else {
-        1.0 - (-2.0 * x + 2.0).powi(5) * 0.5
-    }
+    easing::in_out_quint(p).get()
 }
 
 pub fn ease_in_out_expo(p: Phase) -> f32 {
-    let x = p.get();
-    if x <= 0.0 {
-        0.0
-    } else if x >= 1.0 {
-        1.0
-    } else if x < 0.5 {
-        2.0_f32.powf(20.0 * x - 10.0) * 0.5
-    } else {
-        (2.0 - 2.0_f32.powf(-20.0 * x + 10.0)) * 0.5
-    }
+    easing::in_out_expo(p).get()
 }
 
 pub fn ease_in_back(p: Phase) -> f32 {
-    let x = p.get();
-    let c1 = 1.70158;
-    let c3 = c1 + 1.0;
-    c3 * x.powi(3) - c1 * x.powi(2)
+    easing::in_back(p)
 }
 
 pub fn ease_out_elastic(p: Phase) -> f32 {
-    let x = p.get();
-    if x <= 0.0 {
-        0.0
-    } else if x >= 1.0 {
-        1.0
-    } else {
-        let c4 = (2.0 * PI) / 3.0;
-        2.0_f32.powf(-10.0 * x) * ((x * 10.0 - 0.75) * c4).sin() + 1.0
-    }
+    easing::out_elastic(p)
 }
 
 pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {

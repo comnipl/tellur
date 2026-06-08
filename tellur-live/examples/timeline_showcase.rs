@@ -25,8 +25,10 @@ use std::f32::consts::{PI, TAU};
 
 use tellur_core::builder::{RasterEffect, VectorBuilderPlacement};
 use tellur_core::color::Color;
+use tellur_core::easing;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::{Layer, VectorLayer};
+use tellur_core::phase::Phase;
 use tellur_core::placement::raster::Positioned as RasterPositioned;
 use tellur_core::placement::{Positioned, RasterPlacement};
 use tellur_core::shapes::{Circle, Rectangle};
@@ -87,14 +89,12 @@ fn fade(c: Color, a: f32) -> Color {
 
 /// Smoothstep easing for `[0,1]` progress (eases in AND out).
 fn ease(p: f32) -> f32 {
-    let p = p.clamp(0.0, 1.0);
-    p * p * (3.0 - 2.0 * p)
+    easing::smoothstep(Phase::saturating(p)).get()
 }
 
 /// Cubic ease-out: fast start, gentle settle — a satisfying "snap into place".
 fn ease_out(p: f32) -> f32 {
-    let p = p.clamp(0.0, 1.0);
-    1.0 - (1.0 - p).powi(3)
+    easing::out_cubic(Phase::saturating(p)).get()
 }
 
 /// The per-chapter enter/exit transition, shared by every windowed element so
