@@ -39,7 +39,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(ring_r)
-                .stroke(alpha(p.cyan, ring_alpha * 0.9))
+                .stroke(p.cyan.with_alpha(ring_alpha * 0.9))
                 .stroke_width(3.5)
         }))
         // Phase 2: 8 satellites slide along their angular rays toward center.
@@ -59,7 +59,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             Circle::builder()
                 .center(pos)
                 .radius(size)
-                .fill(alpha(color, sat_alpha))
+                .fill(color.with_alpha(sat_alpha))
         }))
         // Phase 3: "memory" rings — ghosts of where the contracting ring used
         // to be. Three after-images spawn as the ring sweeps inward, each
@@ -78,7 +78,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Circle::builder()
                             .center(Vec2(CX, CY))
                             .radius(r)
-                            .stroke(alpha(p.cyan, life * ghost * 0.32))
+                            .stroke(p.cyan.with_alpha(life * ghost * 0.32))
                             .stroke_width(1.8)
                     })
                 })
@@ -93,7 +93,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(46.0 + sing * 20.0)
-                    .fill(alpha(p.paper, sing * life * 0.95))
+                    .fill(p.paper.with_alpha(sing * life * 0.95))
             })
         })
         // 16 short radial shards — emit-then-fade exactly at the singularity.
@@ -115,7 +115,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .center(mid)
                             .size(Vec2(2.0, length))
                             .angle(a + PI_HALF)
-                            .color(alpha(color, life * shard_life * 0.9))
+                            .color(color.with_alpha(life * shard_life * 0.9))
                             .opacity(1.0)
                             .scale(Vec2(1.0, 1.0))
                     })
@@ -137,7 +137,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(pulse_r)
-                    .stroke(alpha(p.cyan, life * pulse_fade * 0.9))
+                    .stroke(p.cyan.with_alpha(life * pulse_fade * 0.9))
                     .stroke_width(3.5)
             })
         })
@@ -150,7 +150,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(pulse2_r)
-                    .stroke(alpha(p.pink, life * pulse2_fade * 0.55))
+                    .stroke(p.pink.with_alpha(life * pulse2_fade * 0.55))
                     .stroke_width(2.0)
             })
         })
@@ -173,7 +173,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         .maybe_child({
             let tick_in = time.phase(6.85, 7.15).ease_out_cubic().get();
             (tick_in > 0.0).then(|| {
-                let tick_alpha = alpha(p.paper, life * 0.5);
+                let tick_alpha = p.paper.with_alpha(life * 0.5);
                 let arm_len = 22.0 * tick_in;
                 let offset = 96.0;
                 Fragment::builder()
@@ -233,14 +233,14 @@ fn CentralMark(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(7.5 * comp_in * breath)
-                .fill(alpha(p.cyan, life)),
+                .fill(p.cyan.with_alpha(life)),
         )
         // (b) pink hairline collar one step out from the hub.
         .child(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(14.0 * comp_in)
-                .stroke(alpha(p.pink, life * 0.9))
+                .stroke(p.pink.with_alpha(life * 0.9))
                 .stroke_width(1.6),
         )
         // (c) four axis rays at the cardinals, rotating with the cluster.
@@ -257,7 +257,7 @@ fn CentralMark(
                         .center(mid)
                         .size(Vec2(1.5, length))
                         .angle(a + PI_HALF)
-                        .color(alpha(p.paper, life * 0.55))
+                        .color(p.paper.with_alpha(life * 0.55))
                         .opacity(1.0)
                         .scale(Vec2(1.0, 1.0))
                 })
@@ -272,7 +272,7 @@ fn CentralMark(
                     Circle::builder()
                         .center(Vec2(CX, CY))
                         .radius(field_r * field_in)
-                        .stroke(alpha(p.paper, life * 0.25))
+                        .stroke(p.paper.with_alpha(life * 0.25))
                         .stroke_width(1.0),
                 )
                 .children((0..12).map(move |k| {
@@ -286,7 +286,7 @@ fn CentralMark(
                         .center(mid)
                         .size(Vec2(if major { 2.0 } else { 1.2 }, 8.0 * field_in))
                         .angle(a + PI_HALF)
-                        .color(alpha(p.paper, life * if major { 0.6 } else { 0.35 }))
+                        .color(p.paper.with_alpha(life * if major { 0.6 } else { 0.35 }))
                         .opacity(1.0)
                         .scale(Vec2(1.0, 1.0))
                 }))
@@ -303,7 +303,7 @@ fn CentralMark(
                             Circle::builder()
                                 .center(orbit_pos)
                                 .radius(3.0 * orbit_in)
-                                .fill(alpha(p.cyan, life * orbit_in)),
+                                .fill(p.cyan.with_alpha(life * orbit_in)),
                         )
                         // Tiny leading whisker — a 1px hairline behind the dot.
                         .children((1..=trail_count).map(move |j| {
@@ -314,7 +314,7 @@ fn CentralMark(
                             Circle::builder()
                                 .center(pos)
                                 .radius(1.5 * orbit_in)
-                                .fill(alpha(p.cyan, life * orbit_in * fade * 0.5))
+                                .fill(p.cyan.with_alpha(life * orbit_in * fade * 0.5))
                         }))
                         .build()
                 }))

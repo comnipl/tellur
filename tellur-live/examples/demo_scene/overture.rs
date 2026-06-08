@@ -33,7 +33,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
     // a center ring + gap dashes) plus four small corner dots, all painted
     // in the bg color so they read as "cut into the paper". They rotate
     // with the square via the same `spin`.
-    let mark_color = alpha(p.bg, hero_life * 0.55);
+    let mark_color = p.bg.with_alpha(hero_life * 0.55);
     let cross_arm = 38.0 * s_clamped;
     let arm_inner_gap = 8.0 * s_clamped;
     let arm_outer = cross_arm;
@@ -112,7 +112,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                                                 y_center - cap_h * 0.5,
                                             ))
                                             .size(Vec2(cap_w, cap_h * cap_pop))
-                                            .color(alpha(color, alpha_factor))
+                                            .color(color.with_alpha(alpha_factor))
                                     })
                                 })
                                 .into_iter()
@@ -135,7 +135,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 .center(Vec2(CX, CY))
                 .size(Vec2(420.0, 420.0))
                 .angle(-spin * 0.4)
-                .color(alpha(p.pink, hero_life * 0.82))
+                .color(p.pink.with_alpha(hero_life * 0.82))
                 .opacity(1.0)
                 .scale(Vec2(s_clamped, s_clamped))
                 .width(3.0),
@@ -220,7 +220,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .center(mid)
                     .size(Vec2(1.5, length))
                     .angle(a + PI * 0.5)
-                    .color(alpha(p.paper, hero_life * 0.45))
+                    .color(p.paper.with_alpha(hero_life * 0.45))
                     .opacity(1.0)
                     .scale(Vec2(1.0, 1.0))
             });
@@ -255,7 +255,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .anchor(anchor)
                     .text(format!("0{}", s + 1))
                     .size(10.0)
-                    .color(alpha(p.paper, label_alpha.clamp(0.0, 1.0)))
+                    .color(p.paper.with_alpha(label_alpha.clamp(0.0, 1.0)))
                     .weight(Weight::NORMAL)
             });
 
@@ -265,7 +265,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     Circle::builder()
                         .center(pos)
                         .radius(6.0 * hero_life)
-                        .fill(alpha(if s % 2 == 0 { p.pink } else { p.cyan }, hero_life)),
+                        .fill((if s % 2 == 0 { p.pink } else { p.cyan }).with_alpha(hero_life)),
                 )
                 .maybe_child(tag)
                 .build()
@@ -286,7 +286,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             Rect::builder()
                 .position(Vec2(0.0, y - 3.0))
                 .size(Vec2(SCENE_SIZE.0, 6.0))
-                .color(alpha(p.pink, visibility * 0.88))
+                .color(p.pink.with_alpha(visibility * 0.88))
         }))
         .build()
 }
@@ -304,19 +304,19 @@ fn LengthTag(palette: Palette, hero_life: f32, tag_in: f32) -> impl VectorCompon
             Rect::builder()
                 .position(Vec2(CX - half_span - 1.0, y - tick_h * 0.5))
                 .size(Vec2(2.0, tick_h))
-                .color(alpha(p.paper, hero_life * tag_in * 0.65)),
+                .color(p.paper.with_alpha(hero_life * tag_in * 0.65)),
         )
         .child(
             Rect::builder()
                 .position(Vec2(CX + half_span - 1.0, y - tick_h * 0.5))
                 .size(Vec2(2.0, tick_h))
-                .color(alpha(p.paper, hero_life * tag_in * 0.65)),
+                .color(p.paper.with_alpha(hero_life * tag_in * 0.65)),
         )
         .child(
             Rect::builder()
                 .position(Vec2(CX - half_span * tag_in, y - 1.0))
                 .size(Vec2(half_span * 2.0 * tag_in, 2.0))
-                .color(alpha(p.paper, hero_life * tag_in * 0.55)),
+                .color(p.paper.with_alpha(hero_life * tag_in * 0.55)),
         )
         .child(
             Label::builder()
@@ -324,7 +324,7 @@ fn LengthTag(palette: Palette, hero_life: f32, tag_in: f32) -> impl VectorCompon
                 .anchor(Anchor::TOP_CENTER)
                 .text("L = 280 PX")
                 .size(12.0)
-                .color(alpha(p.paper, hero_life * tag_in * 0.75))
+                .color(p.paper.with_alpha(hero_life * tag_in * 0.75))
                 .weight(Weight::NORMAL),
         )
         .build()

@@ -61,7 +61,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Circle::builder()
                             .center(Vec2(cx, cy))
                             .radius(14.0 * breathe * s)
-                            .fill(alpha(color, life * 0.92)),
+                            .fill(color.with_alpha(life * 0.92)),
                     )
                     // The four corner dots get an accent outline ring — that
                     // small hierarchy cue costs nothing and pulls the eye to
@@ -75,7 +75,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             Circle::builder()
                                 .center(Vec2(cx, cy))
                                 .radius(26.0 * ring_in * s)
-                                .stroke(alpha(color, life * 0.55))
+                                .stroke(color.with_alpha(life * 0.55))
                                 .stroke_width(2.0)
                         }),
                     )
@@ -100,7 +100,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         .anchor(Anchor::CENTER_RIGHT)
                         .text(format!("R{:02}", r))
                         .size(12.0)
-                        .color(alpha(p.paper, row_alpha))
+                        .color(p.paper.with_alpha(row_alpha))
                         .weight(Weight::NORMAL)
                 }))
                 .build()
@@ -125,7 +125,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         .anchor(Anchor::BOTTOM_CENTER)
                         .text(format!("C{:02}", c))
                         .size(12.0)
-                        .color(alpha(p.paper, col_alpha))
+                        .color(p.paper.with_alpha(col_alpha))
                         .weight(Weight::NORMAL)
                 }))
                 .build()
@@ -165,29 +165,29 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
             Rect::builder()
                 .position(Vec2(x - trail_w, top_y))
                 .size(Vec2(trail_w, height))
-                .color(alpha(p.pink, visibility * life * 0.14)),
+                .color(p.pink.with_alpha(visibility * life * 0.14)),
         )
         // Inner brighter trail.
         .child(
             Rect::builder()
                 .position(Vec2(x - inner_trail_w, top_y))
                 .size(Vec2(inner_trail_w, height))
-                .color(alpha(p.pink, visibility * life * 0.22)),
+                .color(p.pink.with_alpha(visibility * life * 0.22)),
         )
         // The crisp leading line.
         .child(
             Rect::builder()
                 .position(Vec2(x - 2.0, top_y))
                 .size(Vec2(4.0, height))
-                .color(alpha(p.pink, visibility * life * 0.95)),
+                .color(p.pink.with_alpha(visibility * life * 0.95)),
         )
         // Bright head dot at the top of the sweep — like a phosphor pixel.
         .child(
             Circle::builder()
                 .center(Vec2(x, top_y))
                 .radius(7.0)
-                .fill(alpha(p.paper, visibility * life))
-                .stroke(alpha(p.pink, visibility * life))
+                .fill(p.paper.with_alpha(visibility * life))
+                .stroke(p.pink.with_alpha(visibility * life))
                 .stroke_width(2.0),
         )
         // Mirror head dot at the bottom for symmetry.
@@ -195,8 +195,8 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
             Circle::builder()
                 .center(Vec2(x, bottom_y))
                 .radius(7.0)
-                .fill(alpha(p.paper, visibility * life))
-                .stroke(alpha(p.pink, visibility * life))
+                .fill(p.paper.with_alpha(visibility * life))
+                .stroke(p.pink.with_alpha(visibility * life))
                 .stroke_width(2.0),
         )
         // Top tag.
@@ -206,7 +206,7 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
                 .anchor(Anchor::BOTTOM_LEFT)
                 .text("SCAN →")
                 .size(14.0)
-                .color(alpha(p.pink, visibility * life))
+                .color(p.pink.with_alpha(visibility * life))
                 .weight(Weight::BOLD),
         )
         // Bottom percentage readout — "treats this as data" cue.
@@ -216,7 +216,7 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
                 .anchor(Anchor::TOP_LEFT)
                 .text(pct_text)
                 .size(13.0)
-                .color(alpha(p.paper, visibility * life * 0.95))
+                .color(p.paper.with_alpha(visibility * life * 0.95))
                 .weight(Weight::BOLD),
         )
         .build()

@@ -67,7 +67,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                             .anchor(Anchor::BOTTOM_CENTER)
                             .text("TELLUR")
                             .size(42.0)
-                            .color(alpha(p.paper, boot_life * 0.95))
+                            .color(p.paper.with_alpha(boot_life * 0.95))
                             .weight(Weight::BOLD),
                     )
                     .child(
@@ -76,7 +76,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                             .anchor(Anchor::TOP_CENTER)
                             .text("00:00:00.000 · INIT")
                             .size(13.0)
-                            .color(alpha(p.paper, boot_life * 0.7))
+                            .color(p.paper.with_alpha(boot_life * 0.7))
                             .weight(Weight::NORMAL),
                     )
                     // A tiny pink underline dash to the right of "INIT".
@@ -84,7 +84,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                         Rect::builder()
                             .position(Vec2(CX + 88.0, CY + 18.0))
                             .size(Vec2(20.0 * boot_in, 2.0))
-                            .color(alpha(p.pink, boot_life)),
+                            .color(p.pink.with_alpha(boot_life)),
                     )
                     .build()
             })
@@ -105,7 +105,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                 Rect::builder()
                     .position(Vec2::ZERO)
                     .size(SCENE_SIZE)
-                    .color(alpha(p.paper, flash * 0.22))
+                    .color(p.paper.with_alpha(flash * 0.22))
             })
         })
         // Exit fade — gentle quint ease into the bg color. The `fade` phase
@@ -116,7 +116,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                 Rect::builder()
                     .position(Vec2::ZERO)
                     .size(SCENE_SIZE)
-                    .color(alpha(p.bg, fade))
+                    .color(p.bg.with_alpha(fade))
             })
         })
         .build()

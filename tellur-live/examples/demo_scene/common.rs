@@ -48,10 +48,6 @@ pub struct Palette {
     pub cyan: Color,
 }
 
-pub fn alpha(color: Color, value: f32) -> Color {
-    color.with_alpha(value)
-}
-
 pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
     from + (to - from) * p
 }

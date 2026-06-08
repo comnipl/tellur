@@ -48,7 +48,7 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
             Rect::builder()
                 .position(Vec2(lerp(-1920.0, 0.0, reveal), y))
                 .size(Vec2(1920.0, 1.0))
-                .color(alpha(p.paper, 0.022 * reveal))
+                .color(p.paper.with_alpha(0.022 * reveal))
         }))
         // Two extremely dim "field boundary" rings — just inside the HUD frame
         // and just outside it. They suggest "this scene happens inside a
@@ -63,7 +63,7 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
                         Circle::builder()
                             .center(Vec2(CX, CY))
                             .radius(r * ring_reveal)
-                            .stroke(alpha(p.paper, 0.05 * a_mult))
+                            .stroke(p.paper.with_alpha(0.05 * a_mult))
                             .stroke_width(1.0)
                     })
                     .collect::<Fragment>()
@@ -85,7 +85,7 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
                 .center(mid)
                 .size(Vec2(if major { 2.0 } else { 1.4 }, length * reveal))
                 .angle(a + PI * 0.5)
-                .color(alpha(p.paper, if major { 0.16 } else { 0.1 }))
+                .color(p.paper.with_alpha(if major { 0.16 } else { 0.1 }))
                 .opacity(1.0)
                 .scale(Vec2(1.0, 1.0))
         }))

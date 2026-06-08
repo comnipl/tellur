@@ -53,7 +53,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Rect::builder()
                     .position(Vec2(0.0, y - 3.0))
                     .size(Vec2(SCENE_SIZE.0, 6.0))
-                    .color(alpha(p.cyan, visibility * 0.88))
+                    .color(p.cyan.with_alpha(visibility * 0.88))
             })
         })
         // Center reticle: crosshair arms + cyan dot. Reads as "this is the
@@ -62,26 +62,26 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             Rect::builder()
                 .position(Vec2(CX - cross_arm, CY - 1.0))
                 .size(Vec2(cross_arm * 2.0, 2.0))
-                .color(alpha(p.paper, life * 0.7)),
+                .color(p.paper.with_alpha(life * 0.7)),
         )
         .child(
             Rect::builder()
                 .position(Vec2(CX - 1.0, CY - cross_arm))
                 .size(Vec2(2.0, cross_arm * 2.0))
-                .color(alpha(p.paper, life * 0.7)),
+                .color(p.paper.with_alpha(life * 0.7)),
         )
         .child(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(9.0 * reticle)
-                .fill(alpha(p.cyan, life)),
+                .fill(p.cyan.with_alpha(life)),
         )
         // Single hero ring.
         .child(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(ring_r)
-                .stroke(alpha(p.cyan, life * 0.75))
+                .stroke(p.cyan.with_alpha(life * 0.75))
                 .stroke_width(3.5),
         )
         // Inner secondary reticle — a thinner cyan ring at ~120 + 4 cardinal
@@ -95,7 +95,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Circle::builder()
                             .center(Vec2(CX, CY))
                             .radius(inner_r2 * inner_ring_in)
-                            .stroke(alpha(p.cyan, life * 0.35))
+                            .stroke(p.cyan.with_alpha(life * 0.35))
                             .stroke_width(1.5),
                     )
                     .children((0..4).map(move |i| {
@@ -106,7 +106,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .center(mid)
                             .size(Vec2(2.0, 10.0 * inner_ring_in))
                             .angle(a + PI * 0.5)
-                            .color(alpha(p.paper, life * 0.45))
+                            .color(p.paper.with_alpha(life * 0.45))
                             .opacity(1.0)
                             .scale(Vec2(1.0, 1.0))
                     }))
@@ -136,7 +136,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .center(mid)
                     .size(Vec2(if major { 3.0 } else { 2.0 }, length * tk))
                     .angle(a + PI * 0.5)
-                    .color(alpha(p.paper, life * if major { 0.85 } else { 0.55 }))
+                    .color(p.paper.with_alpha(life * if major { 0.85 } else { 0.55 }))
                     .opacity(1.0)
                     .scale(Vec2(1.0, 1.0))
             });
@@ -160,7 +160,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .anchor(Anchor::CENTER)
                             .text(angle_label)
                             .size(11.0)
-                            .color(alpha(p.paper, label_alpha * 0.7))
+                            .color(p.paper.with_alpha(label_alpha * 0.7))
                             .weight(Weight::NORMAL)
                     })
                 })
@@ -214,7 +214,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         .anchor(anchor)
                         .text(format!("0{}", i + 1))
                         .size(10.0)
-                        .color(alpha(p.paper, life * sat_label_in * 0.55))
+                        .color(p.paper.with_alpha(life * sat_label_in * 0.55))
                         .weight(Weight::NORMAL)
                 });
 
@@ -223,7 +223,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Circle::builder()
                             .center(pos)
                             .radius(12.0 * sp)
-                            .fill(alpha(color, life)),
+                            .fill(color.with_alpha(life)),
                     )
                     .maybe_child(tag)
                     .build()
@@ -253,7 +253,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .center(mid)
                             .size(Vec2(4.0, r))
                             .angle(a + PI * 0.5)
-                            .color(alpha(p.pink, life * sweep_life * fade * 0.6))
+                            .color(p.pink.with_alpha(life * sweep_life * fade * 0.6))
                             .opacity(1.0)
                             .scale(Vec2(1.0, 1.0))
                     })
@@ -271,7 +271,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Rect::builder()
                             .position(Vec2(CX + ring_r, CY - 1.0))
                             .size(Vec2(28.0, 2.0))
-                            .color(alpha(p.paper, life * annot * 0.7)),
+                            .color(p.paper.with_alpha(life * annot * 0.7)),
                     )
                     .child(
                         Label::builder()
@@ -279,7 +279,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .anchor(Anchor::CENTER_LEFT)
                             .text("R = 300 PX")
                             .size(13.0)
-                            .color(alpha(p.paper, life * annot * 0.85))
+                            .color(p.paper.with_alpha(life * annot * 0.85))
                             .weight(Weight::NORMAL),
                     )
                     // Sub-label one line down (smaller, dimmer).
@@ -289,7 +289,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .anchor(Anchor::CENTER_LEFT)
                             .text("NODES = 08")
                             .size(11.0)
-                            .color(alpha(p.paper, life * annot * 0.55))
+                            .color(p.paper.with_alpha(life * annot * 0.55))
                             .weight(Weight::NORMAL),
                     )
                     .build()
@@ -311,7 +311,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         Rect::builder()
                             .position(Vec2(CX - ring_r - 28.0, CY - 1.0))
                             .size(Vec2(28.0, 2.0))
-                            .color(alpha(p.paper, life * theta_in * 0.7)),
+                            .color(p.paper.with_alpha(life * theta_in * 0.7)),
                     )
                     .child(
                         Label::builder()
@@ -319,7 +319,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .anchor(Anchor::CENTER_RIGHT)
                             .text(format!("θ = {:03}°", deg))
                             .size(13.0)
-                            .color(alpha(p.paper, life * theta_in * 0.85))
+                            .color(p.paper.with_alpha(life * theta_in * 0.85))
                             .weight(Weight::NORMAL),
                     )
                     .build()
@@ -344,7 +344,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .center(mid)
                             .size(Vec2(2.5, length))
                             .angle(a + PI * 0.5)
-                            .color(alpha(color, life * burst_life * 0.9))
+                            .color(color.with_alpha(life * burst_life * 0.9))
                             .opacity(1.0)
                             .scale(Vec2(1.0, 1.0))
                     })

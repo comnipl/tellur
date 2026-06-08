@@ -127,7 +127,7 @@ impl Hud {
                             .ease_out_cubic()
                             .get();
                         let len = bracket_len * pop;
-                        let color = alpha(p.paper, 0.55 * life);
+                        let color = p.paper.with_alpha(0.55 * life);
                         let hx = if dx > 0.0 { ax } else { ax - len };
                         let vy = if dy > 0.0 { ay } else { ay - len };
                         Fragment::builder()
@@ -153,7 +153,7 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_LEFT)
                     .text("TELLUR")
                     .size(20.0)
-                    .color(alpha(p.paper, label_alpha))
+                    .color(p.paper.with_alpha(label_alpha))
                     .weight(Weight::BOLD),
             )
             .child(
@@ -162,7 +162,7 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_LEFT)
                     .text("kinetic-motion · 7.6s")
                     .size(13.0)
-                    .color(alpha(p.paper, 0.5 * life * label_in))
+                    .color(p.paper.with_alpha(0.5 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             // Top-right section marker + accent dot.
@@ -172,14 +172,14 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_RIGHT)
                     .text(idx_text)
                     .size(14.0)
-                    .color(alpha(p.paper, 0.75 * life * label_in))
+                    .color(p.paper.with_alpha(0.75 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .child(
                 Circle::builder()
                     .center(Vec2(marker_x - 128.0, inset - 28.0))
                     .radius(4.5 * label_in)
-                    .fill(alpha(idx_color, life * label_in)),
+                    .fill(idx_color.with_alpha(life * label_in)),
             )
             // Static "OBS" badge below the section marker — reads as a "live
             // observation" tag without animating per frame (so it stays inside
@@ -190,7 +190,7 @@ impl Hud {
                     .anchor(Anchor::TOP_RIGHT)
                     .text("OBS · TELLUR-04")
                     .size(11.0)
-                    .color(alpha(p.paper, 0.4 * life * label_in))
+                    .color(p.paper.with_alpha(0.4 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             // Bottom edge tick ruler — every 4th tick is taller.
@@ -206,7 +206,7 @@ impl Hud {
                 let x = lerp(bar_left, bar_right, frac);
                 let major = i % 4 == 0;
                 let height = if major { 18.0 } else { 8.0 };
-                let color = alpha(p.paper, if major { 0.55 } else { 0.35 } * life);
+                let color = p.paper.with_alpha(if major { 0.55 } else { 0.35 } * life);
                 Rect::builder()
                     .position(Vec2(x - 1.0, tick_y_top))
                     .size(Vec2(2.0, height * pop))
@@ -225,7 +225,7 @@ impl Hud {
                 let y = lerp(v_bar_top, v_bar_bottom, frac);
                 let major = i % 5 == 0;
                 let width = if major { 16.0 } else { 7.0 };
-                let color = alpha(p.paper, if major { 0.5 } else { 0.3 } * life);
+                let color = p.paper.with_alpha(if major { 0.5 } else { 0.3 } * life);
                 Fragment::builder()
                     // Left side ticks point inward.
                     .maybe_child((pop > 0.0).then(|| {
@@ -250,7 +250,7 @@ impl Hud {
                     .anchor(Anchor::TOP_LEFT)
                     .text("RUNTIME 7600MS · 60FPS")
                     .size(12.0)
-                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .color(p.paper.with_alpha(0.45 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .child(
@@ -259,7 +259,7 @@ impl Hud {
                     .anchor(Anchor::TOP_RIGHT)
                     .text("1920 × 1080 · RGBA")
                     .size(12.0)
-                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .color(p.paper.with_alpha(0.45 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .build()
