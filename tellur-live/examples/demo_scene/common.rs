@@ -52,10 +52,7 @@ pub fn solid(color: Color) -> Paint {
 }
 
 pub fn alpha(color: Color, value: f32) -> Color {
-    Color {
-        a: value.clamp(0.0, 1.0),
-        ..color
-    }
+    color.with_alpha(value)
 }
 
 pub fn lerp(from: f32, to: f32, p: f32) -> f32 {

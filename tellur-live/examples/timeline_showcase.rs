@@ -81,10 +81,7 @@ const HOLE: Color = Color::rgb_u8(15, 17, 25); // sprocket holes
 /// Multiplies a color's alpha (used to thread an envelope's opacity through a
 /// whole shape tree).
 fn fade(c: Color, a: f32) -> Color {
-    Color {
-        a: c.a * a.clamp(0.0, 1.0),
-        ..c
-    }
+    c.multiply_alpha(a)
 }
 
 /// Smoothstep easing for `[0,1]` progress (eases in AND out).

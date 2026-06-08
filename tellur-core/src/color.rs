@@ -25,6 +25,23 @@ impl Color {
         }
     }
 
+    /// Returns this color with `a` replaced by `alpha`, clamped to `[0, 1]`.
+    pub fn with_alpha(self, alpha: f32) -> Self {
+        Self {
+            a: alpha.clamp(0.0, 1.0),
+            ..self
+        }
+    }
+
+    /// Returns this color with its alpha multiplied by `factor`, clamped to
+    /// `[0, 1]` before multiplication.
+    pub fn multiply_alpha(self, factor: f32) -> Self {
+        Self {
+            a: self.a * factor.clamp(0.0, 1.0),
+            ..self
+        }
+    }
+
     /// Opaque color from HSV.
     ///
     /// `h` is the hue in degrees (wraps around 360); `s` and `v` are in `[0, 1]`.
@@ -88,5 +105,28 @@ fn hue_sector(h: f32, c: f32, x: f32) -> (f32, f32, f32) {
         3 => (0.0, x, c),
         4 => (x, 0.0, c),
         _ => (c, 0.0, x),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_alpha_replaces_and_clamps_alpha() {
+        let color = Color::rgba_u8(10, 20, 30, 128);
+
+        assert_eq!(color.with_alpha(0.25).a, 0.25);
+        assert_eq!(color.with_alpha(-1.0).a, 0.0);
+        assert_eq!(color.with_alpha(2.0).a, 1.0);
+    }
+
+    #[test]
+    fn multiply_alpha_scales_existing_alpha() {
+        let color = Color::rgb_u8(10, 20, 30).with_alpha(0.5);
+
+        assert_eq!(color.multiply_alpha(0.5).a, 0.25);
+        assert_eq!(color.multiply_alpha(-1.0).a, 0.0);
+        assert_eq!(color.multiply_alpha(2.0).a, 0.5);
     }
 }
