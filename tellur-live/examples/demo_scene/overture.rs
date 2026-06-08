@@ -22,8 +22,8 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 
     // Hero square: controlled ease_out_cubic pop (no rubbery elastic),
     // a slow drift-spin, and an ease_in_back dismissal.
-    let hero_in = ease_out_cubic(time.phase(0.55, 1.2));
-    let hero_out = ease_in_back(time.phase(1.7, 2.15));
+    let hero_in = time.phase(0.55, 1.2).ease_out_cubic().get();
+    let hero_out = time.phase(1.7, 2.15).ease_in_back_between(0.0, 1.0);
     let hero_life = (hero_in * (1.0 - hero_out)).clamp(0.0, 1.0);
     let spin = time.seconds() * 0.35 + PI * 0.25;
     let scale = (0.55 + hero_in * 0.45) * (1.0 - hero_out);
@@ -45,10 +45,10 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
     let cs = spin.cos();
     let sn = spin.sin();
 
-    let ray_in = ease_out_cubic(time.phase(0.85, 1.4)) * (1.0 - hero_out);
-    let tag_in =
-        ease_in_out_expo(time.phase(0.95, 1.35)) * (1.0 - ease_in_out_expo(time.phase(1.55, 2.0)));
-    let sweep = ease_in_out_expo(time.phase(1.45, 2.0));
+    let ray_in = time.phase(0.85, 1.4).ease_out_cubic().get() * (1.0 - hero_out);
+    let tag_in = time.phase(0.95, 1.35).ease_in_out_expo().get()
+        * (1.0 - time.phase(1.55, 2.0).ease_in_out_expo().get());
+    let sweep = time.phase(1.45, 2.0).ease_in_out_expo().get();
 
     // Two clamp bars — one cyan above, one pink below — that frame the
     // central hero. Snappy ease_in_out_expo in, ease_in_back out (lifts off
@@ -65,9 +65,13 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 .enumerate()
                 .map(move |(i, (dy, side, color))| {
                     let stagger = i as f32 * 0.06;
-                    let enter = ease_in_out_expo(time.phase(0.32 + stagger, 0.92 + stagger));
-                    let leave =
-                        ease_in_back(time.phase(1.55 + stagger * 0.5, 2.05 + stagger * 0.5));
+                    let enter = time
+                        .phase(0.32 + stagger, 0.92 + stagger)
+                        .ease_in_out_expo()
+                        .get();
+                    let leave = time
+                        .phase(1.55 + stagger * 0.5, 2.05 + stagger * 0.5)
+                        .ease_in_back_between(0.0, 1.0);
                     let bar_x = lerp(side * 2400.0 + CX, CX, enter);
                     let exit_dy = leave * if side > 0.0 { 320.0 } else { -320.0 };
                     let alpha_factor = (enter * (1.0 - leave)).clamp(0.0, 1.0) * 0.92;
@@ -76,9 +80,14 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     // End-cap mini brackets at each bar end — small perpendicular
                     // ticks that turn the bar into a clear measurement span. Same color
                     // as the bar; staggered tiny so they "arrive" with the bar.
-                    let cap_pop = ease_out_cubic(time.phase(0.65 + stagger, 1.05 + stagger))
+                    let cap_pop = time
+                        .phase(0.65 + stagger, 1.05 + stagger)
+                        .ease_out_cubic()
+                        .get()
                         * (1.0
-                            - ease_in_back(time.phase(1.55 + stagger * 0.5, 1.95 + stagger * 0.5)));
+                            - time
+                                .phase(1.55 + stagger * 0.5, 1.95 + stagger * 0.5)
+                                .ease_in_back_between(0.0, 1.0));
 
                     Fragment::builder()
                         .child(
@@ -218,9 +227,14 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 
             // Small index tag next to each outside dot. The tag follows the
             // dot's rotated position so it always reads on the outside.
-            let label_in = ease_out_cubic(time.phase(1.0 + s as f32 * 0.04, 1.4 + s as f32 * 0.04));
-            let label_alpha =
-                hero_life * label_in * (1.0 - ease_in_back(time.phase(1.7, 2.05))) * 0.6;
+            let label_in = time
+                .phase(1.0 + s as f32 * 0.04, 1.4 + s as f32 * 0.04)
+                .ease_out_cubic()
+                .get();
+            let label_alpha = hero_life
+                * label_in
+                * (1.0 - time.phase(1.7, 2.05).ease_in_back_between(0.0, 1.0))
+                * 0.6;
             let tag = (label_alpha > 0.0).then(|| {
                 let label_r = r + 18.0;
                 let lpos = Vec2(CX + a.cos() * label_r, CY + a.sin() * label_r);

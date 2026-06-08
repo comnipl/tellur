@@ -52,16 +52,12 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
             // is exactly 0.5, so this round-trips the original `time` bit-for-
             // bit; sub-events are then expressed in window-local coordinates.
             let t = boot.get() * OVERLAY_BOOT_WIDTH;
-            let boot_in = ease_in_out_expo(local_phase(
-                t,
-                0.05 - OVERLAY_BOOT_START,
-                0.18 - OVERLAY_BOOT_START,
-            ));
-            let boot_out = ease_in_out_expo(local_phase(
-                t,
-                0.32 - OVERLAY_BOOT_START,
-                0.55 - OVERLAY_BOOT_START,
-            ));
+            let boot_in = local_phase(t, 0.05 - OVERLAY_BOOT_START, 0.18 - OVERLAY_BOOT_START)
+                .ease_in_out_expo()
+                .get();
+            let boot_out = local_phase(t, 0.32 - OVERLAY_BOOT_START, 0.55 - OVERLAY_BOOT_START)
+                .ease_in_out_expo()
+                .get();
             let boot_life = (boot_in * (1.0 - boot_out)).clamp(0.0, 1.0);
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
@@ -98,16 +94,13 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // foreground shadow pass.
         .maybe_child({
             let t = flash.get() * OVERLAY_FLASH_WIDTH;
-            let flash = ease_out_quint(local_phase(
-                t,
-                4.9 - OVERLAY_FLASH_START,
-                5.05 - OVERLAY_FLASH_START,
-            )) * (1.0
-                - ease_in_out_expo(local_phase(
-                    t,
-                    5.05 - OVERLAY_FLASH_START,
-                    5.35 - OVERLAY_FLASH_START,
-                )));
+            let flash = local_phase(t, 4.9 - OVERLAY_FLASH_START, 5.05 - OVERLAY_FLASH_START)
+                .ease_out_quint()
+                .get()
+                * (1.0
+                    - local_phase(t, 5.05 - OVERLAY_FLASH_START, 5.35 - OVERLAY_FLASH_START)
+                        .ease_in_out_expo()
+                        .get());
             (flash > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)
@@ -118,7 +111,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // Exit fade — gentle quint ease into the bg color. The `fade` phase
         // already spans the whole window, so it drives the ease directly.
         .maybe_child({
-            let fade = ease_in_out_quint(fade);
+            let fade = fade.ease_in_out_quint().get();
             (fade > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)

@@ -16,7 +16,6 @@ use std::f32::consts::TAU;
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
-use tellur_core::easing;
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Rect as Aabb, Transform, Vec2};
 use tellur_core::phase::Phase;
@@ -26,6 +25,8 @@ use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::Time;
 use tellur_core::vector::{Paint, Stroke, VectorComponent, VectorGraphic, VectorTransform};
 use tellur_core::Keyable;
+
+pub use tellur_core::easing::PhaseEasing;
 
 pub const DURATION: f32 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
@@ -57,32 +58,6 @@ pub fn alpha(color: Color, value: f32) -> Color {
 
 pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
     from + (to - from) * p
-}
-
-// --- easing functions ---
-
-pub fn ease_out_cubic(p: Phase) -> f32 {
-    easing::out_cubic(p).get()
-}
-
-pub fn ease_out_quint(p: Phase) -> f32 {
-    easing::out_quint(p).get()
-}
-
-pub fn ease_in_out_quint(p: Phase) -> f32 {
-    easing::in_out_quint(p).get()
-}
-
-pub fn ease_in_out_expo(p: Phase) -> f32 {
-    easing::in_out_expo(p).get()
-}
-
-pub fn ease_in_back(p: Phase) -> f32 {
-    easing::in_back(p)
-}
-
-pub fn ease_out_elastic(p: Phase) -> f32 {
-    easing::out_elastic(p)
 }
 
 pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {

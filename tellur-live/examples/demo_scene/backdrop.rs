@@ -42,7 +42,9 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
         // Faint horizon lines sliding in from the left.
         .children((0..18).map(move |i| {
             let y = 64.0 + i as f32 * 56.0;
-            let reveal = ease_in_out_expo(local_phase(t, i as f32 * 0.008, 0.4 + i as f32 * 0.008));
+            let reveal = local_phase(t, i as f32 * 0.008, 0.4 + i as f32 * 0.008)
+                .ease_in_out_expo()
+                .get();
             Rect::builder()
                 .position(Vec2(lerp(-1920.0, 0.0, reveal), y))
                 .size(Vec2(1920.0, 1.0))
@@ -53,7 +55,7 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
         // measured field" and pull the eye toward center without actually
         // darkening the corners.
         .maybe_child({
-            let ring_reveal = ease_in_out_expo(local_phase(t, 0.55, 1.05));
+            let ring_reveal = local_phase(t, 0.55, 1.05).ease_in_out_expo().get();
             (ring_reveal > 0.0).then(|| {
                 [(720.0_f32, 1.0_f32), (860.0_f32, 0.55_f32)]
                     .into_iter()
@@ -71,11 +73,9 @@ pub fn Backdrop(reveal: Phase, palette: Palette) -> impl VectorComponent {
         // subliminal "graduated horizon" detail.
         .children((0..12).map(move |i| {
             let a = i as f32 / 12.0 * TAU - PI * 0.5;
-            let reveal = ease_in_out_expo(local_phase(
-                t,
-                0.7 + i as f32 * 0.012,
-                1.15 + i as f32 * 0.012,
-            ));
+            let reveal = local_phase(t, 0.7 + i as f32 * 0.012, 1.15 + i as f32 * 0.012)
+                .ease_in_out_expo()
+                .get();
             let major = i % 3 == 0;
             let r_base = 720.0;
             let length = if major { 16.0 } else { 8.0 };

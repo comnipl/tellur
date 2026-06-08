@@ -26,8 +26,8 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         time,
         (1.9, 2.25),
         (3.2, 3.55),
-        ease_in_out_expo,
-        ease_in_out_expo,
+        |p| p.ease_in_out_expo().get(),
+        |p| p.ease_in_out_expo().get(),
     );
 
     VectorLayer::builder()
@@ -41,8 +41,13 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 let dx = (c as f32 - (COLS as f32 - 1.0) * 0.5) * SPACING_X;
                 let dy = (r as f32 - (ROWS as f32 - 1.0) * 0.5) * SPACING_Y;
                 let stagger = c as f32 * 0.05 + r as f32 * 0.025;
-                let pop = ease_out_cubic(time.phase(1.95 + stagger, 2.45 + stagger));
-                let collapse = ease_in_back(time.phase(3.05 + stagger * 0.4, 3.5 + stagger * 0.4));
+                let pop = time
+                    .phase(1.95 + stagger, 2.45 + stagger)
+                    .ease_out_cubic()
+                    .get();
+                let collapse = time
+                    .phase(3.05 + stagger * 0.4, 3.5 + stagger * 0.4)
+                    .ease_in_back_between(0.0, 1.0);
                 let s = (pop * (1.0 - collapse)).clamp(0.0, 1.0);
 
                 let breathe = 1.0 + wave(time, 1.6, stagger) * 0.15;
@@ -63,7 +68,10 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     // the frame.
                     .maybe_child(
                         ((r == 0 || r == ROWS - 1) && (c == 0 || c == COLS - 1)).then(|| {
-                            let ring_in = ease_out_cubic(time.phase(2.4 + stagger, 2.9 + stagger));
+                            let ring_in = time
+                                .phase(2.4 + stagger, 2.9 + stagger)
+                                .ease_out_cubic()
+                                .get();
                             Circle::builder()
                                 .center(Vec2(cx, cy))
                                 .radius(26.0 * ring_in * s)
@@ -79,9 +87,11 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // just dots. Fade in with the grid itself.
         .children((0..ROWS).map(move |r| {
             let dy = (r as f32 - (ROWS as f32 - 1.0) * 0.5) * SPACING_Y;
-            let label_in =
-                ease_out_cubic(time.phase(2.1 + r as f32 * 0.04, 2.55 + r as f32 * 0.04));
-            let label_out = ease_in_back(time.phase(3.1, 3.5));
+            let label_in = time
+                .phase(2.1 + r as f32 * 0.04, 2.55 + r as f32 * 0.04)
+                .ease_out_cubic()
+                .get();
+            let label_out = time.phase(3.1, 3.5).ease_in_back_between(0.0, 1.0);
             let row_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((row_alpha > 0.0).then(|| {
@@ -99,9 +109,11 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // the grid reads as a proper coordinate field.
         .children((0..COLS).map(move |c| {
             let dx = (c as f32 - (COLS as f32 - 1.0) * 0.5) * SPACING_X;
-            let label_in =
-                ease_out_cubic(time.phase(2.05 + c as f32 * 0.04, 2.5 + c as f32 * 0.04));
-            let label_out = ease_in_back(time.phase(3.1, 3.5));
+            let label_in = time
+                .phase(2.05 + c as f32 * 0.04, 2.5 + c as f32 * 0.04)
+                .ease_out_cubic()
+                .get();
+            let label_out = time.phase(3.1, 3.5).ease_in_back_between(0.0, 1.0);
             let col_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((col_alpha > 0.0).then(|| {
@@ -122,7 +134,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // head + dimmer trailing wash, with a small "SCAN" data tag at the top
         // and a running-position readout at the bottom.
         .maybe_child({
-            let sweep = ease_in_out_expo(time.phase(2.35, 3.0));
+            let sweep = time.phase(2.35, 3.0).ease_in_out_expo().get();
             (sweep > 0.0 && sweep < 1.0)
                 .then(|| ScanLine::builder().palette(p).life(life).sweep(sweep))
         })
