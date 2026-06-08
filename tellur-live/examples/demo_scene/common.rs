@@ -23,7 +23,7 @@ use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::Time;
-use tellur_core::vector::{Paint, Stroke, VectorComponent, VectorGraphic, VectorTransform};
+use tellur_core::vector::{Stroke, VectorComponent, VectorGraphic, VectorTransform};
 use tellur_core::Keyable;
 
 pub use tellur_core::easing::PhaseEasing;
@@ -46,10 +46,6 @@ pub struct Palette {
     pub paper: Color,
     pub pink: Color,
     pub cyan: Color,
-}
-
-pub fn solid(color: Color) -> Paint {
-    Paint::Solid(color)
 }
 
 pub fn alpha(color: Color, value: f32) -> Color {
@@ -99,7 +95,7 @@ pub fn Rect(position: Vec2, size: Vec2, color: Color) -> impl VectorComponent {
     Fragment::single(
         shapes::Rectangle::builder()
             .size(size)
-            .fill(solid(color))
+            .fill(color)
             .place_at(position),
     )
 }
@@ -136,9 +132,9 @@ impl VectorComponent for TrueCircle {
         let d = self.radius * 2.0;
         let inner = shapes::Circle::builder()
             .radius(self.radius)
-            .maybe_fill(self.fill.map(solid))
+            .maybe_fill(self.fill)
             .maybe_stroke(self.stroke_color.map(|c| Stroke {
-                paint: solid(c),
+                paint: c.into(),
                 width: self.stroke_width,
             }))
             .build();
@@ -197,7 +193,7 @@ pub fn Label(
             .font(MONOSPACE.clone())
             .size(size)
             .weight(weight)
-            .fill(solid(color))
+            .fill(color)
             .span(TextSpan::plain(text))
             .anchored(anchor)
             .snap_to(position),
@@ -224,7 +220,7 @@ pub fn FxRect(
     Fragment::single(
         shapes::Rectangle::builder()
             .size(size)
-            .fill(solid(color))
+            .fill(color)
             .build()
             .transform(center_transform(size, angle, scale))
             .opacity(opacity)
@@ -256,7 +252,7 @@ pub fn FxOutlineRect(
         shapes::Rectangle::builder()
             .size(size)
             .stroke(Stroke {
-                paint: solid(color),
+                paint: color.into(),
                 width,
             })
             .build()

@@ -216,15 +216,45 @@ pub enum Paint {
     Solid(Color),
 }
 
+impl Paint {
+    pub const fn solid(color: Color) -> Self {
+        Self::Solid(color)
+    }
+}
+
+impl From<Color> for Paint {
+    fn from(color: Color) -> Self {
+        Self::solid(color)
+    }
+}
+
+impl From<Color> for Option<Paint> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
+    }
+}
+
 impl From<Paint> for Fill {
     fn from(paint: Paint) -> Self {
         Self { paint }
     }
 }
 
+impl From<Color> for Fill {
+    fn from(color: Color) -> Self {
+        Paint::from(color).into()
+    }
+}
+
 impl From<Paint> for Option<Fill> {
     fn from(paint: Paint) -> Self {
         Some(Fill { paint })
+    }
+}
+
+impl From<Color> for Option<Fill> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
     }
 }
 
@@ -235,8 +265,58 @@ impl From<Paint> for Stroke {
     }
 }
 
+impl From<Color> for Stroke {
+    fn from(color: Color) -> Self {
+        Paint::from(color).into()
+    }
+}
+
 impl From<Paint> for Option<Stroke> {
     fn from(paint: Paint) -> Self {
         Some(paint.into())
+    }
+}
+
+impl From<Color> for Option<Stroke> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_converts_to_paint_fill_and_stroke() {
+        let color = Color::rgb_u8(10, 20, 30);
+
+        assert_eq!(Paint::solid(color), Paint::Solid(color));
+        assert_eq!(Paint::from(color), Paint::Solid(color));
+        assert_eq!(Fill::from(color).paint, Paint::Solid(color));
+
+        let stroke = Stroke::from(color);
+        assert_eq!(stroke.paint, Paint::Solid(color));
+        assert_eq!(stroke.width, 1.0);
+    }
+
+    #[test]
+    fn color_converts_to_optional_paint_styles() {
+        let color = Color::rgb_u8(40, 50, 60);
+
+        assert_eq!(Option::<Paint>::from(color), Some(Paint::Solid(color)));
+        assert_eq!(
+            Option::<Fill>::from(color),
+            Some(Fill {
+                paint: Paint::Solid(color),
+            })
+        );
+        assert_eq!(
+            Option::<Stroke>::from(color),
+            Some(Stroke {
+                paint: Paint::Solid(color),
+                width: 1.0,
+            })
+        );
     }
 }
