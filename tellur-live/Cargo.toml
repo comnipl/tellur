@@ -3,6 +3,18 @@ name = "tellur-live"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
+# `web/dist` (the Vite bundle build.rs embeds) is gitignored, so by default it is
+# left out of the published crate — consumers would then have to run npm at build
+# time. `include` overrides .gitignore, so a release step that runs
+# `npm run build` before `cargo publish` ships the prebuilt bundle and build.rs
+# short-circuits. `include` is exhaustive, so the rest of the crate is listed too.
+include = [
+    "src/**/*.rs",
+    "build.rs",
+    "examples/**/*",
+    "web/dist/**/*",
+    "README.md",
+]
 
 [dependencies]
 tellur-core = { path = "../tellur-core" }
