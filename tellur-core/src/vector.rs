@@ -98,6 +98,78 @@ impl Hash for dyn VectorComponent {
     }
 }
 
+/// A [`VectorComponent`] wrapped in an affine transform and group opacity.
+#[derive(Keyable)]
+pub struct Transformed {
+    pub transform: Transform,
+    pub opacity: f32,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl Transformed {
+    pub fn new<C: VectorComponent + 'static>(transform: Transform, child: C) -> Self {
+        Self {
+            transform,
+            opacity: 1.0,
+            child: Box::new(child),
+        }
+    }
+
+    pub fn from_box(transform: Transform, child: Box<dyn VectorComponent>) -> Self {
+        Self {
+            transform,
+            opacity: 1.0,
+            child,
+        }
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+}
+
+impl VectorComponent for Transformed {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.child.layout(constraints)
+    }
+
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        self.transform.transform_rect(self.child.paint_bounds(size))
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let inner = self.child.render(size);
+        VectorGraphic {
+            view_box: self.transform.transform_rect(inner.view_box),
+            root: Node::Group(Group {
+                transform: self.transform,
+                opacity: self.opacity.clamp(0.0, 1.0),
+                children: vec![inner.root],
+            }),
+        }
+    }
+}
+
+impl From<Transformed> for Box<dyn VectorComponent> {
+    fn from(transformed: Transformed) -> Self {
+        Box::new(transformed)
+    }
+}
+
+/// Extension trait adding transform wrappers to vector components.
+pub trait VectorTransform: VectorComponent + Sized + 'static {
+    fn transform(self, transform: Transform) -> Transformed {
+        Transformed::new(transform, self)
+    }
+
+    fn opacity(self, opacity: f32) -> Transformed {
+        Transformed::new(Transform::IDENTITY, self).opacity(opacity)
+    }
+}
+
+impl<T: VectorComponent + 'static> VectorTransform for T {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
     Group(Group),

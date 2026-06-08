@@ -81,6 +81,82 @@ impl Transform {
             ty: offset.1,
         }
     }
+
+    pub const fn scale(scale: Vec2) -> Self {
+        Self {
+            a: scale.0,
+            b: 0.0,
+            c: 0.0,
+            d: scale.1,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    pub fn rotate(radians: f32) -> Self {
+        let cos = radians.cos();
+        let sin = radians.sin();
+        Self {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    /// Matrix concatenation: `self * child`, applying `child` first and then
+    /// `self` to points.
+    pub fn concat(self, child: Self) -> Self {
+        Self {
+            a: self.a * child.a + self.c * child.b,
+            b: self.b * child.a + self.d * child.b,
+            c: self.a * child.c + self.c * child.d,
+            d: self.b * child.c + self.d * child.d,
+            tx: self.a * child.tx + self.c * child.ty + self.tx,
+            ty: self.b * child.tx + self.d * child.ty + self.ty,
+        }
+    }
+
+    /// Returns a transform that applies `self` first, then `next`.
+    pub fn then(self, next: Self) -> Self {
+        next.concat(self)
+    }
+
+    /// Applies `transform` around `point` instead of the origin.
+    pub fn around_point(point: Vec2, transform: Self) -> Self {
+        Self::translate(point)
+            .concat(transform)
+            .concat(Self::translate(Vec2(-point.0, -point.1)))
+    }
+
+    pub fn transform_point(self, point: Vec2) -> Vec2 {
+        Vec2(
+            self.a * point.0 + self.c * point.1 + self.tx,
+            self.b * point.0 + self.d * point.1 + self.ty,
+        )
+    }
+
+    pub fn transform_rect(self, rect: Rect) -> Rect {
+        let p0 = self.transform_point(rect.origin);
+        let p1 = self.transform_point(Vec2(rect.origin.0 + rect.size.0, rect.origin.1));
+        let p2 = self.transform_point(Vec2(rect.origin.0, rect.origin.1 + rect.size.1));
+        let p3 = self.transform_point(Vec2(
+            rect.origin.0 + rect.size.0,
+            rect.origin.1 + rect.size.1,
+        ));
+
+        let min_x = p0.0.min(p1.0).min(p2.0).min(p3.0);
+        let max_x = p0.0.max(p1.0).max(p2.0).max(p3.0);
+        let min_y = p0.1.min(p1.1).min(p2.1).min(p3.1);
+        let max_y = p0.1.max(p1.1).max(p2.1).max(p3.1);
+
+        Rect {
+            origin: Vec2(min_x, min_y),
+            size: Vec2(max_x - min_x, max_y - min_y),
+        }
+    }
 }
 
 /// A relative position within an axis-aligned box.
@@ -293,4 +369,50 @@ impl Constraints {
 pub enum Axis {
     Horizontal,
     Vertical,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    fn assert_near(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn assert_vec_near(actual: Vec2, expected: Vec2) {
+        assert_near(actual.0, expected.0);
+        assert_near(actual.1, expected.1);
+    }
+
+    #[test]
+    fn then_applies_transforms_in_reading_order() {
+        let transform = Transform::scale(Vec2(2.0, 3.0)).then(Transform::rotate(FRAC_PI_2));
+        assert_vec_near(transform.transform_point(Vec2(1.0, 0.0)), Vec2(0.0, 2.0));
+    }
+
+    #[test]
+    fn around_point_keeps_pivot_fixed() {
+        let pivot = Vec2(10.0, 20.0);
+        let transform = Transform::around_point(pivot, Transform::scale(Vec2(2.0, 3.0)));
+        assert_vec_near(transform.transform_point(pivot), pivot);
+        assert_vec_near(
+            transform.transform_point(Vec2(11.0, 21.0)),
+            Vec2(12.0, 23.0),
+        );
+    }
+
+    #[test]
+    fn transform_rect_returns_axis_aligned_bounds() {
+        let rect = Rect {
+            origin: Vec2(0.0, 0.0),
+            size: Vec2(2.0, 4.0),
+        };
+        let bounds = Transform::rotate(FRAC_PI_2).transform_rect(rect);
+        assert_vec_near(bounds.origin, Vec2(-4.0, 0.0));
+        assert_vec_near(bounds.size, Vec2(4.0, 2.0));
+    }
 }

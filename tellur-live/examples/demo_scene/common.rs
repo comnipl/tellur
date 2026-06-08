@@ -24,7 +24,7 @@ use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::Time;
-use tellur_core::vector::{Group, Node, Paint, Stroke, VectorComponent, VectorGraphic};
+use tellur_core::vector::{Paint, Stroke, VectorComponent, VectorGraphic, VectorTransform};
 use tellur_core::Keyable;
 
 pub const DURATION: f32 = 7.6;
@@ -45,56 +45,6 @@ pub struct Palette {
     pub paper: Color,
     pub pink: Color,
     pub cyan: Color,
-}
-
-// Composable rotation + non-uniform scale + opacity wrapper.
-#[derive(Keyable)]
-pub struct Fx {
-    pub angle: f32,
-    pub sx: f32,
-    pub sy: f32,
-    pub opacity: f32,
-    pub child: Box<dyn VectorComponent>,
-}
-
-impl VectorComponent for Fx {
-    fn layout(&self, constraints: Constraints) -> Vec2 {
-        self.child.layout(constraints)
-    }
-
-    fn paint_bounds(&self, size: Vec2) -> Aabb {
-        Aabb {
-            origin: Vec2(-size.0 * 2.0, -size.1 * 2.0),
-            size: Vec2(size.0 * 5.0, size.1 * 5.0),
-        }
-    }
-
-    fn render(&self, size: Vec2) -> VectorGraphic {
-        let inner = self.child.render(size);
-        let sx = self.sx.max(0.0001);
-        let sy = self.sy.max(0.0001);
-        let cos = self.angle.cos();
-        let sin = self.angle.sin();
-        let a = cos * sx;
-        let b = sin * sx;
-        let c = -sin * sy;
-        let d = cos * sy;
-        let center = Vec2(size.0 * 0.5, size.1 * 0.5);
-        let tx = center.0 - (a * center.0 + c * center.1);
-        let ty = center.1 - (b * center.0 + d * center.1);
-
-        VectorGraphic {
-            view_box: Aabb {
-                origin: Vec2(-size.0 * 2.0, -size.1 * 2.0),
-                size: Vec2(size.0 * 5.0, size.1 * 5.0),
-            },
-            root: Node::Group(Group {
-                transform: Transform { a, b, c, d, tx, ty },
-                opacity: self.opacity.clamp(0.0, 1.0),
-                children: vec![inner.root],
-            }),
-        }
-    }
 }
 
 pub fn solid(color: Color) -> Paint {
@@ -157,6 +107,12 @@ where
     let r = rise(time.phase(rise_span.0, rise_span.1));
     let f = fall(time.phase(fall_span.0, fall_span.1));
     (r * (1.0 - f)).clamp(0.0, 1.0)
+}
+
+fn center_transform(size: Vec2, angle: f32, scale: Vec2) -> Transform {
+    let transform = Transform::scale(Vec2(scale.0.max(0.0001), scale.1.max(0.0001)))
+        .then(Transform::rotate(angle));
+    Transform::around_point(Vec2(size.0 * 0.5, size.1 * 0.5), transform)
 }
 
 // --- leaf components ---
@@ -294,20 +250,14 @@ pub fn FxRect(
         return Fragment::empty();
     }
     Fragment::single(
-        Fx {
-            angle,
-            sx: scale.0,
-            sy: scale.1,
-            opacity,
-            child: Box::new(
-                shapes::Rectangle::builder()
-                    .size(size)
-                    .fill(solid(color))
-                    .build(),
-            ),
-        }
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
+        shapes::Rectangle::builder()
+            .size(size)
+            .fill(solid(color))
+            .build()
+            .transform(center_transform(size, angle, scale))
+            .opacity(opacity)
+            .anchored(Anchor::CENTER)
+            .snap_to(center),
     )
 }
 
@@ -331,22 +281,16 @@ pub fn FxOutlineRect(
         return Fragment::empty();
     }
     Fragment::single(
-        Fx {
-            angle,
-            sx: scale.0,
-            sy: scale.1,
-            opacity,
-            child: Box::new(
-                shapes::Rectangle::builder()
-                    .size(size)
-                    .stroke(Stroke {
-                        paint: solid(color),
-                        width,
-                    })
-                    .build(),
-            ),
-        }
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
+        shapes::Rectangle::builder()
+            .size(size)
+            .stroke(Stroke {
+                paint: solid(color),
+                width,
+            })
+            .build()
+            .transform(center_transform(size, angle, scale))
+            .opacity(opacity)
+            .anchored(Anchor::CENTER)
+            .snap_to(center),
     )
 }
