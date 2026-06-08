@@ -18,9 +18,11 @@ use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
 use tellur_renderer::CachingRenderContext;
 
 use crate::build_watch::{
-    run_release_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot, CompileState,
+    describe_build, run_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot,
+    CompileState,
 };
-use crate::plugin::{HotReloadPlugin, TimelineInfo};
+use crate::plugin::HotReloadPlugin;
+use tellur_plugin::TimelineInfo;
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -39,17 +41,9 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     eprintln!("tellur live listening on http://{local_addr}");
     eprintln!("plugin: {}", options.plugin_path.display());
     if let Some(auto_build) = &options.auto_build {
-        eprintln!(
-            "auto build: cargo build --release{} --example {}",
-            auto_build
-                .package
-                .as_ref()
-                .map(|package| format!(" -p {package}"))
-                .unwrap_or_default(),
-            auto_build.example
-        );
-        eprintln!("running initial release build");
-        run_release_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
+        eprintln!("auto build: {}", describe_build(auto_build));
+        eprintln!("running initial build");
+        run_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
     }
 
     let compile_state = options

@@ -9,7 +9,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone)]
 pub struct AutoBuildOptions {
     pub package: Option<String>,
-    pub example: String,
+    /// The example target to build, or `None` to build the package's library —
+    /// a `cdylib` timeline project, as `tellur live` does.
+    pub example: Option<String>,
+    /// Build with `--release`.
+    pub release: bool,
     pub manifest_path: Option<PathBuf>,
     pub watch_paths: Vec<PathBuf>,
     pub poll_interval: Duration,
@@ -83,8 +87,8 @@ pub fn start_build_watcher(options: AutoBuildOptions) -> CompileState {
     state
 }
 
-pub fn run_release_build_once(options: &AutoBuildOptions) -> Result<(), String> {
-    run_release_build(options)
+pub fn run_build_once(options: &AutoBuildOptions) -> Result<(), String> {
+    run_build(options)
 }
 
 fn watch_loop(options: AutoBuildOptions, state: CompileState) {
@@ -117,14 +121,14 @@ fn watch_loop(options: AutoBuildOptions, state: CompileState) {
         }
 
         state.set(CompileStatus::Compiling, None);
-        eprintln!("source change detected; running release build");
-        match run_release_build(&options) {
+        eprintln!("source change detected; running build");
+        match run_build(&options) {
             Ok(()) => {
-                eprintln!("release build finished");
+                eprintln!("build finished");
                 state.set(CompileStatus::Compiled, None)
             }
             Err(e) => {
-                eprintln!("release build failed: {e}");
+                eprintln!("build failed: {e}");
                 state.set(CompileStatus::Failed, Some(e))
             }
         }
@@ -132,16 +136,34 @@ fn watch_loop(options: AutoBuildOptions, state: CompileState) {
     }
 }
 
-fn run_release_build(options: &AutoBuildOptions) -> Result<(), String> {
+/// The `cargo build` invocation these options describe. Single source of truth
+/// so the watcher, the one-shot build, and the server banner all agree.
+fn build_command(options: &AutoBuildOptions) -> Command {
     let mut command = Command::new("cargo");
-    command.arg("build").arg("--release");
+    command.arg("build");
+    if options.release {
+        command.arg("--release");
+    }
     if let Some(manifest_path) = &options.manifest_path {
         command.arg("--manifest-path").arg(manifest_path);
     }
     if let Some(package) = &options.package {
         command.arg("-p").arg(package);
     }
-    command.arg("--example").arg(&options.example);
+    // `None` builds the package's library target (the cdylib timeline project).
+    if let Some(example) = &options.example {
+        command.arg("--example").arg(example);
+    }
+    command
+}
+
+/// A human-readable rendering of the `cargo build` these options will run.
+pub fn describe_build(options: &AutoBuildOptions) -> String {
+    describe_command(&build_command(options))
+}
+
+fn run_build(options: &AutoBuildOptions) -> Result<(), String> {
+    let mut command = build_command(options);
 
     let description = describe_command(&command);
     eprintln!("{description}");

@@ -59,6 +59,8 @@
 //! purely additive — the normal `.child(...)` setter and the component itself are
 //! untouched — and is rejected on `#[component(vector)]`.
 
+use std::sync::OnceLock;
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -69,6 +71,39 @@ use syn::{
 };
 
 mod keyable;
+
+/// The path to the `tellur-core` crate as the *calling* crate sees it, so the
+/// generated code resolves whether the caller depends on `tellur-core` directly
+/// or only on the `tellur` facade (which re-exports it as `tellur::core`).
+///
+/// Resolved once per crate compilation — the calling manifest is fixed for the
+/// lifetime of one `rustc` invocation, so the lookup is cached.
+pub(crate) fn core() -> TokenStream2 {
+    static CORE: OnceLock<String> = OnceLock::new();
+    CORE.get_or_init(resolve_core_root)
+        .parse()
+        .expect("resolved tellur-core path parses as tokens")
+}
+
+fn resolve_core_root() -> String {
+    use proc_macro_crate::{crate_name, FoundCrate};
+    // Prefer a direct `tellur-core` dependency (in-tree crates, the renderer /
+    // live examples). `extern crate self as tellur_core` in tellur-core makes the
+    // `Itself` form resolve when the macro is used inside tellur-core itself.
+    if let Ok(found) = crate_name("tellur-core") {
+        return match found {
+            FoundCrate::Itself => "::tellur_core".to_owned(),
+            FoundCrate::Name(name) => format!("::{name}"),
+        };
+    }
+    // Otherwise fall back to the facade, which re-exports core as `tellur::core`.
+    match crate_name("tellur") {
+        Ok(FoundCrate::Itself) => "crate::core".to_owned(),
+        Ok(FoundCrate::Name(name)) => format!("::{name}::core"),
+        // Last resort: emit the bare path so the compile error names the crate.
+        Err(_) => "::tellur_core".to_owned(),
+    }
+}
 
 /// Derives `PartialEq`, `Eq`, and `Hash` for a type that contains `f32`/`f64`
 /// (directly or through `Option`/`Vec`/arrays/tuples), comparing and hashing
@@ -94,18 +129,20 @@ enum Kind {
 
 impl Kind {
     fn component_trait(self) -> TokenStream2 {
+        let core = core();
         match self {
-            Kind::Vector => quote!(::tellur_core::vector::VectorComponent),
-            Kind::Raster => quote!(::tellur_core::raster::RasterComponent),
-            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineComponent),
+            Kind::Vector => quote!(#core::vector::VectorComponent),
+            Kind::Raster => quote!(#core::raster::RasterComponent),
+            Kind::Timeline => quote!(#core::timeline_component::TimelineComponent),
         }
     }
 
     fn builder_trait(self) -> TokenStream2 {
+        let core = core();
         match self {
-            Kind::Vector => quote!(::tellur_core::builder::VectorBuilder),
-            Kind::Raster => quote!(::tellur_core::builder::RasterBuilder),
-            Kind::Timeline => quote!(::tellur_core::timeline_component::TimelineBuilder),
+            Kind::Vector => quote!(#core::builder::VectorBuilder),
+            Kind::Raster => quote!(#core::builder::RasterBuilder),
+            Kind::Timeline => quote!(#core::timeline_component::TimelineBuilder),
         }
     }
 
@@ -121,9 +158,10 @@ impl Kind {
     }
 
     fn graphic(self) -> TokenStream2 {
+        let core = core();
         match self {
-            Kind::Vector => quote!(::tellur_core::vector::VectorGraphic),
-            Kind::Raster => quote!(::tellur_core::raster::RasterImage),
+            Kind::Vector => quote!(#core::vector::VectorGraphic),
+            Kind::Raster => quote!(#core::raster::RasterImage),
             // The timeline arm has no single `render` graphic; it emits a full
             // multi-method trait impl directly (see `expand_fn`).
             Kind::Timeline => quote!(()),
@@ -132,13 +170,14 @@ impl Kind {
 
     /// The `render` signature and the forwarded argument list.
     fn render_sig(self) -> (TokenStream2, TokenStream2) {
+        let core = core();
         match self {
-            Kind::Vector => (quote!(size: ::tellur_core::geometry::Vec2), quote!(size)),
+            Kind::Vector => (quote!(size: #core::geometry::Vec2), quote!(size)),
             Kind::Raster => (
                 quote!(
-                    size: ::tellur_core::geometry::Vec2,
-                    target: ::tellur_core::raster::Resolution,
-                    ctx: &mut dyn ::tellur_core::render_context::RenderContext
+                    size: #core::geometry::Vec2,
+                    target: #core::raster::Resolution,
+                    ctx: &mut dyn #core::render_context::RenderContext
                 ),
                 quote!(size, target, ctx),
             ),
@@ -312,9 +351,10 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
 
     let ident = s.ident.clone();
     let glue = emit_glue(&ident, kind, &children, &effect_child);
+    let core = core();
     Ok(quote! {
-        #[derive(::tellur_core::__bon::Builder)]
-        #[builder(derive(Into), crate = ::tellur_core::__bon)]
+        #[derive(#core::__bon::Builder)]
+        #[builder(derive(Into), crate = #core::__bon)]
         #s
 
         #glue
@@ -340,6 +380,7 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
     let vis = &func.vis;
     let fn_ident = &func.sig.ident;
     let struct_ident = snake_to_pascal_ident(fn_ident);
+    let core = core();
 
     let mut field_idents: Vec<&Ident> = Vec::new();
     let mut field_types: Vec<&Type> = Vec::new();
@@ -501,7 +542,7 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
                         }
                     },
                     quote! {
-                        let __available = ::tellur_core::geometry::Vec2(
+                        let __available = #core::geometry::Vec2(
                             if constraints.max.0.is_finite() { constraints.max.0 } else { 0.0 },
                             if constraints.max.1.is_finite() { constraints.max.1 } else { 0.0 },
                         );
@@ -544,15 +585,15 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
             impl #trait_path for #struct_ident {
                 fn layout(
                     &self,
-                    constraints: ::tellur_core::geometry::Constraints,
-                ) -> ::tellur_core::geometry::Vec2 {
+                    constraints: #core::geometry::Constraints,
+                ) -> #core::geometry::Vec2 {
                     #build_call_layout
                 }
 
                 fn paint_bounds(
                     &self,
-                    size: ::tellur_core::geometry::Vec2,
-                ) -> ::tellur_core::geometry::Rect {
+                    size: #core::geometry::Vec2,
+                ) -> #core::geometry::Rect {
                     #build_call_paint_bounds
                 }
 
@@ -594,8 +635,8 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
     let glue = emit_glue(&struct_ident, kind, &children, &effect_child);
 
     Ok(quote! {
-        #[derive(::core::clone::Clone, ::tellur_core::__bon::Builder)]
-        #[builder(derive(Into), crate = ::tellur_core::__bon)]
+        #[derive(::core::clone::Clone, #core::__bon::Builder)]
+        #[builder(derive(Into), crate = #core::__bon)]
         #vis struct #struct_ident {
             #( #( #field_attrs )* pub #field_idents: #field_types, )*
         }
@@ -753,6 +794,7 @@ fn timeline_codegen<'a>(
     name_expr: &TokenStream2,
 ) -> (TokenStream2, TokenStream2) {
     let destructure_idents: Vec<&Ident> = field_idents.collect();
+    let core = core();
 
     // The body is built either with the real clock (when `#[clock]` is present)
     // or with no clock at all. `__tellur_build` takes a clock by value in the
@@ -767,7 +809,7 @@ fn timeline_codegen<'a>(
                 }
             },
             quote!(self.#build_method(clock)),
-            quote!(self.#build_method(::tellur_core::timeline_component::Clock::structural())),
+            quote!(self.#build_method(#core::timeline_component::Clock::structural())),
         )
     } else {
         (
@@ -798,7 +840,7 @@ fn timeline_codegen<'a>(
             fn resolve(
                 &self,
                 abs_start: f32,
-                out: &mut ::tellur_core::timeline_component::ResolveCtx,
+                out: &mut #core::timeline_component::ResolveCtx,
             ) -> f32 {
                 let __child = #build_structural;
                 #trait_path::resolve(&__child, abs_start, out)
@@ -806,27 +848,27 @@ fn timeline_codegen<'a>(
 
             fn frame(
                 &self,
-                clock: ::tellur_core::timeline_component::Clock<'_>,
-                canvas: ::tellur_core::geometry::Vec2,
-                target: ::tellur_core::raster::Resolution,
-                ctx: &mut dyn ::tellur_core::render_context::RenderContext,
-            ) -> ::core::option::Option<::tellur_core::raster::RasterImage> {
+                clock: #core::timeline_component::Clock<'_>,
+                canvas: #core::geometry::Vec2,
+                target: #core::raster::Resolution,
+                ctx: &mut dyn #core::render_context::RenderContext,
+            ) -> ::core::option::Option<#core::raster::RasterImage> {
                 let __child = #build_with_clock;
                 #trait_path::frame(&__child, clock, canvas, target, ctx)
             }
 
             fn samples(
                 &self,
-                clock: ::tellur_core::timeline_component::Clock<'_>,
+                clock: #core::timeline_component::Clock<'_>,
                 window: f32,
-            ) -> ::core::option::Option<::tellur_core::timeline_component::AudioBuffer> {
+            ) -> ::core::option::Option<#core::timeline_component::AudioBuffer> {
                 let __child = #build_with_clock;
                 #trait_path::samples(&__child, clock, window)
             }
 
             fn mix_into(
                 &self,
-                mix: &mut ::tellur_core::audio::AudioMix,
+                mix: &mut #core::audio::AudioMix,
                 start_secs: f32,
                 speed: f32,
             ) {
@@ -838,12 +880,12 @@ fn timeline_codegen<'a>(
                 #trait_path::mix_into(&__child, mix, start_secs, speed);
             }
 
-            fn cues(&self, offset: f32) -> ::std::vec::Vec<::tellur_core::timeline_component::Cue> {
+            fn cues(&self, offset: f32) -> ::std::vec::Vec<#core::timeline_component::Cue> {
                 let __child = #build_structural;
                 #trait_path::cues(&__child, offset)
             }
 
-            fn arrangement(&self, offset: f32) -> ::tellur_core::timeline_component::Arrangement {
+            fn arrangement(&self, offset: f32) -> #core::timeline_component::Arrangement {
                 // Relabel the delegated node IN PLACE: build the child node, then
                 // stamp this component's display name onto it. No extra tree level
                 // is introduced — the inner kind/interval/children are preserved.
@@ -873,6 +915,7 @@ fn emit_glue(
     let builder_ty = format_ident!("{}Builder", ident);
     let state_mod = Ident::new(&pascal_to_snake(&builder_ty.to_string()), ident.span());
     let bld = kind.builder_trait();
+    let core = core();
     // The timeline arm boxes as `Box<dyn TimelineComponent + Send>` (audit M2);
     // the raster/vector arms keep their plain `Box<dyn _Component>` (no `+ Send`,
     // which would break existing `!Send` components).
@@ -890,7 +933,7 @@ fn emit_glue(
             let field_pascal = snake_to_pascal_ident(field);
             let set_ty = format_ident!("Set{}", field_pascal);
             quote! {
-                impl<__S> ::tellur_core::builder::Effect for #builder_ty<__S>
+                impl<__S> #core::builder::Effect for #builder_ty<__S>
                 where
                     __S: #state_mod::State,
                     __S::#field_pascal: #state_mod::IsUnset,
@@ -920,7 +963,7 @@ fn emit_glue(
             if kind == Kind::Timeline {
                 quote! {
                     self.#field.push(::std::boxed::Box::new(
-                        ::tellur_core::timeline_component::Sourced::new(
+                        #core::timeline_component::Sourced::new(
                             ::core::panic::Location::caller(),
                             ::core::convert::Into::into(#child),
                         ),
@@ -947,7 +990,7 @@ fn emit_glue(
                 let __loc = ::core::panic::Location::caller();
                 self.#field.extend(children.into_iter().map(|__c| {
                     let __boxed: #box_dyn = ::std::boxed::Box::new(
-                        ::tellur_core::timeline_component::Sourced::new(
+                        #core::timeline_component::Sourced::new(
                             __loc,
                             ::core::convert::Into::into(__c),
                         ),

@@ -1,0 +1,27 @@
+[package]
+name = "tellur"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["renderer"]
+# The GPU / encode backend (wgpu / vello / ffmpeg). Vector/raster-only projects
+# can turn this off to skip the heavy graphics stack: `default-features = false`.
+renderer = ["dep:tellur-renderer"]
+# The `tellur` command-line tool (the `tellur` binary). Pulls in the live-preview
+# host and the argument/metadata machinery; authored projects never enable this.
+cli = ["dep:clap", "dep:cargo_metadata", "dep:toml_edit", "dep:tellur-live", "renderer"]
+
+[dependencies]
+tellur-core = { path = "../tellur-core" }
+tellur-plugin = { path = "../tellur-plugin" }
+tellur-renderer = { path = "../tellur-renderer", optional = true }
+tellur-live = { path = "../tellur-live", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+cargo_metadata = { version = "0.18", optional = true }
+toml_edit = { version = "0.22", optional = true }
+
+[[bin]]
+name = "tellur"
+path = "src/bin/tellur.rs"
+required-features = ["cli"]

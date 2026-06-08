@@ -129,7 +129,8 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
         }
         Some(AutoBuildOptions {
             package: build_package,
-            example,
+            example: Some(example),
+            release: true,
             manifest_path: build_manifest,
             watch_paths,
             poll_interval: Duration::from_millis(250),
