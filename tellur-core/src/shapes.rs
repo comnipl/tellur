@@ -1,10 +1,10 @@
 //! Basic shape components that implement `VectorComponent`.
 //!
-//! Each shape declares its intrinsic size through `layout` and produces
-//! a `VectorGraphic` covering the layout-chosen size in `render`. The
-//! shape will adapt if the parent imposes tight constraints — e.g. a
-//! `Circle` placed under tight non-square constraints renders as an
-//! ellipse.
+//! Each shape declares its intrinsic size through `layout` and produces a
+//! `VectorGraphic` whose view box matches its paint bounds. A stroked shape
+//! widens that view box by half the stroke width on each side. The shape will
+//! adapt if the parent imposes tight constraints — e.g. a `Circle` placed
+//! under tight non-square constraints renders as an ellipse.
 
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::vector::{Fill, Node, Path, PathCommand, Stroke, VectorComponent, VectorGraphic};
@@ -25,6 +25,10 @@ impl VectorComponent for Rectangle {
         constraints.constrain(self.size)
     }
 
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        stroked_bounds(size, &self.stroke)
+    }
+
     fn render(&self, size: Vec2) -> VectorGraphic {
         let Vec2(w, h) = size;
         let commands = vec![
@@ -35,10 +39,7 @@ impl VectorComponent for Rectangle {
             PathCommand::Close,
         ];
         VectorGraphic {
-            view_box: Rect {
-                origin: Vec2::ZERO,
-                size,
-            },
+            view_box: stroked_bounds(size, &self.stroke),
             root: Node::Path(Path {
                 commands,
                 fill: self.fill.clone(),
@@ -62,6 +63,10 @@ pub struct Circle {
 impl VectorComponent for Circle {
     fn layout(&self, constraints: Constraints) -> Vec2 {
         constraints.constrain(Vec2(self.radius * 2.0, self.radius * 2.0))
+    }
+
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        stroked_bounds(size, &self.stroke)
     }
 
     fn render(&self, size: Vec2) -> VectorGraphic {
@@ -88,6 +93,10 @@ impl VectorComponent for Ellipse {
         constraints.constrain(Vec2(self.radii.0 * 2.0, self.radii.1 * 2.0))
     }
 
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        stroked_bounds(size, &self.stroke)
+    }
+
     fn render(&self, size: Vec2) -> VectorGraphic {
         ellipse_to_graphic(
             Vec2(size.0 * 0.5, size.1 * 0.5),
@@ -101,10 +110,22 @@ impl VectorComponent for Ellipse {
 // 4 * (sqrt(2) - 1) / 3. The maximum error is around 0.027% of the radius.
 const KAPPA: f32 = 0.552_284_8;
 
+fn stroked_bounds(size: Vec2, stroke: &Option<Stroke>) -> Rect {
+    let outset = stroke
+        .as_ref()
+        .map(|stroke| (stroke.width * 0.5).max(0.0))
+        .unwrap_or(0.0);
+    Rect {
+        origin: Vec2(-outset, -outset),
+        size: Vec2(size.0 + outset * 2.0, size.1 + outset * 2.0),
+    }
+}
+
 // Builds an ellipse whose tight bounding box is anchored at the local origin
 // `(0, 0)` and has size `2 * radii`.
 fn ellipse_to_graphic(radii: Vec2, fill: Option<Fill>, stroke: Option<Stroke>) -> VectorGraphic {
     let Vec2(rx, ry) = radii;
+    let size = Vec2(rx * 2.0, ry * 2.0);
     let cx = rx;
     let cy = ry;
     let ox = rx * KAPPA;
@@ -136,10 +157,7 @@ fn ellipse_to_graphic(radii: Vec2, fill: Option<Fill>, stroke: Option<Stroke>) -
     ];
 
     VectorGraphic {
-        view_box: Rect {
-            origin: Vec2::ZERO,
-            size: Vec2(rx * 2.0, ry * 2.0),
-        },
+        view_box: stroked_bounds(size, &stroke),
         root: Node::Path(Path {
             commands,
             fill,
@@ -152,9 +170,9 @@ fn ellipse_to_graphic(radii: Vec2, fill: Option<Fill>, stroke: Option<Stroke>) -
 #[cfg(test)]
 mod builder_tests {
     use super::*;
-    use crate::builder::VectorBuilderPlacement;
+    use crate::builder::{VectorBuilderPlacement, VectorBuilderTransform};
     use crate::color::Color;
-    use crate::geometry::Anchor;
+    use crate::geometry::{Anchor, Transform};
     use crate::vector::Paint;
 
     fn paint() -> Paint {
@@ -198,5 +216,66 @@ mod builder_tests {
             .anchored(Anchor::CENTER)
             .snap_to(Vec2(10.0, 10.0));
         assert_eq!(p2.offset, Vec2(5.0, 5.0));
+    }
+
+    #[test]
+    fn builder_transform_and_opacity() {
+        let transformed = Ellipse::builder()
+            .radii(Vec2(5.0, 5.0))
+            .transform(Transform::scale(Vec2(2.0, 2.0)))
+            .opacity(0.5);
+        assert_eq!(transformed.transform, Transform::scale(Vec2(2.0, 2.0)));
+        assert_eq!(transformed.opacity, 0.5);
+    }
+
+    #[test]
+    fn shape_paint_bounds_include_stroke_outset() {
+        let rect = Rectangle::builder()
+            .size(Vec2(10.0, 20.0))
+            .stroke(Stroke {
+                paint: paint(),
+                width: 4.0,
+            })
+            .build();
+        assert_eq!(
+            rect.paint_bounds(Vec2(10.0, 20.0)),
+            Rect {
+                origin: Vec2(-2.0, -2.0),
+                size: Vec2(14.0, 24.0),
+            }
+        );
+    }
+
+    #[test]
+    fn shape_view_box_matches_stroked_paint_bounds() {
+        let stroke = Stroke {
+            paint: paint(),
+            width: 4.0,
+        };
+        let expected = Rect {
+            origin: Vec2(-2.0, -2.0),
+            size: Vec2(14.0, 24.0),
+        };
+
+        let rect = Rectangle::builder()
+            .size(Vec2(10.0, 20.0))
+            .stroke(stroke.clone())
+            .build();
+        assert_eq!(rect.render(Vec2(10.0, 20.0)).view_box, expected);
+
+        let ellipse = Ellipse::builder()
+            .radii(Vec2(5.0, 10.0))
+            .stroke(stroke.clone())
+            .build();
+        assert_eq!(ellipse.render(Vec2(10.0, 20.0)).view_box, expected);
+
+        let circle = Circle::builder().radius(5.0).stroke(stroke).build();
+        assert_eq!(
+            circle.render(Vec2(10.0, 10.0)).view_box,
+            Rect {
+                origin: Vec2(-2.0, -2.0),
+                size: Vec2(14.0, 14.0),
+            }
+        );
     }
 }

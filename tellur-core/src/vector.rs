@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use crate::color::Color;
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
+use crate::scalar::clamp_unit;
 use crate::Keyable;
 
 /// A piece of vector content with a paint-bounds rectangle.
@@ -30,9 +31,10 @@ pub struct VectorGraphic {
 ///    chosen size to obtain the graphic.
 ///
 /// Optionally the parent calls [`paint_bounds`](VectorComponent::paint_bounds)
-/// with the chosen size to know how far the component paints outside the
-/// layout box (useful for `Layer::render` sub-resolution sizing and for
-/// rasterize buffer allocation).
+/// with the chosen size to know the layout box plus anything the component
+/// paints outside it (useful for `Layer::render` sub-resolution sizing and for
+/// rasterize buffer allocation). Implementations should include the layout
+/// rectangle `(0, 0)..size` in the returned bounds.
 ///
 /// Element components implement `layout` and `render` directly. Composite
 /// components (produced by `#[vector_component]`) usually do the same,
@@ -98,10 +100,116 @@ impl Hash for dyn VectorComponent {
     }
 }
 
+/// A [`VectorComponent`] wrapped in an affine transform and group opacity.
+///
+/// Transforms are layout-neutral: `layout` forwards to the child unchanged.
+/// The transform is reflected in `paint_bounds`, `render().view_box`, and the
+/// emitted node tree, while the untransformed layout box remains inside those
+/// bounds. Anchor-based placement therefore snaps the pre-transform intrinsic
+/// box; callers that need transformed geometry to affect layout should wrap the
+/// transformed component in an explicit container.
+#[derive(Keyable)]
+pub struct Transformed {
+    pub transform: Transform,
+    pub opacity: f32,
+    pub child: Box<dyn VectorComponent>,
+}
+
+impl Transformed {
+    pub fn new<C: VectorComponent + 'static>(transform: Transform, child: C) -> Self {
+        Self {
+            transform,
+            opacity: 1.0,
+            child: Box::new(child),
+        }
+    }
+
+    pub fn from_box(transform: Transform, child: Box<dyn VectorComponent>) -> Self {
+        Self {
+            transform,
+            opacity: 1.0,
+            child,
+        }
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+}
+
+impl VectorComponent for Transformed {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.child.layout(constraints)
+    }
+
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        transformed_bounds(size, self.child.paint_bounds(size), self.transform)
+    }
+
+    fn render(&self, size: Vec2) -> VectorGraphic {
+        let inner = self.child.render(size);
+        VectorGraphic {
+            view_box: transformed_bounds(size, inner.view_box, self.transform),
+            root: Node::single_group(self.transform, self.opacity, inner.root),
+        }
+    }
+}
+
+impl From<Transformed> for Box<dyn VectorComponent> {
+    fn from(transformed: Transformed) -> Self {
+        Box::new(transformed)
+    }
+}
+
+/// Extension trait adding transform wrappers to vector components.
+pub trait VectorTransform: VectorComponent + Sized + 'static {
+    fn transform(self, transform: Transform) -> Transformed {
+        Transformed::new(transform, self)
+    }
+
+    fn opacity(self, opacity: f32) -> Transformed {
+        Transformed::new(Transform::IDENTITY, self).opacity(opacity)
+    }
+}
+
+impl<T: VectorComponent + 'static> VectorTransform for T {}
+
+fn transformed_bounds(size: Vec2, child_bounds: Rect, transform: Transform) -> Rect {
+    let layout_bounds = Rect {
+        origin: Vec2::ZERO,
+        size,
+    };
+    let base_bounds = union_rect(layout_bounds, child_bounds);
+    union_rect(base_bounds, transform.transform_rect(base_bounds))
+}
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let a_end = Vec2(a.origin.0 + a.size.0, a.origin.1 + a.size.1);
+    let b_end = Vec2(b.origin.0 + b.size.0, b.origin.1 + b.size.1);
+    let origin = Vec2(a.origin.0.min(b.origin.0), a.origin.1.min(b.origin.1));
+    let end = Vec2(a_end.0.max(b_end.0), a_end.1.max(b_end.1));
+    Rect {
+        origin,
+        size: Vec2(end.0 - origin.0, end.1 - origin.1),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
     Group(Group),
+    SingleGroup(SingleGroup),
     Path(Path),
+}
+
+impl Node {
+    pub fn single_group(transform: Transform, opacity: f32, child: Node) -> Self {
+        Self::SingleGroup(SingleGroup {
+            transform,
+            opacity: clamp_unit(opacity),
+            child: Box::new(child),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Keyable)]
@@ -109,6 +217,13 @@ pub struct Group {
     pub transform: Transform,
     pub opacity: f32,
     pub children: Vec<Node>,
+}
+
+#[derive(Debug, Clone, Keyable)]
+pub struct SingleGroup {
+    pub transform: Transform,
+    pub opacity: f32,
+    pub child: Box<Node>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -144,15 +259,45 @@ pub enum Paint {
     Solid(Color),
 }
 
+impl Paint {
+    pub const fn solid(color: Color) -> Self {
+        Self::Solid(color)
+    }
+}
+
+impl From<Color> for Paint {
+    fn from(color: Color) -> Self {
+        Self::solid(color)
+    }
+}
+
+impl From<Color> for Option<Paint> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
+    }
+}
+
 impl From<Paint> for Fill {
     fn from(paint: Paint) -> Self {
         Self { paint }
     }
 }
 
+impl From<Color> for Fill {
+    fn from(color: Color) -> Self {
+        Paint::from(color).into()
+    }
+}
+
 impl From<Paint> for Option<Fill> {
     fn from(paint: Paint) -> Self {
         Some(Fill { paint })
+    }
+}
+
+impl From<Color> for Option<Fill> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
     }
 }
 
@@ -163,8 +308,126 @@ impl From<Paint> for Stroke {
     }
 }
 
+impl From<Color> for Stroke {
+    fn from(color: Color) -> Self {
+        Paint::from(color).into()
+    }
+}
+
 impl From<Paint> for Option<Stroke> {
     fn from(paint: Paint) -> Self {
         Some(paint.into())
+    }
+}
+
+impl From<Color> for Option<Stroke> {
+    fn from(color: Color) -> Self {
+        Some(color.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shapes::Rectangle;
+
+    #[test]
+    fn color_converts_to_paint_fill_and_stroke() {
+        let color = Color::rgb_u8(10, 20, 30);
+
+        assert_eq!(Paint::solid(color), Paint::Solid(color));
+        assert_eq!(Paint::from(color), Paint::Solid(color));
+        assert_eq!(Fill::from(color).paint, Paint::Solid(color));
+
+        let stroke = Stroke::from(color);
+        assert_eq!(stroke.paint, Paint::Solid(color));
+        assert_eq!(stroke.width, 1.0);
+    }
+
+    #[test]
+    fn color_converts_to_optional_paint_styles() {
+        let color = Color::rgb_u8(40, 50, 60);
+
+        assert_eq!(Option::<Paint>::from(color), Some(Paint::Solid(color)));
+        assert_eq!(
+            Option::<Fill>::from(color),
+            Some(Fill {
+                paint: Paint::Solid(color),
+            })
+        );
+        assert_eq!(
+            Option::<Stroke>::from(color),
+            Some(Stroke {
+                paint: Paint::Solid(color),
+                width: 1.0,
+            })
+        );
+    }
+
+    #[test]
+    fn transformed_layout_is_layout_neutral() {
+        let transformed = Rectangle {
+            size: Vec2(10.0, 20.0),
+            fill: None,
+            stroke: None,
+        }
+        .transform(Transform::translate(Vec2(5.0, 7.0)));
+
+        assert_eq!(transformed.layout(Constraints::UNBOUNDED), Vec2(10.0, 20.0));
+        assert_eq!(
+            transformed.paint_bounds(Vec2(10.0, 20.0)),
+            Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(15.0, 27.0),
+            }
+        );
+        assert_eq!(
+            transformed.render(Vec2(10.0, 20.0)).view_box,
+            Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(15.0, 27.0),
+            }
+        );
+    }
+
+    #[test]
+    fn transformed_bounds_do_not_shrink_the_layout_box() {
+        let transformed = Rectangle {
+            size: Vec2(4.0, 20.0),
+            fill: None,
+            stroke: None,
+        }
+        .transform(Transform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            tx: 12.0,
+            ty: 8.0,
+        });
+        let expected = Rect {
+            origin: Vec2(-8.0, 0.0),
+            size: Vec2(20.0, 20.0),
+        };
+
+        assert_eq!(transformed.layout(Constraints::UNBOUNDED), Vec2(4.0, 20.0));
+        assert_eq!(transformed.paint_bounds(Vec2(4.0, 20.0)), expected);
+        assert_eq!(transformed.render(Vec2(4.0, 20.0)).view_box, expected);
+    }
+
+    #[test]
+    fn transformed_opacity_treats_nan_as_zero() {
+        let transformed = Rectangle {
+            size: Vec2(1.0, 1.0),
+            fill: None,
+            stroke: None,
+        }
+        .opacity(f32::NAN);
+
+        let graphic = transformed.render(Vec2(1.0, 1.0));
+        let Node::SingleGroup(group) = graphic.root else {
+            panic!("Transformed should render as a single-child group");
+        };
+        assert_eq!(group.opacity, 0.0);
     }
 }

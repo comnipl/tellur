@@ -19,18 +19,21 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         return VectorLayer::builder().size(SCENE_SIZE).build();
     }
 
-    let life = ease_in_out_expo(time.phase(5.05, 5.5));
+    let life = time.phase(5.05, 5.5).ease_in_out_expo(0.0, 1.0);
 
     // Phase 1: contracting hero ring (same R=300 that SCAN ended on).
-    let contract = ease_in_out_expo(time.phase(5.2, 6.3));
+    let contract = time.phase(5.2, 6.3).ease_in_out_expo(0.0, 1.0);
     let ring_r = lerp(300.0, 22.0, contract);
-    let ring_alpha = (1.0 - contract * 0.55) * life;
+    // Fade ring from full to 45% as it contracts.
+    let ring_alpha = lerp(1.0, 0.45, contract) * life;
 
     // Phase 2 inputs. `cluster_spin` is shared by the satellites and the
-    // surviving central mark's rays / field hash marks.
-    let sats_in = ease_in_out_expo(time.phase(5.25, 6.35));
-    let cluster_spin =
-        ease_out_cubic(time.phase(6.35, 7.0)) * (time.seconds() - 6.35).max(0.0) * 0.18;
+    // surviving central mark's rays / field hash marks. The cluster `Window`
+    // ties the ease-in envelope (`phase()`) and the unbounded post-anchor
+    // angular sweep (`elapsed()`) to one declared `[6.35, 7.0)` interval.
+    let sats_in = time.phase(5.25, 6.35).ease_in_out_expo(0.0, 1.0);
+    let cluster = time.window(6.35, 7.0);
+    let cluster_spin = cluster.phase().ease_out_cubic(0.0, 1.0) * cluster.elapsed() * 0.18;
 
     VectorLayer::builder()
         .size(SCENE_SIZE)
@@ -39,7 +42,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(ring_r)
-                .stroke(alpha(p.cyan, ring_alpha * 0.9))
+                .stroke(p.cyan.with_alpha(ring_alpha * 0.9))
                 .stroke_width(3.5)
         }))
         // Phase 2: 8 satellites slide along their angular rays toward center.
@@ -55,11 +58,11 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let pos = Vec2(CX + a.cos() * target_r, CY + a.sin() * target_r);
             let color = if cardinal { p.pink } else { p.cyan };
             let size = lerp(12.0, if cardinal { 6.0 } else { 4.5 }, sats_in);
-            let sat_alpha = (1.0 - sats_in * 0.4) * life;
+            let sat_alpha = lerp(1.0, 0.6, sats_in) * life;
             Circle::builder()
                 .center(pos)
                 .radius(size)
-                .fill(alpha(color, sat_alpha))
+                .fill(color.with_alpha(sat_alpha))
         }))
         // Phase 3: "memory" rings — ghosts of where the contracting ring used
         // to be. Three after-images spawn as the ring sweeps inward, each
@@ -68,14 +71,16 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             [(5.55_f32, 230.0_f32), (5.85, 160.0), (6.12, 95.0)]
                 .into_iter()
                 .filter_map(move |(start, r)| {
-                    let ghost_in = ease_out_cubic(time.phase(start, start + 0.08));
-                    let ghost_out = ease_in_out_expo(time.phase(start + 0.25, start + 1.3));
-                    let ghost = (ghost_in * (1.0 - ghost_out)).clamp(0.0, 1.0);
+                    let ghost_in = time.phase(start, start + 0.08).ease_out_cubic(0.0, 1.0);
+                    let ghost_remain = time
+                        .phase(start + 0.25, start + 1.3)
+                        .ease_in_out_expo(1.0, 0.0);
+                    let ghost = (ghost_in * ghost_remain).clamp(0.0, 1.0);
                     (ghost > 0.0).then(|| {
                         Circle::builder()
                             .center(Vec2(CX, CY))
                             .radius(r)
-                            .stroke(alpha(p.cyan, life * ghost * 0.32))
+                            .stroke(p.cyan.with_alpha(life * ghost * 0.32))
                             .stroke_width(1.8)
                     })
                 })
@@ -84,21 +89,21 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // Phase 4: the singularity flash — a brief paper bloom at the moment
         // everything collapses to the center.
         .maybe_child({
-            let sing = ease_out_quint(time.phase(6.2, 6.32))
-                * (1.0 - ease_in_out_expo(time.phase(6.32, 6.62)));
+            let sing = time.phase(6.2, 6.32).ease_out_quint(0.0, 1.0)
+                * time.phase(6.32, 6.62).ease_in_out_expo(1.0, 0.0);
             (sing > 0.0).then(|| {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(46.0 + sing * 20.0)
-                    .fill(alpha(p.paper, sing * life * 0.95))
+                    .fill(p.paper.with_alpha(sing * life * 0.95))
             })
         })
         // 16 short radial shards — emit-then-fade exactly at the singularity.
         // Length peaks then collapses inward as they vanish.
         .maybe_child({
-            let shard_kick = ease_out_quint(time.phase(6.22, 6.36));
-            let shard_fade = ease_in_out_expo(time.phase(6.36, 6.6));
-            let shard_life = (shard_kick * (1.0 - shard_fade)).clamp(0.0, 1.0);
+            let shard_kick = time.phase(6.22, 6.36).ease_out_quint(0.0, 1.0);
+            let shard_fade = time.phase(6.36, 6.6).ease_in_out_expo(1.0, 0.0);
+            let shard_life = (shard_kick * shard_fade).clamp(0.0, 1.0);
             (shard_life > 0.0).then(|| {
                 (0..16)
                     .map(move |i| {
@@ -112,7 +117,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .center(mid)
                             .size(Vec2(2.0, length))
                             .angle(a + PI_HALF)
-                            .color(alpha(color, life * shard_life * 0.9))
+                            .color(color.with_alpha(life * shard_life * 0.9))
                             .opacity(1.0)
                             .scale(Vec2(1.0, 1.0))
                     })
@@ -123,28 +128,28 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // ring kicks out from center with an elastic-eased launch, then a
         // quint-eased growth carries it past the edge.
         .maybe_child({
-            let pulse_kick = ease_out_elastic(time.phase(6.22, 6.55)).max(0.0);
-            let pulse_grow = ease_out_quint(time.phase(6.3, 7.15));
-            let pulse_fade = 1.0 - ease_in_out_expo(time.phase(6.7, 7.25));
-            let pulse_r = pulse_kick * 600.0 * (0.05 + pulse_grow * 0.95);
+            let pulse_kick = time.phase(6.22, 6.55).ease_out_elastic(0.0, 600.0).max(0.0);
+            let pulse_grow = time.phase(6.3, 7.15).ease_out_quint(0.0, 1.0);
+            let pulse_fade = time.phase(6.7, 7.25).ease_in_out_expo(1.0, 0.0);
+            let pulse_r = pulse_kick * (0.05 + pulse_grow * 0.95);
             (pulse_r > 12.0 && pulse_fade > 0.0).then(|| {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(pulse_r)
-                    .stroke(alpha(p.cyan, life * pulse_fade * 0.9))
+                    .stroke(p.cyan.with_alpha(life * pulse_fade * 0.9))
                     .stroke_width(3.5)
             })
         })
         // Secondary, smaller, delayed ripple in pink for rhythm.
         .maybe_child({
-            let pulse2_grow = ease_out_quint(time.phase(6.6, 7.3));
-            let pulse2_fade = 1.0 - ease_in_out_expo(time.phase(6.95, 7.4));
+            let pulse2_grow = time.phase(6.6, 7.3).ease_out_quint(0.0, 1.0);
+            let pulse2_fade = time.phase(6.95, 7.4).ease_in_out_expo(1.0, 0.0);
             let pulse2_r = pulse2_grow * 420.0;
             (pulse2_r > 12.0 && pulse2_fade > 0.0).then(|| {
                 Circle::builder()
                     .center(Vec2(CX, CY))
                     .radius(pulse2_r)
-                    .stroke(alpha(p.pink, life * pulse2_fade * 0.55))
+                    .stroke(p.pink.with_alpha(life * pulse2_fade * 0.55))
                     .stroke_width(2.0)
             })
         })
@@ -152,7 +157,7 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // mark. Hub + pink hairline collar + 4 axis rays + a dim outer field
         // ring with hash marks + an orbiting scan dot.
         .maybe_child({
-            let comp_in = ease_out_cubic(time.phase(6.27, 6.7));
+            let comp_in = time.phase(6.27, 6.7).ease_out_cubic(0.0, 1.0);
             (comp_in > 0.0).then(|| {
                 CentralMark::builder()
                     .time(time)
@@ -165,9 +170,9 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // Four alignment ticks at the cardinals just outside the field ring,
         // making the central mark a fully four-way-symmetric axis indicator.
         .maybe_child({
-            let tick_in = ease_out_cubic(time.phase(6.85, 7.15));
+            let tick_in = time.phase(6.85, 7.15).ease_out_cubic(0.0, 1.0);
             (tick_in > 0.0).then(|| {
-                let tick_alpha = alpha(p.paper, life * 0.5);
+                let tick_alpha = p.paper.with_alpha(life * 0.5);
                 let arm_len = 22.0 * tick_in;
                 let offset = 96.0;
                 Fragment::builder()
@@ -218,8 +223,8 @@ fn CentralMark(
 ) -> impl VectorComponent {
     let p = palette;
     let breath = 1.0 + wave(time, 1.4, 0.0) * 0.06;
-    let ray_in = ease_out_cubic(time.phase(6.5, 6.95));
-    let field_in = ease_out_cubic(time.phase(6.65, 7.1));
+    let ray_in = time.phase(6.5, 6.95).ease_out_cubic(0.0, 1.0);
+    let field_in = time.phase(6.65, 7.1).ease_out_cubic(0.0, 1.0);
 
     Fragment::builder()
         // (a) the hub: a filled cyan core.
@@ -227,14 +232,14 @@ fn CentralMark(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(7.5 * comp_in * breath)
-                .fill(alpha(p.cyan, life)),
+                .fill(p.cyan.with_alpha(life)),
         )
         // (b) pink hairline collar one step out from the hub.
         .child(
             Circle::builder()
                 .center(Vec2(CX, CY))
                 .radius(14.0 * comp_in)
-                .stroke(alpha(p.pink, life * 0.9))
+                .stroke(p.pink.with_alpha(life * 0.9))
                 .stroke_width(1.6),
         )
         // (c) four axis rays at the cardinals, rotating with the cluster.
@@ -251,7 +256,7 @@ fn CentralMark(
                         .center(mid)
                         .size(Vec2(1.5, length))
                         .angle(a + PI_HALF)
-                        .color(alpha(p.paper, life * 0.55))
+                        .color(p.paper.with_alpha(life * 0.55))
                         .opacity(1.0)
                         .scale(Vec2(1.0, 1.0))
                 })
@@ -260,13 +265,18 @@ fn CentralMark(
         // (d) outer "field" ring with 12 micro-hash-marks + (e) orbiting dot.
         .maybe_child((field_in > 0.0).then(|| {
             let field_r = 78.0 + (1.0 - breath) * 4.0;
-            let orbit_in = ease_out_cubic(time.phase(6.8, 7.2));
+            // The orbit `Window` pairs the dot's ease-in (`phase()`) with the
+            // continuously-advancing orbital angle (`elapsed()`) — both
+            // anchored at 6.8s, so the dot fades in while the orbit is
+            // already accruing angle.
+            let orbit = time.window(6.8, 7.2);
+            let orbit_in = orbit.phase().ease_out_cubic(0.0, 1.0);
             Fragment::builder()
                 .child(
                     Circle::builder()
                         .center(Vec2(CX, CY))
                         .radius(field_r * field_in)
-                        .stroke(alpha(p.paper, life * 0.25))
+                        .stroke(p.paper.with_alpha(life * 0.25))
                         .stroke_width(1.0),
                 )
                 .children((0..12).map(move |k| {
@@ -280,14 +290,14 @@ fn CentralMark(
                         .center(mid)
                         .size(Vec2(if major { 2.0 } else { 1.2 }, 8.0 * field_in))
                         .angle(a + PI_HALF)
-                        .color(alpha(p.paper, life * if major { 0.6 } else { 0.35 }))
+                        .color(p.paper.with_alpha(life * if major { 0.6 } else { 0.35 }))
                         .opacity(1.0)
                         .scale(Vec2(1.0, 1.0))
                 }))
                 // (e) a single small "scan dot" orbiting the field ring.
                 .maybe_child((orbit_in > 0.0).then(|| {
                     let orbit_period = 3.6;
-                    let orbit_a = (time.seconds() - 6.8).max(0.0) * (TAU / orbit_period) - PI_HALF;
+                    let orbit_a = orbit.elapsed() * (TAU / orbit_period) - PI_HALF;
                     let orbit_pos =
                         Vec2(CX + orbit_a.cos() * field_r, CY + orbit_a.sin() * field_r);
                     let trail_count = 4_i32;
@@ -297,7 +307,7 @@ fn CentralMark(
                             Circle::builder()
                                 .center(orbit_pos)
                                 .radius(3.0 * orbit_in)
-                                .fill(alpha(p.cyan, life * orbit_in)),
+                                .fill(p.cyan.with_alpha(life * orbit_in)),
                         )
                         // Tiny leading whisker — a 1px hairline behind the dot.
                         .children((1..=trail_count).map(move |j| {
@@ -308,7 +318,7 @@ fn CentralMark(
                             Circle::builder()
                                 .center(pos)
                                 .radius(1.5 * orbit_in)
-                                .fill(alpha(p.cyan, life * orbit_in * fade * 0.5))
+                                .fill(p.cyan.with_alpha(life * orbit_in * fade * 0.5))
                         }))
                         .build()
                 }))

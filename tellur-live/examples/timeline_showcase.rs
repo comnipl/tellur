@@ -25,8 +25,10 @@ use std::f32::consts::{PI, TAU};
 
 use tellur_core::builder::{RasterEffect, VectorBuilderPlacement};
 use tellur_core::color::Color;
+use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::{Layer, VectorLayer};
+use tellur_core::phase::Phase;
 use tellur_core::placement::raster::Positioned as RasterPositioned;
 use tellur_core::placement::{Positioned, RasterPlacement};
 use tellur_core::shapes::{Circle, Rectangle};
@@ -79,22 +81,17 @@ const HOLE: Color = Color::rgb_u8(15, 17, 25); // sprocket holes
 /// Multiplies a color's alpha (used to thread an envelope's opacity through a
 /// whole shape tree).
 fn fade(c: Color, a: f32) -> Color {
-    Color {
-        a: c.a * a.clamp(0.0, 1.0),
-        ..c
-    }
+    c.multiply_alpha(a)
 }
 
 /// Smoothstep easing for `[0,1]` progress (eases in AND out).
 fn ease(p: f32) -> f32 {
-    let p = p.clamp(0.0, 1.0);
-    p * p * (3.0 - 2.0 * p)
+    Phase::saturating(p).ease_smoothstep(0.0, 1.0)
 }
 
 /// Cubic ease-out: fast start, gentle settle — a satisfying "snap into place".
 fn ease_out(p: f32) -> f32 {
-    let p = p.clamp(0.0, 1.0);
-    1.0 - (1.0 - p).powi(3)
+    Phase::saturating(p).ease_out_cubic(0.0, 1.0)
 }
 
 /// The per-chapter enter/exit transition, shared by every windowed element so

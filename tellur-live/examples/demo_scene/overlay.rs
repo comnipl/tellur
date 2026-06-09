@@ -29,16 +29,6 @@ pub const OVERLAY_FLASH_END: f32 = 5.35;
 pub const OVERLAY_FADE_START: f32 = 7.25;
 // The fade runs to the end of the timeline, so its window end is `DURATION`.
 
-const OVERLAY_BOOT_WIDTH: f32 = OVERLAY_BOOT_END - OVERLAY_BOOT_START;
-const OVERLAY_FLASH_WIDTH: f32 = OVERLAY_FLASH_END - OVERLAY_FLASH_START;
-
-// Sub-phase of an event spanning `[start, end]` (both absolute, but shifted
-// into the window-local frame by the caller) at virtual elapsed time `t`.
-// Mirrors `hud::local_phase` / `backdrop::local_phase`.
-fn local_phase(virtual_t: f32, start: f32, end: f32) -> Phase {
-    Phase::saturating((virtual_t - start) / (end - start))
-}
-
 #[tellur_core::component(vector)]
 pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl VectorComponent {
     let p = palette;
@@ -48,21 +38,20 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // subtitle briefly appears at center then fades, before the HUD has
         // finished assembling. Reads as a system startup flash.
         .maybe_child({
-            // Virtual elapsed seconds inside the boot window. The window width
-            // is exactly 0.5, so this round-trips the original `time` bit-for-
-            // bit; sub-events are then expressed in window-local coordinates.
-            let t = boot.get() * OVERLAY_BOOT_WIDTH;
-            let boot_in = ease_in_out_expo(local_phase(
-                t,
-                0.05 - OVERLAY_BOOT_START,
-                0.18 - OVERLAY_BOOT_START,
-            ));
-            let boot_out = ease_in_out_expo(local_phase(
-                t,
-                0.32 - OVERLAY_BOOT_START,
-                0.55 - OVERLAY_BOOT_START,
-            ));
-            let boot_life = (boot_in * (1.0 - boot_out)).clamp(0.0, 1.0);
+            // Sub-events are addressed in window-local seconds via
+            // `sub_secs(boot, ...)`, so the original absolute starts are shifted
+            // into the window's frame here.
+            let boot_in = sub_secs(
+                boot,
+                (0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START),
+            )
+            .ease_in_out_expo(0.0, 1.0);
+            let boot_out = sub_secs(
+                boot,
+                (0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START),
+            )
+            .ease_in_out_expo(1.0, 0.0);
+            let boot_life = boot_in * boot_out;
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
                     .child(
@@ -71,7 +60,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                             .anchor(Anchor::BOTTOM_CENTER)
                             .text("TELLUR")
                             .size(42.0)
-                            .color(alpha(p.paper, boot_life * 0.95))
+                            .color(p.paper.with_alpha(boot_life * 0.95))
                             .weight(Weight::BOLD),
                     )
                     .child(
@@ -80,7 +69,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                             .anchor(Anchor::TOP_CENTER)
                             .text("00:00:00.000 · INIT")
                             .size(13.0)
-                            .color(alpha(p.paper, boot_life * 0.7))
+                            .color(p.paper.with_alpha(boot_life * 0.7))
                             .weight(Weight::NORMAL),
                     )
                     // A tiny pink underline dash to the right of "INIT".
@@ -88,7 +77,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
                         Rect::builder()
                             .position(Vec2(CX + 88.0, CY + 18.0))
                             .size(Vec2(20.0 * boot_in, 2.0))
-                            .color(alpha(p.pink, boot_life)),
+                            .color(p.pink.with_alpha(boot_life)),
                     )
                     .build()
             })
@@ -97,33 +86,33 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // unshadowed overlay so it doesn't smear into a grey haze through the
         // foreground shadow pass.
         .maybe_child({
-            let t = flash.get() * OVERLAY_FLASH_WIDTH;
-            let flash = ease_out_quint(local_phase(
-                t,
-                4.9 - OVERLAY_FLASH_START,
-                5.05 - OVERLAY_FLASH_START,
-            )) * (1.0
-                - ease_in_out_expo(local_phase(
-                    t,
-                    5.05 - OVERLAY_FLASH_START,
-                    5.35 - OVERLAY_FLASH_START,
-                )));
+            let flash_in = sub_secs(
+                flash,
+                (4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START),
+            )
+            .ease_out_quint(0.0, 1.0);
+            let flash_out = sub_secs(
+                flash,
+                (5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START),
+            )
+            .ease_in_out_expo(1.0, 0.0);
+            let flash = flash_in * flash_out;
             (flash > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)
                     .size(SCENE_SIZE)
-                    .color(alpha(p.paper, flash * 0.22))
+                    .color(p.paper.with_alpha(flash * 0.22))
             })
         })
         // Exit fade — gentle quint ease into the bg color. The `fade` phase
         // already spans the whole window, so it drives the ease directly.
         .maybe_child({
-            let fade = ease_in_out_quint(fade);
+            let fade = fade.ease_in_out_quint(0.0, 1.0);
             (fade > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)
                     .size(SCENE_SIZE)
-                    .color(alpha(p.bg, fade))
+                    .color(p.bg.with_alpha(fade))
             })
         })
         .build()

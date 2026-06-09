@@ -11,7 +11,8 @@
 //! path-qualified here: `shapes::Rectangle` / `shapes::Circle` and the
 //! `Aabb` alias for `geometry::Rect`.
 
-use std::f32::consts::{PI, TAU};
+use std::f32::consts::TAU;
+use std::ops::Range;
 
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
@@ -23,8 +24,10 @@ use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::Time;
-use tellur_core::vector::{Group, Node, Paint, Stroke, VectorComponent, VectorGraphic};
+use tellur_core::vector::{Stroke, VectorComponent, VectorGraphic, VectorTransform};
 use tellur_core::Keyable;
+
+pub use tellur_core::easing::PhaseEasing;
 
 pub const DURATION: f32 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
@@ -46,127 +49,32 @@ pub struct Palette {
     pub cyan: Color,
 }
 
-// Composable rotation + non-uniform scale + opacity wrapper.
-#[derive(Keyable)]
-pub struct Fx {
-    pub angle: f32,
-    pub sx: f32,
-    pub sy: f32,
-    pub opacity: f32,
-    pub child: Box<dyn VectorComponent>,
-}
-
-impl VectorComponent for Fx {
-    fn layout(&self, constraints: Constraints) -> Vec2 {
-        self.child.layout(constraints)
-    }
-
-    fn paint_bounds(&self, size: Vec2) -> Aabb {
-        Aabb {
-            origin: Vec2(-size.0 * 2.0, -size.1 * 2.0),
-            size: Vec2(size.0 * 5.0, size.1 * 5.0),
-        }
-    }
-
-    fn render(&self, size: Vec2) -> VectorGraphic {
-        let inner = self.child.render(size);
-        let sx = self.sx.max(0.0001);
-        let sy = self.sy.max(0.0001);
-        let cos = self.angle.cos();
-        let sin = self.angle.sin();
-        let a = cos * sx;
-        let b = sin * sx;
-        let c = -sin * sy;
-        let d = cos * sy;
-        let center = Vec2(size.0 * 0.5, size.1 * 0.5);
-        let tx = center.0 - (a * center.0 + c * center.1);
-        let ty = center.1 - (b * center.0 + d * center.1);
-
-        VectorGraphic {
-            view_box: Aabb {
-                origin: Vec2(-size.0 * 2.0, -size.1 * 2.0),
-                size: Vec2(size.0 * 5.0, size.1 * 5.0),
-            },
-            root: Node::Group(Group {
-                transform: Transform { a, b, c, d, tx, ty },
-                opacity: self.opacity.clamp(0.0, 1.0),
-                children: vec![inner.root],
-            }),
-        }
-    }
-}
-
-pub fn solid(color: Color) -> Paint {
-    Paint::Solid(color)
-}
-
-pub fn alpha(color: Color, value: f32) -> Color {
-    Color {
-        a: value.clamp(0.0, 1.0),
-        ..color
-    }
-}
-
 pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
     from + (to - from) * p
-}
-
-// --- easing functions ---
-
-pub fn ease_out_cubic(p: Phase) -> f32 {
-    1.0 - (1.0 - p.get()).powi(3)
-}
-
-pub fn ease_out_quint(p: Phase) -> f32 {
-    1.0 - (1.0 - p.get()).powi(5)
-}
-
-pub fn ease_in_out_quint(p: Phase) -> f32 {
-    let x = p.get();
-    if x < 0.5 {
-        16.0 * x.powi(5)
-    } else {
-        1.0 - (-2.0 * x + 2.0).powi(5) * 0.5
-    }
-}
-
-pub fn ease_in_out_expo(p: Phase) -> f32 {
-    let x = p.get();
-    if x <= 0.0 {
-        0.0
-    } else if x >= 1.0 {
-        1.0
-    } else if x < 0.5 {
-        2.0_f32.powf(20.0 * x - 10.0) * 0.5
-    } else {
-        (2.0 - 2.0_f32.powf(-20.0 * x + 10.0)) * 0.5
-    }
-}
-
-pub fn ease_in_back(p: Phase) -> f32 {
-    let x = p.get();
-    let c1 = 1.70158;
-    let c3 = c1 + 1.0;
-    c3 * x.powi(3) - c1 * x.powi(2)
-}
-
-pub fn ease_out_elastic(p: Phase) -> f32 {
-    let x = p.get();
-    if x <= 0.0 {
-        0.0
-    } else if x >= 1.0 {
-        1.0
-    } else {
-        let c4 = (2.0 * PI) / 3.0;
-        2.0_f32.powf(-10.0 * x) * ((x * 10.0 - 0.75) * c4).sin() + 1.0
-    }
 }
 
 pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
     ((time.seconds() / period + offset) * TAU).sin()
 }
 
+pub fn sub_secs(phase: Phase, range: Range<f32>) -> Phase {
+    phase
+        .sub_secs(range)
+        .expect("demo sub-phase should fit inside its source window")
+}
+
+// Rise-fall hat envelope `4x(1-x)`: peaks at 1 when value is 0.5, returns to
+// 0 at both endpoints. Used by the transition wipes (OVERTURE→FIELD,
+// FIELD→SCAN, SCAN→RESOLVE) so the sweep stripe is brightest mid-screen.
+// Expects `s ∈ [0, 1]`; callers feed an already-eased sweep factor.
+pub fn peak(s: f32) -> f32 {
+    4.0 * s * (1.0 - s)
+}
+
 // Time-bracketed envelope: rises with `rise`, holds, falls with `fall`.
+// Each callback applies an ease to its window's Phase, producing the
+// fade-in / fade-out factor in [0, 1]. The composed envelope is
+// `rise * (1 - fall)`, clamped to [0, 1].
 pub fn envelope<T: Time, R, F>(
     time: T,
     rise_span: (f32, f32),
@@ -183,6 +91,12 @@ where
     (r * (1.0 - f)).clamp(0.0, 1.0)
 }
 
+fn center_transform(size: Vec2, angle: f32, scale: Vec2) -> Transform {
+    let transform = Transform::scale(Vec2(scale.0.max(0.0001), scale.1.max(0.0001)))
+        .then(Transform::rotate(angle));
+    Transform::around_point(Vec2(size.0 * 0.5, size.1 * 0.5), transform)
+}
+
 // --- leaf components ---
 
 /// A solid-filled rectangle placed with its top-left at `position`. Renders
@@ -195,7 +109,7 @@ pub fn Rect(position: Vec2, size: Vec2, color: Color) -> impl VectorComponent {
     Fragment::single(
         shapes::Rectangle::builder()
             .size(size)
-            .fill(solid(color))
+            .fill(color)
             .place_at(position),
     )
 }
@@ -222,9 +136,13 @@ impl VectorComponent for TrueCircle {
     }
 
     fn paint_bounds(&self, size: Vec2) -> Aabb {
+        let outset = self
+            .stroke_color
+            .map(|_| (self.stroke_width * 0.5).max(0.0))
+            .unwrap_or(0.0);
         Aabb {
-            origin: Vec2::ZERO,
-            size,
+            origin: Vec2(-outset, -outset),
+            size: Vec2(size.0 + outset * 2.0, size.1 + outset * 2.0),
         }
     }
 
@@ -232,9 +150,9 @@ impl VectorComponent for TrueCircle {
         let d = self.radius * 2.0;
         let inner = shapes::Circle::builder()
             .radius(self.radius)
-            .maybe_fill(self.fill.map(solid))
+            .maybe_fill(self.fill)
             .maybe_stroke(self.stroke_color.map(|c| Stroke {
-                paint: solid(c),
+                paint: c.into(),
                 width: self.stroke_width,
             }))
             .build();
@@ -293,7 +211,7 @@ pub fn Label(
             .font(MONOSPACE.clone())
             .size(size)
             .weight(weight)
-            .fill(solid(color))
+            .fill(color)
             .span(TextSpan::plain(text))
             .anchored(anchor)
             .snap_to(position),
@@ -318,20 +236,14 @@ pub fn FxRect(
         return Fragment::empty();
     }
     Fragment::single(
-        Fx {
-            angle,
-            sx: scale.0,
-            sy: scale.1,
-            opacity,
-            child: Box::new(
-                shapes::Rectangle::builder()
-                    .size(size)
-                    .fill(solid(color))
-                    .build(),
-            ),
-        }
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
+        shapes::Rectangle::builder()
+            .size(size)
+            .fill(color)
+            .build()
+            .transform(center_transform(size, angle, scale))
+            .opacity(opacity)
+            .anchored(Anchor::CENTER)
+            .snap_to(center),
     )
 }
 
@@ -355,22 +267,16 @@ pub fn FxOutlineRect(
         return Fragment::empty();
     }
     Fragment::single(
-        Fx {
-            angle,
-            sx: scale.0,
-            sy: scale.1,
-            opacity,
-            child: Box::new(
-                shapes::Rectangle::builder()
-                    .size(size)
-                    .stroke(Stroke {
-                        paint: solid(color),
-                        width,
-                    })
-                    .build(),
-            ),
-        }
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
+        shapes::Rectangle::builder()
+            .size(size)
+            .stroke(Stroke {
+                paint: color.into(),
+                width,
+            })
+            .build()
+            .transform(center_transform(size, angle, scale))
+            .opacity(opacity)
+            .anchored(Anchor::CENTER)
+            .snap_to(center),
     )
 }

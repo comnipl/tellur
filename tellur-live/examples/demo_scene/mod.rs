@@ -46,7 +46,7 @@ use tellur_core::timeline_component::{Arrangement, Clock, TimedBuilder, Timeline
 use tellur_core::timeline_container::Timeline;
 use tellur_renderer::{DropShadow, Rasterizable, RasterizableBuilder};
 
-use common::{alpha, Palette, DURATION, SCENE_SIZE};
+use common::{Palette, DURATION, SCENE_SIZE};
 use hud::{Hud, HUD_INTRO_END, HUD_INTRO_START, HUD_OUTRO_END, HUD_OUTRO_START};
 
 use backdrop::{Backdrop, BACKDROP_REVEAL_END, BACKDROP_REVEAL_START};
@@ -153,7 +153,7 @@ impl Scene {
                                 DropShadow::builder()
                                     // offset omitted → Vec2::ZERO (ambient halo)
                                     .blur(18.0)
-                                    .color(alpha(palette.paper, 0.26)),
+                                    .color(palette.paper.with_alpha(0.26)),
                             )
                             .effect(
                                 DropShadow::builder()

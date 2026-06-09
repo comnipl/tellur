@@ -981,6 +981,25 @@ fn encode_vello_node(
                 scene.pop_layer();
             }
         }
+        Node::SingleGroup(group) => {
+            let opacity = group.opacity.clamp(0.0, 1.0);
+            if opacity <= 0.0 {
+                return Some(());
+            }
+            let transform = concat_transform(transform, group.transform);
+            if opacity < 1.0 {
+                scene.push_layer(
+                    vello::peniko::BlendMode::default(),
+                    opacity,
+                    Affine::IDENTITY,
+                    clip,
+                );
+            }
+            encode_vello_node(scene, &group.child, transform, clip)?;
+            if opacity < 1.0 {
+                scene.pop_layer();
+            }
+        }
         Node::Path(path) => encode_vello_path(scene, path, transform)?,
     }
     Some(())

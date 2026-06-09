@@ -1,3 +1,4 @@
+use crate::scalar::clamp_unit;
 use crate::Keyable;
 
 /// sRGB with straight alpha. Each component is in the range `[0.0, 1.0]`.
@@ -22,6 +23,27 @@ impl Color {
             g: g as f32 / 255.0,
             b: b as f32 / 255.0,
             a: a as f32 / 255.0,
+        }
+    }
+
+    /// Returns this color with `a` replaced by `alpha`, clamped to `[0, 1]`.
+    /// `alpha` accepts anything convertible to `f32` — passing a
+    /// [`Phase`](crate::phase::Phase) directly works via
+    /// `From<Phase> for f32`, so callers can avoid an explicit `.get()`.
+    pub fn with_alpha(self, alpha: impl Into<f32>) -> Self {
+        Self {
+            a: clamp_unit(alpha.into()),
+            ..self
+        }
+    }
+
+    /// Returns this color with its alpha multiplied by `factor`, clamped to
+    /// `[0, 1]` before multiplication. See [`Self::with_alpha`] for the
+    /// `Into<f32>` rationale.
+    pub fn multiply_alpha(self, factor: impl Into<f32>) -> Self {
+        Self {
+            a: self.a * clamp_unit(factor.into()),
+            ..self
         }
     }
 
@@ -88,5 +110,30 @@ fn hue_sector(h: f32, c: f32, x: f32) -> (f32, f32, f32) {
         3 => (0.0, x, c),
         4 => (x, 0.0, c),
         _ => (c, 0.0, x),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_alpha_replaces_and_clamps_alpha() {
+        let color = Color::rgba_u8(10, 20, 30, 128);
+
+        assert_eq!(color.with_alpha(0.25).a, 0.25);
+        assert_eq!(color.with_alpha(-1.0).a, 0.0);
+        assert_eq!(color.with_alpha(2.0).a, 1.0);
+        assert_eq!(color.with_alpha(f32::NAN).a, 0.0);
+    }
+
+    #[test]
+    fn multiply_alpha_scales_existing_alpha() {
+        let color = Color::rgb_u8(10, 20, 30).with_alpha(0.5);
+
+        assert_eq!(color.multiply_alpha(0.5).a, 0.25);
+        assert_eq!(color.multiply_alpha(-1.0).a, 0.0);
+        assert_eq!(color.multiply_alpha(2.0).a, 0.5);
+        assert_eq!(color.multiply_alpha(f32::NAN).a, 0.0);
     }
 }

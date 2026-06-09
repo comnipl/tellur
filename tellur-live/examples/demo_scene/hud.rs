@@ -3,7 +3,7 @@
 //!
 //! Implemented as a `VectorComponent` whose state is reduced to three small,
 //! stable values: a `Palette`, two `Phase`s, and a `section` discriminator.
-//! Once the intro phase saturates to 1.0 (after ~1.24s), and as long as
+//! Once the intro phase saturates to 1.0 (after ~1.35s), and as long as
 //! `section` hasn't ticked over, the struct hashes and compares equal across
 //! frames — so wrapping `Hud` in `.rasterize()` lets `CachingRenderContext`
 //! reuse the rasterized image for the full steady-state span instead of
@@ -20,14 +20,12 @@ use tellur_core::vector::{VectorComponent, VectorGraphic};
 use super::common::*;
 
 // HUD intro/outro time windows. All bracket/tick/label staggers fit inside
-// `INTRO`; everything saturates by `INTRO_END` and the component becomes
-// byte-identical between frames.
+// the intro window expressed via `Phase::sub_secs`; everything saturates by
+// `INTRO_END` and the component becomes byte-identical between frames.
 pub const HUD_INTRO_START: f32 = 0.15;
-pub const HUD_INTRO_END: f32 = 1.24;
+pub const HUD_INTRO_END: f32 = 1.35;
 pub const HUD_OUTRO_START: f32 = 7.1;
 pub const HUD_OUTRO_END: f32 = 7.55;
-const HUD_INTRO_WIDTH: f32 = HUD_INTRO_END - HUD_INTRO_START;
-const HUD_OUTRO_WIDTH: f32 = HUD_OUTRO_END - HUD_OUTRO_START;
 
 fn section_marker(section: u8, p: Palette) -> (&'static str, Color) {
     match section {
@@ -48,13 +46,6 @@ pub fn section_index_at(t: f32) -> u8 {
     } else {
         3
     }
-}
-
-// Phase-local helper: returns the sub-phase reached at virtual time
-// `virtual_t` (measured from the intro/outro start) for an event spanning
-// `[start, end]` in that same virtual frame.
-fn local_phase(virtual_t: f32, start: f32, end: f32) -> Phase {
-    Phase::saturating((virtual_t - start) / (end - start))
 }
 
 #[derive(Clone, Copy, PartialEq, Hash)]
@@ -80,17 +71,14 @@ impl VectorComponent for Hud {
 
 impl Hud {
     fn layer(&self, size: Vec2) -> VectorLayer {
-        // `intro_t` / `outro_t` are virtual elapsed seconds inside the intro
-        // / outro window. Each sub-event below is expressed relative to that
-        // virtual frame — so when `intro = 1.0` (saturated), every sub-phase
-        // is also fully saturated, and the resulting `VectorLayer` is
-        // structurally identical to last frame's.
-        let intro_t = self.intro.get() * HUD_INTRO_WIDTH;
-        let outro_t = self.outro.get() * HUD_OUTRO_WIDTH;
-
-        let alpha_in = ease_in_out_expo(local_phase(intro_t, 0.0, 0.4));
-        let alpha_out = ease_in_out_expo(local_phase(outro_t, 0.0, HUD_OUTRO_WIDTH));
-        let life = (alpha_in * (1.0 - alpha_out)).clamp(0.0, 1.0);
+        // Each sub-event below carves a window-local seconds slice out of
+        // `intro` via `Phase::sub_secs`. The eased factors come out as f32
+        // already interpolated into their target range (here `(0, 1)` for
+        // alpha) via the uniform `ease_*(from, to)` shape.
+        let intro = self.intro;
+        let alpha_in = sub_secs(intro, 0.0..0.4).ease_in_out_expo(0.0, 1.0);
+        let alpha_remain = self.outro.ease_in_out_expo(1.0, 0.0);
+        let life = alpha_in * alpha_remain;
         if life <= 0.0 {
             return VectorLayer::builder().size(size).build();
         }
@@ -100,7 +88,7 @@ impl Hud {
         let inset = 96.0_f32;
         let bracket_len = 92.0_f32;
 
-        let label_in = ease_in_out_expo(local_phase(intro_t, 0.4, 0.8));
+        let label_in = sub_secs(intro, 0.4..0.8).ease_in_out_expo(0.0, 1.0);
         let label_alpha = 0.95 * life * label_in;
         let (idx_text, idx_color) = section_marker(self.section, p);
         let marker_x = SCENE_SIZE.0 - inset;
@@ -121,10 +109,10 @@ impl Hud {
                     .enumerate()
                     .map(move |(i, (ax, ay, dx, dy))| {
                         let stagger = i as f32 * 0.05;
-                        let pop =
-                            ease_out_cubic(local_phase(intro_t, 0.1 + stagger, 0.6 + stagger));
-                        let len = bracket_len * pop;
-                        let color = alpha(p.paper, 0.55 * life);
+                        let pop = sub_secs(intro, (0.1 + stagger)..(0.6 + stagger))
+                            .ease_out_cubic(0.0, 1.0);
+                        let len = pop * bracket_len;
+                        let color = p.paper.with_alpha(life * 0.55);
                         let hx = if dx > 0.0 { ax } else { ax - len };
                         let vy = if dy > 0.0 { ay } else { ay - len };
                         Fragment::builder()
@@ -150,7 +138,7 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_LEFT)
                     .text("TELLUR")
                     .size(20.0)
-                    .color(alpha(p.paper, label_alpha))
+                    .color(p.paper.with_alpha(label_alpha))
                     .weight(Weight::BOLD),
             )
             .child(
@@ -159,7 +147,7 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_LEFT)
                     .text("kinetic-motion · 7.6s")
                     .size(13.0)
-                    .color(alpha(p.paper, 0.5 * life * label_in))
+                    .color(p.paper.with_alpha(0.5 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             // Top-right section marker + accent dot.
@@ -169,14 +157,14 @@ impl Hud {
                     .anchor(Anchor::BOTTOM_RIGHT)
                     .text(idx_text)
                     .size(14.0)
-                    .color(alpha(p.paper, 0.75 * life * label_in))
+                    .color(p.paper.with_alpha(0.75 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .child(
                 Circle::builder()
                     .center(Vec2(marker_x - 128.0, inset - 28.0))
                     .radius(4.5 * label_in)
-                    .fill(alpha(idx_color, life * label_in)),
+                    .fill(idx_color.with_alpha(life * label_in)),
             )
             // Static "OBS" badge below the section marker — reads as a "live
             // observation" tag without animating per frame (so it stays inside
@@ -187,13 +175,14 @@ impl Hud {
                     .anchor(Anchor::TOP_RIGHT)
                     .text("OBS · TELLUR-04")
                     .size(11.0)
-                    .color(alpha(p.paper, 0.4 * life * label_in))
+                    .color(p.paper.with_alpha(0.4 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             // Bottom edge tick ruler — every 4th tick is taller.
             .children((0..17).map(move |i| {
                 let stagger = i as f32 * 0.018;
-                let pop = ease_out_cubic(local_phase(intro_t, 0.3 + stagger, 0.8 + stagger));
+                let pop =
+                    sub_secs(intro, (0.3 + stagger)..(0.8 + stagger)).ease_out_cubic(0.0, 1.0);
                 let bar_left = inset + 24.0;
                 let bar_right = SCENE_SIZE.0 - inset - 24.0;
                 let tick_y_top = SCENE_SIZE.1 - inset + 28.0;
@@ -201,7 +190,7 @@ impl Hud {
                 let x = lerp(bar_left, bar_right, frac);
                 let major = i % 4 == 0;
                 let height = if major { 18.0 } else { 8.0 };
-                let color = alpha(p.paper, if major { 0.55 } else { 0.35 } * life);
+                let color = p.paper.with_alpha(if major { 0.55 } else { 0.35 } * life);
                 Rect::builder()
                     .position(Vec2(x - 1.0, tick_y_top))
                     .size(Vec2(2.0, height * pop))
@@ -211,14 +200,15 @@ impl Hud {
             // instrument frame so the scaffold reads as a full HUD.
             .children((0..11).map(move |i| {
                 let stagger = i as f32 * 0.02;
-                let pop = ease_out_cubic(local_phase(intro_t, 0.55 + stagger, 1.0 + stagger));
+                let pop =
+                    sub_secs(intro, (0.55 + stagger)..(1.0 + stagger)).ease_out_cubic(0.0, 1.0);
                 let v_bar_top = inset + 60.0;
                 let v_bar_bottom = SCENE_SIZE.1 - inset - 60.0;
                 let frac = i as f32 / 10.0;
                 let y = lerp(v_bar_top, v_bar_bottom, frac);
                 let major = i % 5 == 0;
                 let width = if major { 16.0 } else { 7.0 };
-                let color = alpha(p.paper, if major { 0.5 } else { 0.3 } * life);
+                let color = p.paper.with_alpha(if major { 0.5 } else { 0.3 } * life);
                 Fragment::builder()
                     // Left side ticks point inward.
                     .maybe_child((pop > 0.0).then(|| {
@@ -243,7 +233,7 @@ impl Hud {
                     .anchor(Anchor::TOP_LEFT)
                     .text("RUNTIME 7600MS · 60FPS")
                     .size(12.0)
-                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .color(p.paper.with_alpha(0.45 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .child(
@@ -252,7 +242,7 @@ impl Hud {
                     .anchor(Anchor::TOP_RIGHT)
                     .text("1920 × 1080 · RGBA")
                     .size(12.0)
-                    .color(alpha(p.paper, 0.45 * life * label_in))
+                    .color(p.paper.with_alpha(0.45 * life * label_in))
                     .weight(Weight::NORMAL),
             )
             .build()

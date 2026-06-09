@@ -22,10 +22,10 @@
 
 use std::hash::Hash;
 
-use crate::geometry::{Anchor, Constraints, Vec2};
+use crate::geometry::{Anchor, Constraints, Transform, Vec2};
 use crate::placement::{raster::Positioned as RasterPositioned, Positioned};
 use crate::raster::RasterComponent;
-use crate::vector::VectorComponent;
+use crate::vector::{Transformed, VectorComponent, VectorTransform};
 
 /// Implemented (by the component macro) for a *complete* builder of a
 /// [`VectorComponent`]. The blanket [`VectorBuilderPlacement`] hangs off it.
@@ -65,6 +65,20 @@ pub trait VectorBuilderPlacement: VectorBuilder {
 }
 
 impl<B: VectorBuilder> VectorBuilderPlacement for B {}
+
+/// Transform wrappers on complete vector builders, mirroring
+/// [`VectorTransform`] on built components.
+pub trait VectorBuilderTransform: VectorBuilder {
+    fn transform(self, transform: Transform) -> Transformed {
+        self.build_component().transform(transform)
+    }
+
+    fn opacity(self, opacity: f32) -> Transformed {
+        self.build_component().opacity(opacity)
+    }
+}
+
+impl<B: VectorBuilder> VectorBuilderTransform for B {}
 
 /// Raster counterpart of [`VectorBuilderPlacement`].
 pub trait RasterBuilderPlacement: RasterBuilder {
