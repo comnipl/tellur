@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use crate::color::Color;
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
+use crate::scalar::clamp_unit;
 use crate::Keyable;
 
 /// A piece of vector content with a paint-bounds rectangle.
@@ -99,6 +100,12 @@ impl Hash for dyn VectorComponent {
 }
 
 /// A [`VectorComponent`] wrapped in an affine transform and group opacity.
+///
+/// Transforms are layout-neutral: `layout` forwards to the child unchanged.
+/// The transform is reflected in `paint_bounds`, `render().view_box`, and the
+/// emitted node tree. Anchor-based placement therefore snaps the pre-transform
+/// intrinsic box; callers that need transformed geometry to affect layout
+/// should wrap the transformed component in an explicit container.
 #[derive(Keyable)]
 pub struct Transformed {
     pub transform: Transform,
@@ -142,11 +149,7 @@ impl VectorComponent for Transformed {
         let inner = self.child.render(size);
         VectorGraphic {
             view_box: self.transform.transform_rect(inner.view_box),
-            root: Node::Group(Group {
-                transform: self.transform,
-                opacity: self.opacity.clamp(0.0, 1.0),
-                children: vec![inner.root],
-            }),
+            root: Node::single_group(self.transform, self.opacity, inner.root),
         }
     }
 }
@@ -173,7 +176,18 @@ impl<T: VectorComponent + 'static> VectorTransform for T {}
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
     Group(Group),
+    SingleGroup(SingleGroup),
     Path(Path),
+}
+
+impl Node {
+    pub fn single_group(transform: Transform, opacity: f32, child: Node) -> Self {
+        Self::SingleGroup(SingleGroup {
+            transform,
+            opacity: clamp_unit(opacity),
+            child: Box::new(child),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Keyable)]
@@ -181,6 +195,13 @@ pub struct Group {
     pub transform: Transform,
     pub opacity: f32,
     pub children: Vec<Node>,
+}
+
+#[derive(Debug, Clone, Keyable)]
+pub struct SingleGroup {
+    pub transform: Transform,
+    pub opacity: f32,
+    pub child: Box<Node>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -286,6 +307,7 @@ impl From<Color> for Option<Stroke> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shapes::Rectangle;
 
     #[test]
     fn color_converts_to_paint_fill_and_stroke() {
@@ -318,5 +340,47 @@ mod tests {
                 width: 1.0,
             })
         );
+    }
+
+    #[test]
+    fn transformed_layout_is_layout_neutral() {
+        let transformed = Rectangle {
+            size: Vec2(10.0, 20.0),
+            fill: None,
+            stroke: None,
+        }
+        .transform(Transform::translate(Vec2(5.0, 7.0)));
+
+        assert_eq!(transformed.layout(Constraints::UNBOUNDED), Vec2(10.0, 20.0));
+        assert_eq!(
+            transformed.paint_bounds(Vec2(10.0, 20.0)),
+            Rect {
+                origin: Vec2(5.0, 7.0),
+                size: Vec2(10.0, 20.0),
+            }
+        );
+        assert_eq!(
+            transformed.render(Vec2(10.0, 20.0)).view_box,
+            Rect {
+                origin: Vec2(5.0, 7.0),
+                size: Vec2(10.0, 20.0),
+            }
+        );
+    }
+
+    #[test]
+    fn transformed_opacity_treats_nan_as_zero() {
+        let transformed = Rectangle {
+            size: Vec2(1.0, 1.0),
+            fill: None,
+            stroke: None,
+        }
+        .opacity(f32::NAN);
+
+        let graphic = transformed.render(Vec2(1.0, 1.0));
+        let Node::SingleGroup(group) = graphic.root else {
+            panic!("Transformed should render as a single-child group");
+        };
+        assert_eq!(group.opacity, 0.0);
     }
 }

@@ -1,3 +1,4 @@
+use crate::scalar::clamp_unit;
 use crate::Keyable;
 
 /// sRGB with straight alpha. Each component is in the range `[0.0, 1.0]`.
@@ -31,7 +32,7 @@ impl Color {
     /// `From<Phase> for f32`, so callers can avoid an explicit `.get()`.
     pub fn with_alpha(self, alpha: impl Into<f32>) -> Self {
         Self {
-            a: alpha.into().clamp(0.0, 1.0),
+            a: clamp_unit(alpha.into()),
             ..self
         }
     }
@@ -41,7 +42,7 @@ impl Color {
     /// `Into<f32>` rationale.
     pub fn multiply_alpha(self, factor: impl Into<f32>) -> Self {
         Self {
-            a: self.a * factor.into().clamp(0.0, 1.0),
+            a: self.a * clamp_unit(factor.into()),
             ..self
         }
     }
@@ -123,6 +124,7 @@ mod tests {
         assert_eq!(color.with_alpha(0.25).a, 0.25);
         assert_eq!(color.with_alpha(-1.0).a, 0.0);
         assert_eq!(color.with_alpha(2.0).a, 1.0);
+        assert_eq!(color.with_alpha(f32::NAN).a, 0.0);
     }
 
     #[test]
@@ -132,5 +134,6 @@ mod tests {
         assert_eq!(color.multiply_alpha(0.5).a, 0.25);
         assert_eq!(color.multiply_alpha(-1.0).a, 0.0);
         assert_eq!(color.multiply_alpha(2.0).a, 0.5);
+        assert_eq!(color.multiply_alpha(f32::NAN).a, 0.0);
     }
 }

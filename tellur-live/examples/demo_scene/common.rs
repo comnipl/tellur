@@ -136,9 +136,13 @@ impl VectorComponent for TrueCircle {
     }
 
     fn paint_bounds(&self, size: Vec2) -> Aabb {
+        let outset = self
+            .stroke_color
+            .map(|_| (self.stroke_width * 0.5).max(0.0))
+            .unwrap_or(0.0);
         Aabb {
-            origin: Vec2::ZERO,
-            size,
+            origin: Vec2(-outset, -outset),
+            size: Vec2(size.0 + outset * 2.0, size.1 + outset * 2.0),
         }
     }
 

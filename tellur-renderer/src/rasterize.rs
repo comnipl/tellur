@@ -137,6 +137,28 @@ fn render_node(pixmap: &mut tiny_skia::Pixmap, node: &Node, parent_xform: tiny_s
             }
             // opacity <= 0.0: skip the group entirely.
         }
+        Node::SingleGroup(group) => {
+            let xform = parent_xform.pre_concat(to_skia_transform(&group.transform));
+            if group.opacity >= 1.0 {
+                render_node(pixmap, &group.child, xform);
+            } else if group.opacity > 0.0 {
+                let mut layer = tiny_skia::Pixmap::new(pixmap.width(), pixmap.height())
+                    .expect("pixmap dimensions must be non-zero");
+                render_node(&mut layer, &group.child, xform);
+                let pp = tiny_skia::PixmapPaint {
+                    opacity: group.opacity,
+                    ..Default::default()
+                };
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    layer.as_ref(),
+                    &pp,
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            }
+        }
         Node::Path(path) => {
             let xform = parent_xform.pre_concat(to_skia_transform(&path.transform));
             render_path(pixmap, path, xform);
