@@ -31,6 +31,7 @@
 //! ```
 
 use crate::phase::Phase;
+use crate::window::Window;
 use crate::Keyable;
 
 /// A point in time, measured in seconds.
@@ -134,6 +135,14 @@ pub trait Time: Copy + Sized {
         let u = (self.seconds() - start) / (end - start);
         Phase::windowed_saturating(u, end - start)
     }
+
+    /// Packages this time and a `[start, end)` interval into a [`Window`]
+    /// that exposes both the saturating [`Phase`] view and the unbounded
+    /// [`Window::elapsed`] / [`Window::after`] durations [`Phase`] alone
+    /// cannot represent (e.g. "5 seconds after the intro finishes").
+    fn window(&self, start: f32, end: f32) -> Window {
+        Window::new(start, end, self.seconds())
+    }
 }
 
 /// A point on the global timeline that a [`crate::timeline::Timeline`] is
@@ -204,6 +213,7 @@ pub trait TimeOptionExt<T: Time> {
     fn bounce(self, period: f32) -> Option<(Phase, i32)>;
     fn bounce_with_zero(self, period: f32, zero: f32) -> Option<(Phase, i32)>;
     fn phase(self, start: f32, end: f32) -> Option<Phase>;
+    fn window(self, start: f32, end: f32) -> Option<Window>;
 }
 
 impl<T: Time> TimeOptionExt<T> for Option<T> {
@@ -233,6 +243,9 @@ impl<T: Time> TimeOptionExt<T> for Option<T> {
     }
     fn phase(self, start: f32, end: f32) -> Option<Phase> {
         self.map(|t| t.phase(start, end))
+    }
+    fn window(self, start: f32, end: f32) -> Option<Window> {
+        self.map(|t| t.window(start, end))
     }
 }
 

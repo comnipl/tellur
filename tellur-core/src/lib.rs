@@ -24,6 +24,7 @@ pub mod timeline_component;
 pub mod timeline_container;
 pub mod vector;
 pub mod video_decode;
+pub mod window;
 
 // Re-export the component macros so users only need to depend on `tellur-core`.
 // The macros emit fully-qualified `::tellur_core::...` paths, so this self-name
