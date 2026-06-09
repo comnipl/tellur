@@ -124,9 +124,15 @@ pub trait Time: Copy + Sized {
     /// Maps `[start, end]` to `[0.0, 1.0]` linearly, clamping outside.
     /// Useful for driving an easing or interpolation whose input is a
     /// [`Phase`] rather than a raw time value.
+    ///
+    /// The returned Phase remembers `end - start` as its
+    /// [`Phase::width`](crate::phase::Phase::width), so callers can carve
+    /// the window into sub-phases in window-local seconds via
+    /// [`Phase::sub_secs`](crate::phase::Phase::sub_secs) without having
+    /// to thread the width through manually.
     fn phase(&self, start: f32, end: f32) -> Phase {
         let u = (self.seconds() - start) / (end - start);
-        Phase::saturating(u)
+        Phase::windowed_saturating(u, end - start)
     }
 }
 
