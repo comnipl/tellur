@@ -94,46 +94,6 @@ impl PhaseEasing for Phase {
     }
 }
 
-/// Linear interpolation — no easing curve.
-pub fn linear(p: Phase, from: f32, to: f32) -> f32 {
-    p.linear(from, to)
-}
-
-/// Smoothstep easing: zero slope at both endpoints.
-pub fn smoothstep(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_smoothstep(from, to)
-}
-
-/// Cubic ease-out: fast start, gentle settle.
-pub fn out_cubic(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_out_cubic(from, to)
-}
-
-/// Quintic ease-out.
-pub fn out_quint(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_out_quint(from, to)
-}
-
-/// Quintic ease-in-out.
-pub fn in_out_quint(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_in_out_quint(from, to)
-}
-
-/// Exponential ease-in-out.
-pub fn in_out_expo(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_in_out_expo(from, to)
-}
-
-/// Back ease-in: dips before `from` for visual anticipation.
-pub fn in_back(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_in_back(from, to)
-}
-
-/// Elastic ease-out: overshoots past `to` before settling.
-pub fn out_elastic(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_out_elastic(from, to)
-}
-
 #[inline]
 fn lerp_unbounded(from: f32, to: f32, factor: f32) -> f32 {
     from + (to - from) * factor
@@ -171,18 +131,18 @@ mod tests {
 
     #[test]
     fn bounded_curves_hit_endpoints() {
-        let curves: [fn(Phase, f32, f32) -> f32; 6] = [
-            linear,
-            smoothstep,
-            out_cubic,
-            out_quint,
-            in_out_quint,
-            in_out_expo,
+        let curves: [fn(Phase) -> f32; 6] = [
+            |p| p.linear(0.0, 1.0),
+            |p| p.ease_smoothstep(0.0, 1.0),
+            |p| p.ease_out_cubic(0.0, 1.0),
+            |p| p.ease_out_quint(0.0, 1.0),
+            |p| p.ease_in_out_quint(0.0, 1.0),
+            |p| p.ease_in_out_expo(0.0, 1.0),
         ];
 
         for curve in curves {
-            assert_near(curve(Phase::ZERO, 0.0, 1.0), 0.0);
-            assert_near(curve(Phase::ONE, 0.0, 1.0), 1.0);
+            assert_near(curve(Phase::ZERO), 0.0);
+            assert_near(curve(Phase::ONE), 1.0);
         }
     }
 
