@@ -132,6 +132,7 @@ pub trait Time: Copy + Sized {
     /// [`Phase::sub_secs`](crate::phase::Phase::sub_secs) without having
     /// to thread the width through manually.
     fn phase(&self, start: f32, end: f32) -> Phase {
+        assert_valid_span(start, end, "Time::phase");
         let u = (self.seconds() - start) / (end - start);
         Phase::windowed_saturating(u, end - start)
     }
@@ -143,6 +144,13 @@ pub trait Time: Copy + Sized {
     fn window(&self, start: f32, end: f32) -> Window {
         Window::new(start, end, self.seconds())
     }
+}
+
+fn assert_valid_span(start: f32, end: f32, caller: &str) {
+    assert!(
+        start.is_finite() && end.is_finite() && end > start,
+        "{caller} requires finite start/end with end > start"
+    );
 }
 
 /// A point on the global timeline that a [`crate::timeline::Timeline`] is
@@ -422,9 +430,21 @@ mod tests {
     #[test]
     fn phase_clamps_outside_range() {
         let before = TimelineTime::new(2.0);
-        assert_eq!(before.phase(3.0, 5.0), Phase::ZERO);
+        assert_eq!(before.phase(3.0, 5.0).get(), Phase::ZERO.get());
         let after = TimelineTime::new(6.0);
-        assert_eq!(after.phase(3.0, 5.0), Phase::ONE);
+        assert_eq!(after.phase(3.0, 5.0).get(), Phase::ONE.get());
+    }
+
+    #[test]
+    #[should_panic(expected = "Time::phase requires finite start/end with end > start")]
+    fn phase_rejects_equal_bounds() {
+        let _ = TimelineTime::new(5.0).phase(5.0, 5.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Time::phase requires finite start/end with end > start")]
+    fn phase_rejects_reversed_bounds() {
+        let _ = TimelineTime::new(1.0).phase(2.0, 1.0);
     }
 
     #[test]

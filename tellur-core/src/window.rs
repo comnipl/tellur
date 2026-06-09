@@ -66,7 +66,7 @@ impl Window {
     /// `end - start`. Always reflects the declared window; does not collapse
     /// when the cursor is outside the window.
     pub fn width(self) -> f32 {
-        self.end - self.start
+        self.span()
     }
 
     /// The saturating [`Phase`] view: `0.0` before `start`, `1.0` after
@@ -74,8 +74,9 @@ impl Window {
     /// so the resulting Phase can be further carved with
     /// [`Phase::sub_secs`].
     pub fn phase(self) -> Phase {
-        let u = (self.current - self.start) / (self.end - self.start);
-        Phase::windowed_saturating(u, self.end - self.start)
+        let width = self.span();
+        let u = (self.current - self.start) / width;
+        Phase::windowed_saturating(u, width)
     }
 
     /// Seconds the cursor has lived past `start`, clamped at `0` before the
@@ -119,7 +120,15 @@ impl Window {
     /// downstream consumer wants the linear progress without the saturating
     /// clamp — most callers want [`Self::phase`] instead.
     pub fn raw_progress(self) -> f32 {
-        (self.current - self.start) / (self.end - self.start)
+        (self.current - self.start) / self.span()
+    }
+
+    fn span(self) -> f32 {
+        assert!(
+            self.start.is_finite() && self.end.is_finite() && self.end > self.start,
+            "Window requires finite start/end with end > start"
+        );
+        self.end - self.start
     }
 }
 
@@ -190,5 +199,17 @@ mod tests {
     #[test]
     fn width_matches_declared_span() {
         assert_eq!(w(3.0, 5.0, 999.0).width(), 2.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Window requires finite start/end with end > start")]
+    fn phase_rejects_equal_bounds() {
+        let _ = w(5.0, 5.0, 5.0).phase();
+    }
+
+    #[test]
+    #[should_panic(expected = "Window requires finite start/end with end > start")]
+    fn raw_progress_rejects_equal_bounds() {
+        let _ = w(5.0, 5.0, 7.0).raw_progress();
     }
 }

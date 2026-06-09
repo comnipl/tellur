@@ -15,6 +15,7 @@ pub mod phase;
 pub mod placement;
 pub mod raster;
 pub mod render_context;
+pub(crate) mod scalar;
 pub mod shapes;
 pub mod span;
 pub mod text;

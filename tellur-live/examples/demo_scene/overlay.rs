@@ -39,14 +39,18 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // finished assembling. Reads as a system startup flash.
         .maybe_child({
             // Sub-events are addressed in window-local seconds via
-            // `boot.sub_secs`, so the original absolute starts are shifted
+            // `sub_secs(boot, ...)`, so the original absolute starts are shifted
             // into the window's frame here.
-            let boot_in = boot
-                .sub_secs((0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START))
-                .ease_in_out_expo(0.0, 1.0);
-            let boot_out = boot
-                .sub_secs((0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START))
-                .ease_in_out_expo(1.0, 0.0);
+            let boot_in = sub_secs(
+                boot,
+                (0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START),
+            )
+            .ease_in_out_expo(0.0, 1.0);
+            let boot_out = sub_secs(
+                boot,
+                (0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START),
+            )
+            .ease_in_out_expo(1.0, 0.0);
             let boot_life = boot_in * boot_out;
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
@@ -82,12 +86,16 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // unshadowed overlay so it doesn't smear into a grey haze through the
         // foreground shadow pass.
         .maybe_child({
-            let flash_in = flash
-                .sub_secs((4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START))
-                .ease_out_quint(0.0, 1.0);
-            let flash_out = flash
-                .sub_secs((5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START))
-                .ease_in_out_expo(1.0, 0.0);
+            let flash_in = sub_secs(
+                flash,
+                (4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START),
+            )
+            .ease_out_quint(0.0, 1.0);
+            let flash_out = sub_secs(
+                flash,
+                (5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START),
+            )
+            .ease_in_out_expo(1.0, 0.0);
             let flash = flash_in * flash_out;
             (flash > 0.0).then(|| {
                 Rect::builder()

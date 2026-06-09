@@ -29,6 +29,7 @@ use std::ops::Range;
 use thiserror::Error;
 
 use crate::dyn_compare::hash_f32;
+use crate::scalar::clamp_unit;
 
 /// A finite `f32` constrained to the unit interval `[0.0, 1.0]` (both
 /// endpoints included), optionally tagged with the seconds-width of the
@@ -39,10 +40,9 @@ use crate::dyn_compare::hash_f32;
 /// additionally carry a [`Phase::width`] equal to `end - start`, enabling
 /// window-local seconds-based sub-phasing via [`Phase::sub_secs`].
 ///
-/// `PartialEq`/`Eq`/`Hash`/`PartialOrd` consider the value only — width is
-/// advisory metadata and does not affect identity, so cache keys remain
-/// stable across rebuilds that re-derive the same value from a different
-/// window.
+/// `PartialEq`/`Eq`/`Hash` include both the value and the optional width.
+/// A `Phase` whose downstream `sub_secs` behavior differs must not collide
+/// in cache keys just because its visible unit-interval value matches.
 #[derive(Debug, Clone, Copy)]
 pub struct Phase {
     value: f32,
@@ -84,7 +84,7 @@ impl Phase {
     /// Phase carries no [`width`](Self::width).
     pub fn saturating(v: f32) -> Self {
         Self {
-            value: clamp_canonical(v),
+            value: clamp_unit(v),
             width: None,
         }
     }
@@ -94,8 +94,12 @@ impl Phase {
     /// sub-phasing methods on this type — direct callers usually want
     /// [`Self::saturating`] or `time.phase(...)` instead.
     pub(crate) fn windowed_saturating(v: f32, width: f32) -> Self {
+        assert!(
+            width.is_finite() && width > 0.0,
+            "Phase::windowed_saturating requires a finite positive width"
+        );
         Self {
-            value: clamp_canonical(v),
+            value: clamp_unit(v),
             width: Some(width),
         }
     }
@@ -118,47 +122,55 @@ impl Phase {
     /// same window. Used internally by the easing methods and by callers
     /// that want a custom non-linear remap (e.g. `4x(1-x)` for a hat-shaped
     /// visibility curve).
+    ///
+    /// Because this remaps value-space, not wall-clock time, call
+    /// `sub_secs` before `map` when a sub-window should be addressed by
+    /// elapsed seconds in the original source window.
     pub fn map(self, f: impl FnOnce(f32) -> f32) -> Phase {
         Self {
-            value: clamp_canonical(f(self.value)),
+            value: clamp_unit(f(self.value)),
             width: self.width,
         }
     }
 
     /// Reinterprets `range` (in unit-interval ratios of the source window)
-    /// as the full extent of a new Phase. The returned Phase rises from 0
-    /// at `range.start` to 1 at `range.end` and saturates outside. Width,
-    /// when known, scales proportionally to the sub-window.
-    pub fn sub_ratio(self, range: Range<f32>) -> Phase {
-        let span = range.end - range.start;
+    /// as the full extent of a new Phase. Returns `None` unless `range` is
+    /// finite, non-empty, ordered, and inside `[0.0, 1.0]`.
+    ///
+    /// The returned Phase rises from 0 at `range.start` to 1 at `range.end`
+    /// and saturates outside. Width, when known, scales proportionally to
+    /// the sub-window.
+    pub fn sub_ratio(self, range: Range<f32>) -> Option<Phase> {
+        let span = checked_ratio_span(&range)?;
         let inner = (self.value - range.start) / span;
-        Self {
-            value: clamp_canonical(inner),
+        Some(Self {
+            value: clamp_unit(inner),
             width: self.width.map(|w| w * span),
-        }
+        })
     }
 
     /// Reinterprets `range` (in seconds from the source window's start) as
     /// the full extent of a new Phase. Requires this Phase to carry a
-    /// [`width`](Self::width) — panics otherwise. The returned Phase's own
-    /// width is `range.end - range.start`, so further `sub_secs` calls
-    /// remain in window-local seconds.
+    /// [`width`](Self::width). Returns `None` if the Phase has no width, or
+    /// if `range` is finite, ordered, non-empty, and inside the source
+    /// window's seconds-width.
+    ///
+    /// The returned Phase's own width is `range.end - range.start`, so
+    /// further `sub_secs` calls remain in window-local seconds.
     ///
     /// This is the natural inverse of the "elapsed seconds inside a window"
     /// pattern: instead of converting the Phase back to seconds, doing
     /// arithmetic, and re-wrapping, callers express each sub-event directly
     /// in window-local seconds.
-    pub fn sub_secs(self, range: Range<f32>) -> Phase {
-        let width = self.width.expect(
-            "Phase::sub_secs requires a width — produce the Phase via time.phase(s, e) or sub_secs",
-        );
+    pub fn sub_secs(self, range: Range<f32>) -> Option<Phase> {
+        let width = self.width?;
+        let span = checked_seconds_span(&range, width)?;
         let elapsed = self.value * width;
-        let span = range.end - range.start;
         let inner = (elapsed - range.start) / span;
-        Self {
-            value: clamp_canonical(inner),
+        Some(Self {
+            value: clamp_unit(inner),
             width: Some(span),
-        }
+        })
     }
 
     /// `true` iff the inner value is exactly `0.0`.
@@ -184,24 +196,39 @@ impl Phase {
     }
 }
 
-/// Clamps to `[0.0, 1.0]`, treating `NaN` as `0.0`, then canonicalizes
-/// `-0.0` to `+0.0` so the bit-pattern-based equality / hashing matches
-/// `PartialOrd` (which treats the two zeroes as equal).
-fn clamp_canonical(v: f32) -> f32 {
-    if v.is_nan() {
-        0.0
-    } else {
-        v.clamp(0.0, 1.0) + 0.0
-    }
+fn checked_ratio_span(range: &Range<f32>) -> Option<f32> {
+    let span = range.end - range.start;
+    (range.start.is_finite()
+        && range.end.is_finite()
+        && range.start >= 0.0
+        && range.end <= 1.0
+        && span.is_finite()
+        && span > 0.0)
+        .then_some(span)
+}
+
+fn checked_seconds_span(range: &Range<f32>, source_width: f32) -> Option<f32> {
+    const EPSILON: f32 = 1.0e-6;
+    let span = range.end - range.start;
+    (range.start.is_finite()
+        && range.end.is_finite()
+        && source_width.is_finite()
+        && source_width > 0.0
+        && range.start >= 0.0
+        && range.end <= source_width + EPSILON
+        && span.is_finite()
+        && span > 0.0)
+        .then_some(span)
 }
 
 impl PartialEq for Phase {
     fn eq(&self, other: &Self) -> bool {
-        // Bit-pattern equality on the value — width is advisory metadata
-        // and intentionally ignored so two Phases that resolved to the
-        // same value from different windows still compare equal (and hash
-        // identically, keeping cache keys stable).
         self.value.to_bits() == other.value.to_bits()
+            && match (self.width, other.width) {
+                (Some(a), Some(b)) => a.to_bits() == b.to_bits(),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -210,6 +237,13 @@ impl Eq for Phase {}
 impl Hash for Phase {
     fn hash<H: Hasher>(&self, state: &mut H) {
         hash_f32(self.value, state);
+        match self.width {
+            Some(width) => {
+                1_u8.hash(state);
+                hash_f32(width, state);
+            }
+            None => 0_u8.hash(state),
+        }
     }
 }
 
@@ -309,44 +343,69 @@ mod tests {
     #[test]
     fn sub_ratio_carves_unit_interval_window() {
         // value 0.5 with no width — sub_ratio 0.2..0.8 → (0.5 - 0.2) / 0.6 = 0.5.
-        let p = Phase::saturating(0.5).sub_ratio(0.2..0.8);
+        let p = Phase::saturating(0.5).sub_ratio(0.2..0.8).unwrap();
         assert!((p.get() - 0.5).abs() < 1e-6);
         assert!(p.width().is_none());
     }
 
     #[test]
     fn sub_ratio_scales_width_proportionally() {
-        let p = Phase::windowed_saturating(0.5, 2.0).sub_ratio(0.0..0.5);
+        let p = Phase::windowed_saturating(0.5, 2.0)
+            .sub_ratio(0.0..0.5)
+            .unwrap();
         // The new window covers half the parent, so its width is half.
         assert_eq!(p.width(), Some(1.0));
     }
 
     #[test]
     fn sub_ratio_saturates_outside_inner_window() {
-        let p = Phase::saturating(0.1).sub_ratio(0.3..0.7);
+        let p = Phase::saturating(0.1).sub_ratio(0.3..0.7).unwrap();
         assert_eq!(p.get(), 0.0);
-        let p = Phase::saturating(0.9).sub_ratio(0.3..0.7);
+        let p = Phase::saturating(0.9).sub_ratio(0.3..0.7).unwrap();
         assert_eq!(p.get(), 1.0);
+    }
+
+    #[test]
+    fn sub_ratio_rejects_empty_reversed_and_out_of_unit_ranges() {
+        let p = Phase::HALF;
+
+        assert!(p.sub_ratio(0.5..0.5).is_none());
+        assert!(p.sub_ratio(0.6..0.2).is_none());
+        assert!(p.sub_ratio(-0.1..0.5).is_none());
+        assert!(p.sub_ratio(0.5..1.1).is_none());
     }
 
     #[test]
     fn sub_secs_uses_window_width() {
         // Source window is 2.0s long, current value is 0.5 → elapsed = 1.0s.
         // sub_secs(0.0..0.4) → (1.0 - 0.0) / 0.4 = 2.5 → saturates to 1.0.
-        let p = Phase::windowed_saturating(0.5, 2.0).sub_secs(0.0..0.4);
+        let p = Phase::windowed_saturating(0.5, 2.0)
+            .sub_secs(0.0..0.4)
+            .unwrap();
         assert_eq!(p.get(), 1.0);
         assert_eq!(p.width(), Some(0.4));
 
         // value 0.1 of a 2.0s window → elapsed 0.2s.
         // sub_secs(0.0..0.4) → 0.2 / 0.4 = 0.5.
-        let p = Phase::windowed_saturating(0.1, 2.0).sub_secs(0.0..0.4);
+        let p = Phase::windowed_saturating(0.1, 2.0)
+            .sub_secs(0.0..0.4)
+            .unwrap();
         assert!((p.get() - 0.5).abs() < 1e-6);
     }
 
     #[test]
-    #[should_panic(expected = "Phase::sub_secs requires a width")]
-    fn sub_secs_without_width_panics() {
-        let _ = Phase::saturating(0.5).sub_secs(0.0..0.4);
+    fn sub_secs_without_width_returns_none() {
+        assert!(Phase::saturating(0.5).sub_secs(0.0..0.4).is_none());
+    }
+
+    #[test]
+    fn sub_secs_rejects_empty_reversed_and_out_of_source_ranges() {
+        let p = Phase::windowed_saturating(0.5, 1.0);
+
+        assert!(p.sub_secs(0.5..0.5).is_none());
+        assert!(p.sub_secs(0.6..0.2).is_none());
+        assert!(p.sub_secs(-0.1..0.5).is_none());
+        assert!(p.sub_secs(0.5..1.1).is_none());
     }
 
     #[test]
@@ -368,12 +427,14 @@ mod tests {
     }
 
     #[test]
-    fn equality_ignores_width() {
+    fn equality_and_hash_include_width() {
         let a = Phase::saturating(0.5);
         let b = Phase::windowed_saturating(0.5, 2.0);
         let c = Phase::windowed_saturating(0.5, 10.0);
-        assert_eq!(a, b);
-        assert_eq!(b, c);
+        let d = Phase::windowed_saturating(0.5, 2.0);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_eq!(b, d);
         // Hash agrees with eq.
         use std::collections::hash_map::DefaultHasher;
         let h = |p: Phase| {
@@ -381,7 +442,8 @@ mod tests {
             p.hash(&mut s);
             s.finish()
         };
-        assert_eq!(h(a), h(b));
-        assert_eq!(h(b), h(c));
+        assert_ne!(h(a), h(b));
+        assert_ne!(h(b), h(c));
+        assert_eq!(h(b), h(d));
     }
 }
