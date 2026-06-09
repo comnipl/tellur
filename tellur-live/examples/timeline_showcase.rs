@@ -86,12 +86,12 @@ fn fade(c: Color, a: f32) -> Color {
 
 /// Smoothstep easing for `[0,1]` progress (eases in AND out).
 fn ease(p: f32) -> f32 {
-    easing::smoothstep(Phase::saturating(p)).get()
+    easing::smoothstep(Phase::saturating(p), 0.0, 1.0)
 }
 
 /// Cubic ease-out: fast start, gentle settle — a satisfying "snap into place".
 fn ease_out(p: f32) -> f32 {
-    easing::out_cubic(Phase::saturating(p)).get()
+    easing::out_cubic(Phase::saturating(p), 0.0, 1.0)
 }
 
 /// The per-chapter enter/exit transition, shared by every windowed element so

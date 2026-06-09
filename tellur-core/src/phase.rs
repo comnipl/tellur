@@ -29,7 +29,6 @@ use std::ops::Range;
 use thiserror::Error;
 
 use crate::dyn_compare::hash_f32;
-use crate::interpolate::Interpolate;
 
 /// A finite `f32` constrained to the unit interval `[0.0, 1.0]` (both
 /// endpoints included), optionally tagged with the seconds-width of the
@@ -104,23 +103,6 @@ impl Phase {
     /// Returns the inner value, guaranteed to be a finite `f32` in `[0.0, 1.0]`.
     pub const fn get(self) -> f32 {
         self.value
-    }
-
-    /// Returns `1.0 - self`. The result is still a valid `Phase` (the
-    /// closed unit interval is closed under this reflection). Width is
-    /// preserved.
-    pub fn invert(self) -> Self {
-        Self {
-            value: 1.0 - self.value,
-            width: self.width,
-        }
-    }
-
-    /// Linearly interpolates between `from` (at `self == 0`) and `to`
-    /// (at `self == 1`). Convenience wrapper for `from.interpolate(to, self)`
-    /// so the `Phase` reads as "the driver" in animation code.
-    pub fn interpolate<T: Interpolate>(self, from: T, to: T) -> T {
-        from.interpolate(to, self)
     }
 
     /// Returns the seconds-width of the source window if this Phase was
@@ -289,16 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn invert_is_one_minus() {
-        assert_eq!(Phase::ZERO.invert(), Phase::ONE);
-        assert_eq!(Phase::ONE.invert(), Phase::ZERO);
-        assert_eq!(
-            Phase::new(0.25).unwrap().invert(),
-            Phase::new(0.75).unwrap()
-        );
-    }
-
-    #[test]
     fn try_from_reports_offending_value() {
         let err = Phase::try_from(2.5).unwrap_err();
         assert_eq!(err.0, 2.5);
@@ -316,13 +288,6 @@ mod tests {
         assert_eq!(Phase::ZERO.get(), 0.0);
         assert_eq!(Phase::HALF.get(), 0.5);
         assert_eq!(Phase::ONE.get(), 1.0);
-    }
-
-    #[test]
-    fn interpolate_drives_f32_value() {
-        assert_eq!(Phase::HALF.interpolate(0.0, 10.0), 5.0);
-        assert_eq!(Phase::ZERO.interpolate(0.0, 10.0), 0.0);
-        assert_eq!(Phase::ONE.interpolate(0.0, 10.0), 10.0);
     }
 
     #[test]

@@ -29,16 +29,6 @@ pub const OVERLAY_FLASH_END: f32 = 5.35;
 pub const OVERLAY_FADE_START: f32 = 7.25;
 // The fade runs to the end of the timeline, so its window end is `DURATION`.
 
-const OVERLAY_BOOT_WIDTH: f32 = OVERLAY_BOOT_END - OVERLAY_BOOT_START;
-const OVERLAY_FLASH_WIDTH: f32 = OVERLAY_FLASH_END - OVERLAY_FLASH_START;
-
-// Sub-phase of an event spanning `[start, end]` (both absolute, but shifted
-// into the window-local frame by the caller) at virtual elapsed time `t`.
-// Mirrors `hud::local_phase` / `backdrop::local_phase`.
-fn local_phase(virtual_t: f32, start: f32, end: f32) -> Phase {
-    Phase::saturating((virtual_t - start) / (end - start))
-}
-
 #[tellur_core::component(vector)]
 pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl VectorComponent {
     let p = palette;
@@ -48,17 +38,16 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // subtitle briefly appears at center then fades, before the HUD has
         // finished assembling. Reads as a system startup flash.
         .maybe_child({
-            // Virtual elapsed seconds inside the boot window. The window width
-            // is exactly 0.5, so this round-trips the original `time` bit-for-
-            // bit; sub-events are then expressed in window-local coordinates.
-            let t = boot.get() * OVERLAY_BOOT_WIDTH;
-            let boot_in = local_phase(t, 0.05 - OVERLAY_BOOT_START, 0.18 - OVERLAY_BOOT_START)
-                .ease_in_out_expo()
-                .get();
-            let boot_out = local_phase(t, 0.32 - OVERLAY_BOOT_START, 0.55 - OVERLAY_BOOT_START)
-                .ease_in_out_expo()
-                .get();
-            let boot_life = (boot_in * (1.0 - boot_out)).clamp(0.0, 1.0);
+            // Sub-events are addressed in window-local seconds via
+            // `boot.sub_secs`, so the original absolute starts are shifted
+            // into the window's frame here.
+            let boot_in = boot
+                .sub_secs((0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START))
+                .ease_in_out_expo(0.0, 1.0);
+            let boot_out = boot
+                .sub_secs((0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START))
+                .ease_in_out_expo(1.0, 0.0);
+            let boot_life = boot_in * boot_out;
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
                     .child(
@@ -93,14 +82,13 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // unshadowed overlay so it doesn't smear into a grey haze through the
         // foreground shadow pass.
         .maybe_child({
-            let t = flash.get() * OVERLAY_FLASH_WIDTH;
-            let flash = local_phase(t, 4.9 - OVERLAY_FLASH_START, 5.05 - OVERLAY_FLASH_START)
-                .ease_out_quint()
-                .get()
-                * (1.0
-                    - local_phase(t, 5.05 - OVERLAY_FLASH_START, 5.35 - OVERLAY_FLASH_START)
-                        .ease_in_out_expo()
-                        .get());
+            let flash_in = flash
+                .sub_secs((4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START))
+                .ease_out_quint(0.0, 1.0);
+            let flash_out = flash
+                .sub_secs((5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START))
+                .ease_in_out_expo(1.0, 0.0);
+            let flash = flash_in * flash_out;
             (flash > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)
@@ -111,7 +99,7 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // Exit fade — gentle quint ease into the bg color. The `fade` phase
         // already spans the whole window, so it drives the ease directly.
         .maybe_child({
-            let fade = fade.ease_in_out_quint().get();
+            let fade = fade.ease_in_out_quint(0.0, 1.0);
             (fade > 0.0).then(|| {
                 Rect::builder()
                     .position(Vec2::ZERO)

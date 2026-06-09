@@ -17,6 +17,7 @@ use std::path::Path;
 use tellur_core::builder::RasterEffect;
 use tellur_core::color::Color;
 use tellur_core::component;
+use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Frame, Padding, Stack};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
@@ -42,7 +43,7 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 #[component(raster)]
 fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let (phase, _) = t.bounce(2.5);
-    let rx = phase.interpolate(0.0, 1.0);
+    let rx = phase.linear(0.0, 1.0);
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))

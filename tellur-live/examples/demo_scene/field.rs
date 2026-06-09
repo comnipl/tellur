@@ -26,8 +26,8 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         time,
         (1.9, 2.25),
         (3.2, 3.55),
-        |p| p.ease_in_out_expo().get(),
-        |p| p.ease_in_out_expo().get(),
+        |p| p.ease_in_out_expo(0.0, 1.0),
+        |p| p.ease_in_out_expo(0.0, 1.0),
     );
 
     VectorLayer::builder()
@@ -43,11 +43,12 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 let stagger = c as f32 * 0.05 + r as f32 * 0.025;
                 let pop = time
                     .phase(1.95 + stagger, 2.45 + stagger)
-                    .ease_out_cubic()
-                    .get();
+                    .ease_out_cubic(0.0, 1.0);
+                // `ease_in_back` overshoots — the compound visibility `s`
+                // is plain f32 arithmetic clamped at the leaf.
                 let collapse = time
                     .phase(3.05 + stagger * 0.4, 3.5 + stagger * 0.4)
-                    .ease_in_back_between(0.0, 1.0);
+                    .ease_in_back(0.0, 1.0);
                 let s = (pop * (1.0 - collapse)).clamp(0.0, 1.0);
 
                 let breathe = 1.0 + wave(time, 1.6, stagger) * 0.15;
@@ -70,8 +71,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         ((r == 0 || r == ROWS - 1) && (c == 0 || c == COLS - 1)).then(|| {
                             let ring_in = time
                                 .phase(2.4 + stagger, 2.9 + stagger)
-                                .ease_out_cubic()
-                                .get();
+                                .ease_out_cubic(0.0, 1.0);
                             Circle::builder()
                                 .center(Vec2(cx, cy))
                                 .radius(26.0 * ring_in * s)
@@ -89,9 +89,8 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let dy = (r as f32 - (ROWS as f32 - 1.0) * 0.5) * SPACING_Y;
             let label_in = time
                 .phase(2.1 + r as f32 * 0.04, 2.55 + r as f32 * 0.04)
-                .ease_out_cubic()
-                .get();
-            let label_out = time.phase(3.1, 3.5).ease_in_back_between(0.0, 1.0);
+                .ease_out_cubic(0.0, 1.0);
+            let label_out = time.phase(3.1, 3.5).ease_in_back(0.0, 1.0);
             let row_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((row_alpha > 0.0).then(|| {
@@ -111,9 +110,8 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let dx = (c as f32 - (COLS as f32 - 1.0) * 0.5) * SPACING_X;
             let label_in = time
                 .phase(2.05 + c as f32 * 0.04, 2.5 + c as f32 * 0.04)
-                .ease_out_cubic()
-                .get();
-            let label_out = time.phase(3.1, 3.5).ease_in_back_between(0.0, 1.0);
+                .ease_out_cubic(0.0, 1.0);
+            let label_out = time.phase(3.1, 3.5).ease_in_back(0.0, 1.0);
             let col_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((col_alpha > 0.0).then(|| {
@@ -134,7 +132,7 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // head + dimmer trailing wash, with a small "SCAN" data tag at the top
         // and a running-position readout at the bottom.
         .maybe_child({
-            let sweep = time.phase(2.35, 3.0).ease_in_out_expo().get();
+            let sweep = time.phase(2.35, 3.0).ease_in_out_expo(0.0, 1.0);
             (sweep > 0.0 && sweep < 1.0)
                 .then(|| ScanLine::builder().palette(p).life(life).sweep(sweep))
         })
@@ -148,7 +146,9 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
     let p = palette;
     let x = lerp(CX - 580.0, CX + 580.0, sweep);
-    let visibility = 4.0 * sweep * (1.0 - sweep);
+    // Hat-shaped visibility curve `4x(1-x)` peaks at 1 when sweep = 0.5 and
+    // is 0 at both ends.
+    let visibility = peak(sweep);
     let height = (ROWS as f32 + 0.3) * SPACING_Y * 0.5 * 2.0;
     let top_y = CY - height * 0.5;
     let bottom_y = top_y + height;
@@ -159,35 +159,36 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
     let inner_trail_w = 32.0;
     let pct = (sweep * 100.0) as i32;
     let pct_text = format!("{:03}%", pct);
+    let head_alpha = visibility * life;
 
     Fragment::builder()
         .child(
             Rect::builder()
                 .position(Vec2(x - trail_w, top_y))
                 .size(Vec2(trail_w, height))
-                .color(p.pink.with_alpha(visibility * life * 0.14)),
+                .color(p.pink.with_alpha(head_alpha * 0.14)),
         )
         // Inner brighter trail.
         .child(
             Rect::builder()
                 .position(Vec2(x - inner_trail_w, top_y))
                 .size(Vec2(inner_trail_w, height))
-                .color(p.pink.with_alpha(visibility * life * 0.22)),
+                .color(p.pink.with_alpha(head_alpha * 0.22)),
         )
         // The crisp leading line.
         .child(
             Rect::builder()
                 .position(Vec2(x - 2.0, top_y))
                 .size(Vec2(4.0, height))
-                .color(p.pink.with_alpha(visibility * life * 0.95)),
+                .color(p.pink.with_alpha(head_alpha * 0.95)),
         )
         // Bright head dot at the top of the sweep — like a phosphor pixel.
         .child(
             Circle::builder()
                 .center(Vec2(x, top_y))
                 .radius(7.0)
-                .fill(p.paper.with_alpha(visibility * life))
-                .stroke(p.pink.with_alpha(visibility * life))
+                .fill(p.paper.with_alpha(head_alpha))
+                .stroke(p.pink.with_alpha(head_alpha))
                 .stroke_width(2.0),
         )
         // Mirror head dot at the bottom for symmetry.
@@ -195,8 +196,8 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
             Circle::builder()
                 .center(Vec2(x, bottom_y))
                 .radius(7.0)
-                .fill(p.paper.with_alpha(visibility * life))
-                .stroke(p.pink.with_alpha(visibility * life))
+                .fill(p.paper.with_alpha(head_alpha))
+                .stroke(p.pink.with_alpha(head_alpha))
                 .stroke_width(2.0),
         )
         // Top tag.
@@ -206,7 +207,7 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
                 .anchor(Anchor::BOTTOM_LEFT)
                 .text("SCAN →")
                 .size(14.0)
-                .color(p.pink.with_alpha(visibility * life))
+                .color(p.pink.with_alpha(head_alpha))
                 .weight(Weight::BOLD),
         )
         // Bottom percentage readout — "treats this as data" cue.
@@ -216,7 +217,7 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
                 .anchor(Anchor::TOP_LEFT)
                 .text(pct_text)
                 .size(13.0)
-                .color(p.paper.with_alpha(visibility * life * 0.95))
+                .color(p.paper.with_alpha(head_alpha * 0.95))
                 .weight(Weight::BOLD),
         )
         .build()

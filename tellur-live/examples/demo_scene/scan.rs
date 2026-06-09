@@ -29,16 +29,22 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         time,
         (3.4, 3.8),
         (5.05, 5.45),
-        |p| p.ease_in_out_expo().get(),
-        |p| p.ease_in_out_expo().get(),
+        |p| p.ease_in_out_expo(0.0, 1.0),
+        |p| p.ease_in_out_expo(0.0, 1.0),
     );
 
     // Center reticle: a small crosshair + cyan dot.
-    let reticle = time.phase(3.5, 3.95).ease_out_cubic().get();
+    let reticle = time.phase(3.5, 3.95).ease_out_cubic(0.0, 1.0);
     let cross_arm = 64.0 * reticle;
 
     // Single hero ring — this is the scene's one elastic moment.
-    let ring_r = time.phase(3.6, 4.4).ease_out_elastic_between(80.0, 300.0);
+    let ring_r = time.phase(3.6, 4.4).ease_out_elastic(80.0, 300.0);
+
+    // Radar window: spins from 3.95 (just after the reticle settles) until
+    // the sweep-out finishes at 5.4. `elapsed()` drives the continuously-
+    // accruing rotation angle; the same window is reused by the θ readout
+    // below so both readouts speak in the same radar time-frame.
+    let radar = time.window(3.95, 5.4);
 
     VectorLayer::builder()
         .size(SCENE_SIZE)
@@ -46,10 +52,10 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // transition wipe between FIELD and SCAN. Echoes the pink stripe at
         // the OVERTURE→FIELD handoff so the structure rhymes.
         .maybe_child({
-            let intro_sweep = time.phase(3.35, 3.85).ease_in_out_expo().get();
+            let intro_sweep = time.phase(3.35, 3.85).ease_in_out_expo(0.0, 1.0);
             (intro_sweep > 0.0 && intro_sweep < 1.0).then(|| {
                 let y = lerp(-80.0, SCENE_SIZE.1 + 80.0, intro_sweep);
-                let visibility = 4.0 * intro_sweep * (1.0 - intro_sweep);
+                let visibility = peak(intro_sweep);
                 Rect::builder()
                     .position(Vec2(0.0, y - 3.0))
                     .size(Vec2(SCENE_SIZE.0, 6.0))
@@ -87,7 +93,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // Inner secondary reticle — a thinner cyan ring at ~120 + 4 cardinal
         // mini-ticks. Layers visual depth between the crosshair and the hero ring.
         .maybe_child({
-            let inner_ring_in = time.phase(3.7, 4.15).ease_out_cubic().get();
+            let inner_ring_in = time.phase(3.7, 4.15).ease_out_cubic(0.0, 1.0);
             (inner_ring_in > 0.0).then(|| {
                 let inner_r2 = 116.0;
                 Fragment::builder()
@@ -120,8 +126,7 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let stagger = i as f32 * 0.025;
             let tk = time
                 .phase(3.85 + stagger, 4.3 + stagger)
-                .ease_out_cubic()
-                .get();
+                .ease_out_cubic(0.0, 1.0);
             let major = i % 3 == 0;
             let inner_off = if major { 22.0 } else { 12.0 };
             let outer_off = if major { 22.0 } else { 12.0 };
@@ -149,10 +154,9 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 .then(|| {
                     let label_in = time
                         .phase(4.1 + i as f32 * 0.012, 4.5 + i as f32 * 0.012)
-                        .ease_out_cubic()
-                        .get();
+                        .ease_out_cubic(0.0, 1.0);
                     let label_alpha =
-                        life * label_in * (1.0 - time.phase(5.0, 5.35).ease_in_out_expo().get());
+                        life * label_in * time.phase(5.0, 5.35).ease_in_out_expo(1.0, 0.0);
                     (label_alpha > 0.0).then(|| {
                         let label_r = outer_r + 32.0;
                         Label::builder()
@@ -174,15 +178,14 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // 8 satellites at the cardinal / intercardinal points on the ring,
         // each tagged with a tiny zero-padded index — "01..08".
         .children({
-            let sat_label_in = time.phase(4.35, 4.75).ease_in_out_expo().get()
-                * (1.0 - time.phase(4.9, 5.2).ease_in_out_expo().get());
+            let sat_label_in = time.phase(4.35, 4.75).ease_in_out_expo(0.0, 1.0)
+                * time.phase(4.9, 5.2).ease_in_out_expo(1.0, 0.0);
             (0..8).map(move |i| {
                 let a = i as f32 / 8.0 * TAU - PI * 0.5;
                 let stagger = i as f32 * 0.04;
                 let sp = time
                     .phase(4.05 + stagger, 4.55 + stagger)
-                    .ease_out_cubic()
-                    .get();
+                    .ease_out_cubic(0.0, 1.0);
                 let pos = Vec2(CX + a.cos() * ring_r, CY + a.sin() * ring_r);
                 let color = if i % 2 == 0 { p.pink } else { p.cyan };
 
@@ -232,14 +235,14 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // Radar-style angular sweep: a fan of N narrowing rectangles whose
         // leading edge sweeps clockwise once, fading along its trail.
         .maybe_child({
-            let sweep_in = time.phase(3.9, 4.2).ease_in_out_expo().get();
-            let sweep_out = time.phase(5.05, 5.4).ease_in_out_expo().get();
-            let sweep_life = (sweep_in * (1.0 - sweep_out)).clamp(0.0, 1.0);
+            let sweep_in = time.phase(3.9, 4.2).ease_in_out_expo(0.0, 1.0);
+            let sweep_out = time.phase(5.05, 5.4).ease_in_out_expo(1.0, 0.0);
+            let sweep_life = sweep_in * sweep_out;
             (sweep_life > 0.0).then(|| {
                 // Slower rotation (~2.4s per full revolution) with a wider,
                 // longer trail so the sweep reads as deliberate observation
                 // rather than a quick flyby.
-                let base_angle = (time.seconds() - 3.95).max(0.0) * (TAU / 2.4) - PI * 0.5;
+                let base_angle = radar.elapsed() * (TAU / 2.4) - PI * 0.5;
                 let trail_count = 32_i32;
                 let trail_span = PI * 0.75;
                 (0..trail_count)
@@ -262,8 +265,8 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         })
         // Single numeric annotation, attached to the ring at 0°.
         .maybe_child({
-            let annot = time.phase(4.15, 4.5).ease_in_out_expo().get()
-                * (1.0 - time.phase(4.85, 5.2).ease_in_out_expo().get());
+            let annot = time.phase(4.15, 4.5).ease_in_out_expo(0.0, 1.0)
+                * time.phase(4.85, 5.2).ease_in_out_expo(1.0, 0.0);
             (annot > 0.0).then(|| {
                 Fragment::builder()
                     // Mini connector tick from the ring to the label.
@@ -298,12 +301,12 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // "θ" readout in the 270° direction. Tracks the radar sweep's current
         // angle so the SCAN scene has a live data feel.
         .maybe_child({
-            let theta_in = time.phase(4.2, 4.55).ease_in_out_expo().get()
-                * (1.0 - time.phase(4.95, 5.25).ease_in_out_expo().get());
-            let sweep_in = time.phase(3.9, 4.2).ease_in_out_expo().get();
+            let theta_in = time.phase(4.2, 4.55).ease_in_out_expo(0.0, 1.0)
+                * time.phase(4.95, 5.25).ease_in_out_expo(1.0, 0.0);
+            let sweep_in = time.phase(3.9, 4.2).ease_in_out_expo(0.0, 1.0);
             let sweep_active = sweep_in > 0.05;
             (theta_in > 0.0 && sweep_active).then(|| {
-                let base_angle = (time.seconds() - 3.95).max(0.0) * (TAU / 2.4);
+                let base_angle = radar.elapsed() * (TAU / 2.4);
                 // Convert to degrees and wrap to [0, 360).
                 let deg = (base_angle.to_degrees().rem_euclid(360.0)) as i32;
                 Fragment::builder()
@@ -328,9 +331,9 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // SCAN's exit burst — 24 short radial spokes shoot outward from the
         // hero ring just as the scene flashes white into RESOLVE.
         .maybe_child({
-            let burst_kick = time.phase(4.88, 5.02).ease_out_quint().get();
-            let burst_fade = time.phase(5.05, 5.25).ease_in_out_expo().get();
-            let burst_life = (burst_kick * (1.0 - burst_fade)).clamp(0.0, 1.0);
+            let burst_kick = time.phase(4.88, 5.02).ease_out_quint(0.0, 1.0);
+            let burst_fade = time.phase(5.05, 5.25).ease_in_out_expo(1.0, 0.0);
+            let burst_life = burst_kick * burst_fade;
             (burst_life > 0.0).then(|| {
                 (0..24)
                     .map(move |i| {

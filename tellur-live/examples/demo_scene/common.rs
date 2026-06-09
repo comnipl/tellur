@@ -56,7 +56,18 @@ pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
     ((time.seconds() / period + offset) * TAU).sin()
 }
 
+// Rise-fall hat envelope `4x(1-x)`: peaks at 1 when value is 0.5, returns to
+// 0 at both endpoints. Used by the transition wipes (OVERTURE→FIELD,
+// FIELD→SCAN, SCAN→RESOLVE) so the sweep stripe is brightest mid-screen.
+// Expects `s ∈ [0, 1]`; callers feed an already-eased sweep factor.
+pub fn peak(s: f32) -> f32 {
+    4.0 * s * (1.0 - s)
+}
+
 // Time-bracketed envelope: rises with `rise`, holds, falls with `fall`.
+// Each callback applies an ease to its window's Phase, producing the
+// fade-in / fade-out factor in [0, 1]. The composed envelope is
+// `rise * (1 - fall)`, clamped to [0, 1].
 pub fn envelope<T: Time, R, F>(
     time: T,
     rise_span: (f32, f32),

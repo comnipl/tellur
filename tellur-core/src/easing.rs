@@ -1,66 +1,77 @@
 //! Easing curves for normalized animation progress.
 //!
-//! Bounded easing functions return [`Phase`], preserving Tellur's normalized
-//! progress type so callers can feed the result directly into
-//! [`Phase::interpolate`]. Curves that intentionally overshoot the unit interval
-//! take an explicit output range and return the interpolated value.
+//! Every method on [`PhaseEasing`] takes the [`Phase`] as the driver plus a
+//! `(from, to)` output range and returns an `f32` — the eased value already
+//! interpolated into the caller's quantity (alpha, length, radius, …). The
+//! uniform shape means callers never juggle "does this return Phase or
+//! f32?" — they pick the curve and the range. Bounded curves
+//! (`linear` / smoothstep / cubic / quint / expo) stay inside
+//! `[from, to]`; overshoot curves (`ease_in_back` / `ease_out_elastic`)
+//! intentionally exceed the range — that visual "snap-past" is the point.
 
 use std::f32::consts::PI;
 
 use crate::phase::Phase;
 
-/// Easing methods on [`Phase`].
+/// Easing methods on [`Phase`]. Every method takes `(from, to)` as the
+/// output range and returns the eased `f32` interpolated into it. Callers
+/// pick `(0.0, 1.0)` for an alpha-style factor and `(start, end)` for a
+/// physical quantity (radius, x-position, …).
 pub trait PhaseEasing {
-    /// Identity easing.
-    fn ease_linear(self) -> Phase;
+    /// Linear interpolation — no easing curve. `phase.linear(from, to)`
+    /// returns `from + (to - from) * phase.get()`. The identity-easing
+    /// shape, kept on the trait so callers reach for it the same way they
+    /// reach for the eased variants.
+    fn linear(self, from: f32, to: f32) -> f32;
     /// Smoothstep easing: zero slope at both endpoints.
-    fn ease_smoothstep(self) -> Phase;
+    fn ease_smoothstep(self, from: f32, to: f32) -> f32;
     /// Cubic ease-out: fast start, gentle settle.
-    fn ease_out_cubic(self) -> Phase;
+    fn ease_out_cubic(self, from: f32, to: f32) -> f32;
     /// Quintic ease-out.
-    fn ease_out_quint(self) -> Phase;
+    fn ease_out_quint(self, from: f32, to: f32) -> f32;
     /// Quintic ease-in-out.
-    fn ease_in_out_quint(self) -> Phase;
+    fn ease_in_out_quint(self, from: f32, to: f32) -> f32;
     /// Exponential ease-in-out.
-    fn ease_in_out_expo(self) -> Phase;
-    /// Back ease-in between `from` and `to`. Intentionally dips before `from`.
-    fn ease_in_back_between(self, from: f32, to: f32) -> f32;
-    /// Elastic ease-out between `from` and `to`. Intentionally overshoots past
-    /// `to`.
-    fn ease_out_elastic_between(self, from: f32, to: f32) -> f32;
+    fn ease_in_out_expo(self, from: f32, to: f32) -> f32;
+    /// Back ease-in. Intentionally dips before `from` before snapping to
+    /// `to` — used for visual anticipation.
+    fn ease_in_back(self, from: f32, to: f32) -> f32;
+    /// Elastic ease-out. Intentionally overshoots past `to` before
+    /// settling — used for "spring snap" motion.
+    fn ease_out_elastic(self, from: f32, to: f32) -> f32;
 }
 
 impl PhaseEasing for Phase {
-    fn ease_linear(self) -> Phase {
-        self
+    fn linear(self, from: f32, to: f32) -> f32 {
+        lerp_unbounded(from, to, self.get())
     }
 
-    fn ease_smoothstep(self) -> Phase {
+    fn ease_smoothstep(self, from: f32, to: f32) -> f32 {
         let x = self.get();
-        Phase::saturating(x * x * (3.0 - 2.0 * x))
+        lerp_unbounded(from, to, x * x * (3.0 - 2.0 * x))
     }
 
-    fn ease_out_cubic(self) -> Phase {
+    fn ease_out_cubic(self, from: f32, to: f32) -> f32 {
         let x = self.get();
-        Phase::saturating(1.0 - (1.0 - x).powi(3))
+        lerp_unbounded(from, to, 1.0 - (1.0 - x).powi(3))
     }
 
-    fn ease_out_quint(self) -> Phase {
+    fn ease_out_quint(self, from: f32, to: f32) -> f32 {
         let x = self.get();
-        Phase::saturating(1.0 - (1.0 - x).powi(5))
+        lerp_unbounded(from, to, 1.0 - (1.0 - x).powi(5))
     }
 
-    fn ease_in_out_quint(self) -> Phase {
+    fn ease_in_out_quint(self, from: f32, to: f32) -> f32 {
         let x = self.get();
         let y = if x < 0.5 {
             16.0 * x.powi(5)
         } else {
             1.0 - (-2.0 * x + 2.0).powi(5) * 0.5
         };
-        Phase::saturating(y)
+        lerp_unbounded(from, to, y)
     }
 
-    fn ease_in_out_expo(self) -> Phase {
+    fn ease_in_out_expo(self, from: f32, to: f32) -> f32 {
         let x = self.get();
         let y = if x <= 0.0 {
             0.0
@@ -71,59 +82,60 @@ impl PhaseEasing for Phase {
         } else {
             (2.0 - 2.0_f32.powf(-20.0 * x + 10.0)) * 0.5
         };
-        Phase::saturating(y)
+        lerp_unbounded(from, to, y)
     }
 
-    fn ease_in_back_between(self, from: f32, to: f32) -> f32 {
-        interpolate_unbounded(from, to, in_back_factor(self))
+    fn ease_in_back(self, from: f32, to: f32) -> f32 {
+        lerp_unbounded(from, to, in_back_factor(self))
     }
 
-    fn ease_out_elastic_between(self, from: f32, to: f32) -> f32 {
-        interpolate_unbounded(from, to, out_elastic_factor(self))
+    fn ease_out_elastic(self, from: f32, to: f32) -> f32 {
+        lerp_unbounded(from, to, out_elastic_factor(self))
     }
 }
 
-/// Identity easing.
-pub fn linear(p: Phase) -> Phase {
-    p.ease_linear()
+/// Linear interpolation — no easing curve.
+pub fn linear(p: Phase, from: f32, to: f32) -> f32 {
+    p.linear(from, to)
 }
 
 /// Smoothstep easing: zero slope at both endpoints.
-pub fn smoothstep(p: Phase) -> Phase {
-    p.ease_smoothstep()
+pub fn smoothstep(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_smoothstep(from, to)
 }
 
 /// Cubic ease-out: fast start, gentle settle.
-pub fn out_cubic(p: Phase) -> Phase {
-    p.ease_out_cubic()
+pub fn out_cubic(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_out_cubic(from, to)
 }
 
 /// Quintic ease-out.
-pub fn out_quint(p: Phase) -> Phase {
-    p.ease_out_quint()
+pub fn out_quint(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_out_quint(from, to)
 }
 
 /// Quintic ease-in-out.
-pub fn in_out_quint(p: Phase) -> Phase {
-    p.ease_in_out_quint()
+pub fn in_out_quint(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_in_out_quint(from, to)
 }
 
 /// Exponential ease-in-out.
-pub fn in_out_expo(p: Phase) -> Phase {
-    p.ease_in_out_expo()
+pub fn in_out_expo(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_in_out_expo(from, to)
 }
 
-/// Back ease-in between `from` and `to`.
-pub fn in_back_between(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_in_back_between(from, to)
+/// Back ease-in: dips before `from` for visual anticipation.
+pub fn in_back(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_in_back(from, to)
 }
 
-/// Elastic ease-out between `from` and `to`.
-pub fn out_elastic_between(p: Phase, from: f32, to: f32) -> f32 {
-    p.ease_out_elastic_between(from, to)
+/// Elastic ease-out: overshoots past `to` before settling.
+pub fn out_elastic(p: Phase, from: f32, to: f32) -> f32 {
+    p.ease_out_elastic(from, to)
 }
 
-fn interpolate_unbounded(from: f32, to: f32, factor: f32) -> f32 {
+#[inline]
+fn lerp_unbounded(from: f32, to: f32, factor: f32) -> f32 {
     from + (to - from) * factor
 }
 
@@ -158,9 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn bounded_curves_preserve_endpoints() {
-        let curves = [
-            linear as fn(Phase) -> Phase,
+    fn bounded_curves_hit_endpoints() {
+        let curves: [fn(Phase, f32, f32) -> f32; 6] = [
+            linear,
             smoothstep,
             out_cubic,
             out_quint,
@@ -169,29 +181,50 @@ mod tests {
         ];
 
         for curve in curves {
-            assert_eq!(curve(Phase::ZERO), Phase::ZERO);
-            assert_eq!(curve(Phase::ONE), Phase::ONE);
+            assert_near(curve(Phase::ZERO, 0.0, 1.0), 0.0);
+            assert_near(curve(Phase::ONE, 0.0, 1.0), 1.0);
         }
     }
 
     #[test]
-    fn bounded_curves_return_phase_values() {
-        assert_near(Phase::HALF.ease_smoothstep().get(), 0.5);
-        assert_near(Phase::HALF.ease_out_cubic().get(), 0.875);
-        assert_near(Phase::HALF.ease_out_quint().get(), 0.96875);
-        assert_near(Phase::HALF.ease_in_out_quint().get(), 0.5);
-        assert_near(Phase::HALF.ease_in_out_expo().get(), 0.5);
+    fn linear_is_the_lerp() {
+        assert_near(Phase::HALF.linear(0.0, 10.0), 5.0);
+        assert_near(Phase::HALF.linear(10.0, 0.0), 5.0);
+        assert_near(Phase::ZERO.linear(80.0, 300.0), 80.0);
+        assert_near(Phase::ONE.linear(80.0, 300.0), 300.0);
     }
 
     #[test]
-    fn overshoot_curves_interpolate_outside_the_range() {
-        assert!(Phase::HALF.ease_in_back_between(0.0, 1.0) < 0.0);
-        assert!(Phase::new(0.2).unwrap().ease_out_elastic_between(0.0, 1.0) > 1.0);
-        assert!(
-            Phase::new(0.2)
-                .unwrap()
-                .ease_out_elastic_between(80.0, 300.0)
-                > 300.0
-        );
+    fn bounded_curves_match_known_midpoints() {
+        assert_near(Phase::HALF.ease_smoothstep(0.0, 1.0), 0.5);
+        assert_near(Phase::HALF.ease_out_cubic(0.0, 1.0), 0.875);
+        assert_near(Phase::HALF.ease_out_quint(0.0, 1.0), 0.96875);
+        assert_near(Phase::HALF.ease_in_out_quint(0.0, 1.0), 0.5);
+        assert_near(Phase::HALF.ease_in_out_expo(0.0, 1.0), 0.5);
+    }
+
+    #[test]
+    fn bounded_curves_scale_to_arbitrary_range() {
+        // Linear half between (80, 300) is 190.
+        assert_near(Phase::HALF.linear(80.0, 300.0), 190.0);
+        // Cubic at 0.5 is 0.875 (eased into 1.0); scaled to (10, 30) is 27.5.
+        assert_near(Phase::HALF.ease_out_cubic(10.0, 30.0), 27.5);
+    }
+
+    #[test]
+    fn overshoot_curves_leave_the_range() {
+        assert!(Phase::HALF.ease_in_back(0.0, 1.0) < 0.0);
+        assert!(Phase::new(0.2).unwrap().ease_out_elastic(0.0, 1.0) > 1.0);
+        assert!(Phase::new(0.2).unwrap().ease_out_elastic(80.0, 300.0) > 300.0);
+    }
+
+    #[test]
+    fn swapping_from_to_reverses_curve() {
+        // Linear: (0→1) and (1→0) are mirror images.
+        for x in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let p = Phase::new(x).unwrap();
+            assert_near(p.linear(1.0, 0.0), 1.0 - p.linear(0.0, 1.0));
+            assert_near(p.ease_out_cubic(1.0, 0.0), 1.0 - p.ease_out_cubic(0.0, 1.0));
+        }
     }
 }

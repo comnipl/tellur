@@ -1,10 +1,15 @@
 //! [`Interpolate`] — linear interpolation parameterized by [`Phase`].
 //!
-//! The trait is the value-side counterpart of [`Phase::interpolate`]: the
-//! [`Phase`] holds the "where am I between 0 and 1", and the [`Interpolate`]
-//! implementation knows how to combine two values of its type given that
-//! fraction. Provide an impl for a new type to make `phase.interpolate(a, b)`
-//! work for it.
+//! The [`Phase`] holds the "where am I between 0 and 1", and the
+//! [`Interpolate`] implementation knows how to combine two values of its
+//! type given that fraction. Provide an impl for a new type so callers can
+//! lerp it with a Phase: `a.interpolate(b, phase)`.
+//!
+//! For `f32`, the canonical entry point is
+//! [`PhaseEasing::linear`](crate::easing::PhaseEasing::linear) (and the
+//! eased variants on the same trait) — they wrap this trait so callers
+//! reach `phase.linear(from, to)` directly. This trait exists primarily so
+//! richer value types (`Vec2`, `Anchor`, …) can be lerped the same way.
 
 use crate::geometry::{Anchor, Vec2};
 use crate::phase::Phase;
