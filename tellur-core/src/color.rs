@@ -26,18 +26,22 @@ impl Color {
     }
 
     /// Returns this color with `a` replaced by `alpha`, clamped to `[0, 1]`.
-    pub fn with_alpha(self, alpha: f32) -> Self {
+    /// `alpha` accepts anything convertible to `f32` — passing a
+    /// [`Phase`](crate::phase::Phase) directly works via
+    /// `From<Phase> for f32`, so callers can avoid an explicit `.get()`.
+    pub fn with_alpha(self, alpha: impl Into<f32>) -> Self {
         Self {
-            a: alpha.clamp(0.0, 1.0),
+            a: alpha.into().clamp(0.0, 1.0),
             ..self
         }
     }
 
     /// Returns this color with its alpha multiplied by `factor`, clamped to
-    /// `[0, 1]` before multiplication.
-    pub fn multiply_alpha(self, factor: f32) -> Self {
+    /// `[0, 1]` before multiplication. See [`Self::with_alpha`] for the
+    /// `Into<f32>` rationale.
+    pub fn multiply_alpha(self, factor: impl Into<f32>) -> Self {
         Self {
-            a: self.a * factor.clamp(0.0, 1.0),
+            a: self.a * factor.into().clamp(0.0, 1.0),
             ..self
         }
     }
