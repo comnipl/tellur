@@ -168,6 +168,17 @@ impl VectorComponent for Transformed {
     }
 
     fn render(&self, size: Vec2) -> VectorGraphic {
+        // Invisible content culls itself: a zero-opacity (or NaN) group can
+        // contribute no ink, so skip building and rendering the subtree.
+        if self.opacity.is_nan() || self.opacity <= 0.0 {
+            return VectorGraphic {
+                view_box: Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                root: Node::empty(),
+            };
+        }
         let inner = self.child.render(size);
         let transform = self.effective_transform(size);
         VectorGraphic {
@@ -242,6 +253,15 @@ impl Node {
             child: Box::new(child),
         })
     }
+
+    /// A node that paints nothing — what invisible content renders as.
+    pub fn empty() -> Self {
+        Self::Group(Group {
+            transform: Transform::IDENTITY,
+            opacity: 1.0,
+            children: Vec::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Keyable)]
@@ -280,10 +300,31 @@ pub struct Fill {
     pub paint: Paint,
 }
 
+impl Fill {
+    /// `true` iff this fill can produce visible ink.
+    pub fn is_visible(&self) -> bool {
+        self.paint.is_visible()
+    }
+}
+
 #[derive(Debug, Clone, Keyable)]
 pub struct Stroke {
     pub paint: Paint,
     pub width: f32,
+}
+
+impl Stroke {
+    pub fn new(paint: impl Into<Paint>, width: f32) -> Self {
+        Self {
+            paint: paint.into(),
+            width,
+        }
+    }
+
+    /// `true` iff this stroke can produce visible ink.
+    pub fn is_visible(&self) -> bool {
+        self.width > 0.0 && self.paint.is_visible()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -294,6 +335,13 @@ pub enum Paint {
 impl Paint {
     pub const fn solid(color: Color) -> Self {
         Self::Solid(color)
+    }
+
+    /// `true` iff this paint can produce visible ink (positive alpha).
+    pub fn is_visible(&self) -> bool {
+        match self {
+            Paint::Solid(c) => c.a > 0.0,
+        }
     }
 }
 
@@ -486,18 +534,51 @@ mod tests {
     }
 
     #[test]
-    fn transformed_opacity_treats_nan_as_zero() {
-        let transformed = Rectangle {
-            size: Vec2(1.0, 1.0),
+    fn transformed_nan_or_zero_opacity_renders_nothing() {
+        // A fully transparent wrapper culls its subtree (NaN counts as 0).
+        for opacity in [0.0, -1.0, f32::NAN] {
+            let transformed = Rectangle {
+                size: Vec2(1.0, 1.0),
+                fill: Option::<Fill>::from(Color::rgb_u8(255, 0, 0)),
+                stroke: None,
+            }
+            .opacity(opacity);
+            assert_eq!(transformed.render(Vec2(1.0, 1.0)).root, Node::empty());
+        }
+    }
+
+    #[test]
+    fn invisible_shapes_render_no_ink() {
+        // No paint at all, or only an alpha-0 fill: the shape culls itself
+        // to an empty node while keeping its layout box as the view box.
+        let bare = Rectangle {
+            size: Vec2(4.0, 2.0),
             fill: None,
             stroke: None,
-        }
-        .opacity(f32::NAN);
-
-        let graphic = transformed.render(Vec2(1.0, 1.0));
-        let Node::SingleGroup(group) = graphic.root else {
-            panic!("Transformed should render as a single-child group");
         };
-        assert_eq!(group.opacity, 0.0);
+        assert_eq!(bare.render(Vec2(4.0, 2.0)).root, Node::empty());
+
+        let ghost = Rectangle {
+            size: Vec2(4.0, 2.0),
+            fill: Option::<Fill>::from(Color::rgba_u8(255, 0, 0, 0)),
+            stroke: None,
+        };
+        let graphic = ghost.render(Vec2(4.0, 2.0));
+        assert_eq!(graphic.root, Node::empty());
+        assert_eq!(graphic.view_box.size, Vec2(4.0, 2.0));
+    }
+
+    #[test]
+    fn invisible_fill_is_dropped_but_visible_stroke_keeps_painting() {
+        let outlined = Rectangle {
+            size: Vec2(4.0, 2.0),
+            fill: Option::<Fill>::from(Color::rgba_u8(255, 0, 0, 0)),
+            stroke: Option::<Stroke>::from(Color::rgb_u8(0, 0, 0)),
+        };
+        let Node::Path(path) = outlined.render(Vec2(4.0, 2.0)).root else {
+            panic!("a stroked rectangle still paints");
+        };
+        assert!(path.fill.is_none());
+        assert!(path.stroke.is_some());
     }
 }

@@ -41,6 +41,8 @@ Constraints::UNBOUNDED     // no upper bound — answer your intrinsic size
 
 原則は「**制約は下りる・サイズは上がる・位置は親が決める**」。子は自分の位置を知りません。位置は常に親が決めます。
 
+もうひとつの原則は「**見えないものは描かれない**」。shape は不可視（fill/stroke の alpha が 0・サイズ 0）のとき、`Text` は空文字や不可視 fill のとき、`Transformed` は opacity 0 のとき、自分で空を描きます。呼び出し側に「alpha が 0 なら出さない」のような可視性ガードは不要です。
+
 > **footgun ①**: `SizeMode::Fill` は親の max 制約を取りますが、max が無限（`UNBOUNDED`）のときは **0 に潰れます**。「Fill したのに消えた」ときは、親が無限制約を渡していないか疑ってください（`Fragment` の中や、`place_at` / `anchored()` で置かれた子など — キャンバス世界は子を無限制約で測ります）。
 
 ## 2. キャンバス世界 — `Layer` に置く
