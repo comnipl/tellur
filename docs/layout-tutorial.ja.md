@@ -37,7 +37,7 @@ Constraints::loose(max)    // anywhere from zero up to max
 Constraints::UNBOUNDED     // no upper bound — answer your intrinsic size
 ```
 
-Flutter の "constraints go down, sizes go up, parent sets position"（制約は下りる・サイズは上がる・位置は親が決める）とまったく同じモデルです。子は **自分の位置を知りません**。位置は常に親が決めます。
+原則は「**制約は下りる・サイズは上がる・位置は親が決める**」。子は自分の位置を知りません。位置は常に親が決めます。
 
 > **footgun ①**: `SizeMode::Fill` は親の max 制約を取りますが、max が無限（`UNBOUNDED`）のときは **0 に潰れます**。「Fill したのに消えた」ときは、親が無限制約を渡していないか疑ってください（`Fragment` の中や `anchored()` の測定中など）。
 
@@ -124,7 +124,7 @@ Frame::builder()
 
 ## 5. フロー世界② — `Flex` で並べる
 
-`Flex` は CSS flexbox を意識した一列配置コンテナです。**Flutter の `Stack`（重ね合わせ）とは別物**なので注意してください。tellur で「重ねる」は `Layer`/`Fragment` の仕事です。
+`Flex` は CSS flexbox を意識した一列配置コンテナです。「重ねる」は `Layer`/`Fragment` の仕事で、`Flex` は並べる専用です。
 
 ```rust
 Flex::builder()
@@ -239,15 +239,3 @@ use tellur_core::layout::raster::{Frame, Flex, Flexible};  // raster
 ```
 
 ソース上も 1 コンテナ 1 ファイル（`layout/frame.rs` など）に両変種が同居しています。raster 側だけの追加責務は `paint_bounds`（ドロップシャドウ等のはみ出しを含む描画範囲）と、キャッシュとの付き合い方（`Flexible` や `Positioned` は `CachePolicy::Transparent` で子にキャッシュスロットを譲る）です。
-
-## 10. 歴史的補足 — かつてあったもの
-
-古いコードやコミットを読むときのための対応表です。
-
-| 旧 | 現在 |
-|---|---|
-| `Sized`（サイズ宣言のみ） | `Frame`（align デフォルトが左上なのでそのまま代替） |
-| `Place`（親いっぱい＋アンカー寄せ） | `Frame::builder().width(SizeMode::Fill).height(SizeMode::Fill).align(...)` |
-| `Stack`（一列配置） | `Flex`（grow 対応で機能拡張） |
-| `Stack.size`（自分の外形を直接指定） | 外側を `Frame` で包む |
-| `Layer::fit()` / `size: None` | `Fragment` |
