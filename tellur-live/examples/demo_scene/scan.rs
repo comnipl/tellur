@@ -25,13 +25,9 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         return VectorLayer::builder().size(SCENE_SIZE).build();
     }
 
-    let life = envelope(
-        time,
-        (3.4, 3.8),
-        (5.05, 5.45),
-        |p| p.ease_in_out_expo(0.0, 1.0),
-        |p| p.ease_in_out_expo(0.0, 1.0),
-    );
+    // Rise-hold-fall: a product of an easing-in and an easing-out factor.
+    let life = time.phase(3.4, 3.8).ease_in_out_expo(0.0, 1.0)
+        * time.phase(5.05, 5.45).ease_in_out_expo(1.0, 0.0);
 
     // Center reticle: a small crosshair + cyan dot.
     let reticle = time.phase(3.5, 3.95).ease_out_cubic(0.0, 1.0);

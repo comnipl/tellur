@@ -16,7 +16,6 @@ use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Constraints, Rect as Aabb, Transform, Vec2};
-use tellur_core::phase::Phase;
 use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
@@ -65,26 +64,6 @@ pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
 // Expects `s ∈ [0, 1]`; callers feed an already-eased sweep factor.
 pub fn peak(s: f32) -> f32 {
     4.0 * s * (1.0 - s)
-}
-
-// Time-bracketed envelope: rises with `rise`, holds, falls with `fall`.
-// Each callback applies an ease to its window's Phase, producing the
-// fade-in / fade-out factor in [0, 1]. The composed envelope is
-// `rise * (1 - fall)`, clamped to [0, 1].
-pub fn envelope<T: Time, R, F>(
-    time: T,
-    rise_span: (f32, f32),
-    fall_span: (f32, f32),
-    rise: R,
-    fall: F,
-) -> f32
-where
-    R: Fn(Phase) -> f32,
-    F: Fn(Phase) -> f32,
-{
-    let r = rise(time.phase(rise_span.0, rise_span.1));
-    let f = fall(time.phase(fall_span.0, fall_span.1));
-    (r * (1.0 - f)).clamp(0.0, 1.0)
 }
 
 fn center_transform(size: Vec2, angle: f32, scale: Vec2) -> Transform {

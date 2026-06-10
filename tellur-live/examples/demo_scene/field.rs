@@ -22,13 +22,9 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         return VectorLayer::builder().size(SCENE_SIZE).build();
     }
 
-    let life = envelope(
-        time,
-        (1.9, 2.25),
-        (3.2, 3.55),
-        |p| p.ease_in_out_expo(0.0, 1.0),
-        |p| p.ease_in_out_expo(0.0, 1.0),
-    );
+    // Rise-hold-fall: a product of an easing-in and an easing-out factor.
+    let life = time.phase(1.9, 2.25).ease_in_out_expo(0.0, 1.0)
+        * time.phase(3.2, 3.55).ease_in_out_expo(1.0, 0.0);
 
     VectorLayer::builder()
         .size(SCENE_SIZE)
