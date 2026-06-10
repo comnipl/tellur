@@ -41,7 +41,7 @@ Constraints::UNBOUNDED     // no upper bound — answer your intrinsic size
 
 原則は「**制約は下りる・サイズは上がる・位置は親が決める**」。子は自分の位置を知りません。位置は常に親が決めます。
 
-> **footgun ①**: `SizeMode::Fill` は親の max 制約を取りますが、max が無限（`UNBOUNDED`）のときは **0 に潰れます**。「Fill したのに消えた」ときは、親が無限制約を渡していないか疑ってください（`Fragment` の中や `anchored()` の測定中など）。
+> **footgun ①**: `SizeMode::Fill` は親の max 制約を取りますが、max が無限（`UNBOUNDED`）のときは **0 に潰れます**。「Fill したのに消えた」ときは、親が無限制約を渡していないか疑ってください（`Fragment` の中や、`place_at` / `anchored()` で置かれた子など — キャンバス世界は子を無限制約で測ります）。
 
 ## 2. キャンバス世界 — `Layer` に置く
 
@@ -61,6 +61,8 @@ Layer::builder()
 - `.anchored(anchor).snap_to(point)` — コンポーネント上のアンカー点を、キャンバス上の点にスナップする
 
 `anchored().snap_to()` は幾何語彙（`Vec2::anchored` → `AnchoredSize::snap_to`）をそのまま componentに持ち上げたもので、「**子のどこを・どこに**」を読み下せるのが特徴です。どちらも `Positioned` という普通のコンポーネントを返すだけなので、特別な「placed の世界」はありません。
+
+置かれた子は**固有サイズ（無限制約での測定結果）のまま**描かれます。キャンバスは子にサイズを押し付けないので、キャンバスより大きい円を置いても潰れません — はみ出しはクリップの仕事です。
 
 `Layer` のサイズは**必須**です。「子に合わせて縮むグループ」が欲しいときは次の `Fragment` を使います。
 
