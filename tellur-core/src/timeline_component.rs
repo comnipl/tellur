@@ -33,6 +33,7 @@ use crate::phase::Phase;
 use crate::raster::{RasterComponent, RasterImage, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time, TimelineTime};
+use crate::window::Window;
 
 // ── The one unit: a thing placed on a timeline ──────────────────────────────
 
@@ -1192,40 +1193,17 @@ impl<'a> Clock<'a> {
         self.global
     }
 
-    /// The resolved LOCAL window length (this component's own slot, in its own
-    /// post-stretch seconds), or `None` for an open-ended placement (`.fill()`,
-    /// a bare timeless point, the root). End-relative effects read this.
-    pub fn window(&self) -> Option<f32> {
+    /// The resolved LOCAL window as a [`Window`] over the local axis —
+    /// `[0, length)` with the cursor at [`local`](Self::local) — or `None`
+    /// for an open-ended placement (`.fill()`, a bare timeless point, the
+    /// root). End-relative effects read this and use the Window's own
+    /// vocabulary: [`Window::remaining`] for countdowns,
+    /// [`Window::envelope`] for fades, [`Window::phase`] for progress
+    /// through the slot. For an open-ended fade-in, ease the local axis
+    /// directly: `clock.local().phase(0.0, 0.4)`.
+    pub fn window(&self) -> Option<Window> {
         self.window
-    }
-
-    /// Time remaining until the window closes (`window - local`, clamped at 0),
-    /// or `None` if the placement is open-ended. The end-relative twin of
-    /// [`local`](Self::local): `clock.remaining().map(|r| r.phase(0.0, 0.4))`
-    /// ramps a fade-OUT over the last 0.4s.
-    pub fn remaining(&self) -> Option<LocalTime> {
-        self.window
-            .map(|w| LocalTime::new((w - self.local.seconds()).max(0.0)))
-    }
-
-    /// A fade envelope over this component's window: opacity ramps 0→1 over the
-    /// first `fade_in` seconds, holds 1, then ramps 1→0 over the last `fade_out`
-    /// seconds, and stays 0 past the window. An open-ended window (`None`) has no
-    /// end, so it fades IN only (the pre-window behavior). Because the fade-out
-    /// term is exactly 0 once `local >= window` (`phase` clamps via
-    /// `Phase::saturating`), an envelope doubles as a self-contained
-    /// appear/disappear for a caption.
-    pub fn envelope(&self, fade_in: f32, fade_out: f32) -> Phase {
-        let rise = if fade_in <= 0.0 {
-            1.0
-        } else {
-            self.local().phase(0.0, fade_in).get()
-        };
-        let fall = match self.window {
-            Some(w) if fade_out > 0.0 => 1.0 - self.local().phase(w - fade_out, w).get(),
-            _ => 1.0,
-        };
-        Phase::saturating(rise * fall)
+            .map(|len| Window::new(0.0, len, self.local.seconds()))
     }
 
     /// Resolved trigger time of `e`, or `+∞` if unfired. Used by [`Event`]'s
@@ -2059,43 +2037,28 @@ mod tests {
     }
 
     #[test]
-    fn clock_window_surfaces_and_drives_envelope_and_remaining() {
+    fn clock_window_surfaces_the_local_interval() {
         let table = TriggerTable::new();
         let base = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
 
-        // No window ⇒ open-ended: remaining is None and envelope fades IN only.
+        // No window ⇒ open-ended.
         let open = base.with_local_window(LocalTime::new(5.0), None);
-        assert_eq!(open.window(), None);
-        assert!(open.remaining().is_none());
-        assert_eq!(
-            open.envelope(0.4, 0.4).get(),
-            1.0,
-            "open-ended holds after fade-in"
-        );
+        assert!(open.window().is_none());
 
-        // A 3s window: remaining counts down and clamps at 0; envelope rises over
-        // the first 0.5s, holds, falls over the last 0.5s, 0 at/after the end.
+        // A 3s window surfaces as [0, 3) over the local axis; Window's own
+        // vocabulary takes over from there (remaining / envelope / phase —
+        // behaviour tested in window.rs).
         let at = |t: f32| base.with_local_window(LocalTime::new(t), Some(3.0));
-        assert!((at(1.0).remaining().unwrap().seconds() - 2.0).abs() < 1e-6);
-        assert_eq!(
-            at(4.0).remaining().unwrap().seconds(),
-            0.0,
-            "remaining clamps at 0"
-        );
-        assert_eq!(at(0.0).envelope(0.5, 0.5).get(), 0.0, "0 at start");
+        let w = at(1.0).window().expect("windowed");
+        assert_eq!(w.start(), 0.0);
+        assert_eq!(w.end(), 3.0);
+        assert_eq!(w.current(), 1.0);
+        assert!((w.remaining() - 2.0).abs() < 1e-6);
+        assert_eq!(at(4.0).window().unwrap().remaining(), 0.0);
+        assert_eq!(at(0.0).window().unwrap().envelope(0.5, 0.5).get(), 0.0);
         assert!(
-            (at(0.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6,
-            "full after fade-in"
-        );
-        assert!(
-            (at(1.5).envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6,
-            "held at full"
-        );
-        assert_eq!(at(3.0).envelope(0.5, 0.5).get(), 0.0, "0 at the window end");
-        assert_eq!(
-            at(4.0).envelope(0.5, 0.5).get(),
-            0.0,
-            "stays 0 past the window"
+            (at(1.5).window().unwrap().envelope(0.5, 0.5).get() - 1.0).abs() < 1e-6,
+            "held at full between the fades"
         );
     }
 

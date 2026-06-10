@@ -104,7 +104,7 @@ fn ease_out(p: f32) -> f32 {
 /// boundary down to a single frame.
 fn transition(clock: &Clock<'_>) -> (f32, f32) {
     let l = clock.local().seconds();
-    let w = clock.window().unwrap_or(SEGMENT);
+    let w = clock.window().map(|w| w.width()).unwrap_or(SEGMENT);
     let tin = ease((l / 0.32).clamp(0.0, 1.0));
     let tout = ease(((w - l) / 0.24).clamp(0.0, 1.0));
     (tin * tout, (1.0 - tin) - (1.0 - tout))

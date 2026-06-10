@@ -1355,7 +1355,10 @@ mod tests {
             _ctx: &mut dyn RenderContext,
         ) -> Option<RasterImage> {
             let _ = canvas;
-            self.log.lock().unwrap().push(clock.window());
+            self.log
+                .lock()
+                .unwrap()
+                .push(clock.window().map(|w| w.width()));
             Some(RasterImage::cpu(
                 target.width,
                 target.height,

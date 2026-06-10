@@ -147,6 +147,26 @@ impl Window {
         (self.end - self.current).max(0.0)
     }
 
+    /// A fade envelope over this window: rises 0 → 1 across the first
+    /// `fade_in` seconds after `start`, holds 1, falls 1 → 0 across the
+    /// last `fade_out` seconds before `end`, and stays 0 outside the
+    /// window. A non-positive fade skips that edge (the envelope is already
+    /// at 1 there). A self-contained appear/disappear for captions and
+    /// other windowed content.
+    pub fn envelope(self, fade_in: f32, fade_out: f32) -> Phase {
+        let rise = if fade_in <= 0.0 {
+            1.0
+        } else {
+            (self.elapsed() / fade_in).min(1.0)
+        };
+        let fall = if fade_out <= 0.0 {
+            1.0
+        } else {
+            (self.remaining() / fade_out).min(1.0)
+        };
+        Phase::saturating(rise * fall)
+    }
+
     /// Seconds remaining until the window opens, `0` once it has.
     pub fn before(self) -> f32 {
         (self.start - self.current).max(0.0)
@@ -279,6 +299,27 @@ mod tests {
         assert!((w(3.0, 5.0, 4.5).remaining() - 0.5).abs() < 1e-6);
         assert_eq!(w(3.0, 5.0, 5.0).remaining(), 0.0);
         assert_eq!(w(3.0, 5.0, 9.0).remaining(), 0.0);
+    }
+
+    #[test]
+    fn envelope_rises_holds_falls() {
+        let e = |c: f32| w(0.0, 3.0, c).envelope(0.5, 0.5);
+        assert_eq!(e(-1.0).get(), 0.0);
+        assert_eq!(e(0.0).get(), 0.0);
+        assert!((e(0.25).get() - 0.5).abs() < 1e-6);
+        assert!((e(0.5).get() - 1.0).abs() < 1e-6);
+        assert!((e(1.5).get() - 1.0).abs() < 1e-6);
+        assert!((e(2.75).get() - 0.5).abs() < 1e-6);
+        assert_eq!(e(3.0).get(), 0.0);
+        assert_eq!(e(4.0).get(), 0.0);
+    }
+
+    #[test]
+    fn envelope_skips_non_positive_fades() {
+        // fade_in == 0: already at full the moment the window opens.
+        assert_eq!(w(0.0, 3.0, 0.0).envelope(0.0, 0.5).get(), 1.0);
+        // fade_out == 0: holds full right up to the close.
+        assert_eq!(w(0.0, 3.0, 3.0).envelope(0.5, 0.0).get(), 1.0);
     }
 
     #[test]
