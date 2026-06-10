@@ -128,14 +128,14 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 .scale(Vec2(s_clamped, s_clamped)),
         )
         .child(
-            FxOutlineRect::builder()
+            FxRect::builder()
                 .center(Vec2(CX, CY))
                 .size(Vec2(420.0, 420.0))
                 .angle(-spin * 0.4)
                 .color(p.pink.with_alpha(hero_life * 0.82))
                 .opacity(1.0)
                 .scale(Vec2(s_clamped, s_clamped))
-                .width(3.0),
+                .stroke_width(3.0),
         )
         // Crosshair arms — note the gap in the middle (drawn as 4 short
         // segments) so the reticle reads as a scope mark, not a solid plus.

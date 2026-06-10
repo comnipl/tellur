@@ -15,13 +15,12 @@ use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::fragment::Fragment;
-use tellur_core::geometry::{Anchor, Constraints, Rect as Aabb, Transform, Vec2};
+use tellur_core::geometry::{Anchor, Transform, Vec2};
 use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
 use tellur_core::time::{LocalTime, Time};
-use tellur_core::vector::{Stroke, VectorComponent, VectorGraphic, VectorTransform};
-use tellur_core::Keyable;
+use tellur_core::vector::{Stroke, VectorTransform};
 
 pub use tellur_core::easing::PhaseEasing;
 
@@ -89,56 +88,10 @@ pub fn Rect(position: Vec2, size: Vec2, color: Color) -> impl VectorComponent {
     )
 }
 
-// `shapes::Circle::layout` clamps its bounding box to the parent's
-// `Constraints`, so any circle whose diameter exceeds the scene's shorter side
-// (1080) gets axis-squashed into an ellipse. `TrueCircle` overrides `layout` to
-// always return the intrinsic `2 * radius` size — the scene's clip handles
-// overflow, not the layout. Used by `Circle` so every circle stays a real
-// circle regardless of how big it grows (e.g. the outward pulse in RESOLVE).
-#[derive(Keyable)]
-struct TrueCircle {
-    radius: f32,
-    fill: Option<Color>,
-    stroke_color: Option<Color>,
-    stroke_width: f32,
-}
-
-impl VectorComponent for TrueCircle {
-    fn layout(&self, _constraints: Constraints) -> Vec2 {
-        // Intentionally ignore the parent's constraints.
-        let d = self.radius * 2.0;
-        Vec2(d, d)
-    }
-
-    fn paint_bounds(&self, size: Vec2) -> Aabb {
-        let outset = self
-            .stroke_color
-            .map(|_| (self.stroke_width * 0.5).max(0.0))
-            .unwrap_or(0.0);
-        Aabb {
-            origin: Vec2(-outset, -outset),
-            size: Vec2(size.0 + outset * 2.0, size.1 + outset * 2.0),
-        }
-    }
-
-    fn render(&self, _size: Vec2) -> VectorGraphic {
-        let d = self.radius * 2.0;
-        let inner = shapes::Circle::builder()
-            .radius(self.radius)
-            .maybe_fill(self.fill)
-            .maybe_stroke(self.stroke_color.map(|c| Stroke {
-                paint: c.into(),
-                width: self.stroke_width,
-            }))
-            .build();
-        inner.render(Vec2(d, d))
-    }
-}
-
-/// A filled and/or stroked circle, centered on `center`, that stays a true
-/// circle regardless of the parent's constraints. The stroke is flattened into
-/// `stroke` (color) + `stroke_width` so every field is hashable. Renders
-/// nothing when there is neither a visible fill nor a visible stroke.
+/// A filled and/or stroked circle, centered on `center`. The stroke is
+/// flattened into `stroke` (color) + `stroke_width` so every field is
+/// hashable. Renders nothing when there is neither a visible fill nor a
+/// visible stroke.
 #[component(vector)]
 pub fn Circle(
     center: Vec2,
@@ -156,14 +109,15 @@ pub fn Circle(
         return Fragment::empty();
     }
     Fragment::single(
-        TrueCircle {
-            radius,
-            fill,
-            stroke_color: stroke,
-            stroke_width,
-        }
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
+        shapes::Circle::builder()
+            .radius(radius)
+            .maybe_fill(fill)
+            .maybe_stroke(stroke.map(|c| Stroke {
+                paint: c.into(),
+                width: stroke_width,
+            }))
+            .anchored(Anchor::CENTER)
+            .snap_to(center),
     )
 }
 
@@ -193,8 +147,9 @@ pub fn Label(
     )
 }
 
-/// A rotated / scaled / faded solid rectangle (a filled [`Fx`]). Renders
-/// nothing when it would be invisible or degenerate.
+/// A rotated / scaled / faded rectangle: filled by default, an outline when
+/// `stroke_width` is set. Renders nothing when it would be invisible or
+/// degenerate.
 #[component(vector)]
 pub fn FxRect(
     center: Vec2,
@@ -203,53 +158,26 @@ pub fn FxRect(
     color: Color,
     opacity: f32,
     scale: Vec2,
+    #[builder(into)] stroke_width: Option<f32>,
 ) -> impl VectorComponent {
     if size.0 <= 0.0 || size.1 <= 0.0 || opacity <= 0.0 || color.a <= 0.0 {
         return Fragment::empty();
     }
-    if scale.0 <= 0.0 || scale.1 <= 0.0 {
+    if scale.0 <= 0.0 || scale.1 <= 0.0 || stroke_width.is_some_and(|w| w <= 0.0) {
         return Fragment::empty();
     }
-    Fragment::single(
-        shapes::Rectangle::builder()
-            .size(size)
-            .fill(color)
-            .build()
-            .transform(center_transform(size, angle, scale))
-            .opacity(opacity)
-            .anchored(Anchor::CENTER)
-            .snap_to(center),
-    )
-}
-
-/// A rotated / scaled / faded stroked rectangle (a stroked [`Fx`]). Renders
-/// nothing when it would be invisible or degenerate.
-#[component(vector)]
-#[allow(clippy::too_many_arguments)]
-pub fn FxOutlineRect(
-    center: Vec2,
-    size: Vec2,
-    angle: f32,
-    color: Color,
-    opacity: f32,
-    scale: Vec2,
-    width: f32,
-) -> impl VectorComponent {
-    if size.0 <= 0.0 || size.1 <= 0.0 || opacity <= 0.0 || color.a <= 0.0 || width <= 0.0 {
-        return Fragment::empty();
-    }
-    if scale.0 <= 0.0 || scale.1 <= 0.0 {
-        return Fragment::empty();
-    }
-    Fragment::single(
-        shapes::Rectangle::builder()
+    let rect = match stroke_width {
+        Some(width) => shapes::Rectangle::builder()
             .size(size)
             .stroke(Stroke {
                 paint: color.into(),
                 width,
             })
-            .build()
-            .transform(center_transform(size, angle, scale))
+            .build(),
+        None => shapes::Rectangle::builder().size(size).fill(color).build(),
+    };
+    Fragment::single(
+        rect.transform(center_transform(size, angle, scale))
             .opacity(opacity)
             .anchored(Anchor::CENTER)
             .snap_to(center),
