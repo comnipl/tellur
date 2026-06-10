@@ -105,7 +105,10 @@ impl Scene {
                     // saturates (~0.6s), so it caches as its own raster child.
                     .child(
                         Backdrop::builder()
-                            .reveal(t.phase(BACKDROP_REVEAL_START, BACKDROP_REVEAL_END))
+                            .reveal(
+                                t.window(BACKDROP_REVEAL_START, BACKDROP_REVEAL_END)
+                                    .clamped(),
+                            )
                             .palette(palette)
                             .rasterize()
                             .place_at(Vec2::ZERO),
@@ -171,7 +174,7 @@ impl Scene {
                     .child(
                         Hud {
                             palette,
-                            intro: t.phase(HUD_INTRO_START, HUD_INTRO_END),
+                            intro: t.window(HUD_INTRO_START, HUD_INTRO_END).clamped(),
                             outro: t.phase(HUD_OUTRO_START, HUD_OUTRO_END),
                             section: hud::section_index_at(t.seconds()),
                         }
@@ -180,8 +183,8 @@ impl Scene {
                     )
                     .child(
                         Overlay::builder()
-                            .boot(t.phase(OVERLAY_BOOT_START, OVERLAY_BOOT_END))
-                            .flash(t.phase(OVERLAY_FLASH_START, OVERLAY_FLASH_END))
+                            .boot(t.window(OVERLAY_BOOT_START, OVERLAY_BOOT_END).clamped())
+                            .flash(t.window(OVERLAY_FLASH_START, OVERLAY_FLASH_END).clamped())
                             .fade(t.phase(OVERLAY_FADE_START, DURATION))
                             .palette(palette)
                             .rasterize()
@@ -273,7 +276,10 @@ fn Foreground() -> impl TimelineComponent {
 fn BackdropSection(#[clock] clock: Clock) -> impl TimelineComponent {
     let t = clock.global();
     Backdrop::builder()
-        .reveal(t.phase(BACKDROP_REVEAL_START, BACKDROP_REVEAL_END))
+        .reveal(
+            t.window(BACKDROP_REVEAL_START, BACKDROP_REVEAL_END)
+                .clamped(),
+        )
         .palette(PALETTE)
         .rasterize()
 }
@@ -315,7 +321,7 @@ fn HudSection(#[clock] clock: Clock) -> impl TimelineComponent {
     let t = clock.global();
     Hud {
         palette: PALETTE,
-        intro: t.phase(HUD_INTRO_START, HUD_INTRO_END),
+        intro: t.window(HUD_INTRO_START, HUD_INTRO_END).clamped(),
         outro: t.phase(HUD_OUTRO_START, HUD_OUTRO_END),
         section: hud::section_index_at(t.seconds()),
     }
@@ -326,8 +332,8 @@ fn HudSection(#[clock] clock: Clock) -> impl TimelineComponent {
 fn OverlaySection(#[clock] clock: Clock) -> impl TimelineComponent {
     let t = clock.global();
     Overlay::builder()
-        .boot(t.phase(OVERLAY_BOOT_START, OVERLAY_BOOT_END))
-        .flash(t.phase(OVERLAY_FLASH_START, OVERLAY_FLASH_END))
+        .boot(t.window(OVERLAY_BOOT_START, OVERLAY_BOOT_END).clamped())
+        .flash(t.window(OVERLAY_FLASH_START, OVERLAY_FLASH_END).clamped())
         .fade(t.phase(OVERLAY_FADE_START, DURATION))
         .palette(PALETTE)
         .rasterize()

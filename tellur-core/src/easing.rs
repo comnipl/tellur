@@ -12,6 +12,7 @@
 use std::f32::consts::PI;
 
 use crate::phase::Phase;
+use crate::window::Window;
 
 /// Easing methods on [`Phase`]. Every method takes `(from, to)` as the
 /// output range and returns the eased `f32` interpolated into it. Callers
@@ -91,6 +92,44 @@ impl PhaseEasing for Phase {
 
     fn ease_out_elastic(self, from: f32, to: f32) -> f32 {
         lerp_unbounded(from, to, out_elastic_factor(self))
+    }
+}
+
+/// Easing a [`Window`] eases its saturating [`Window::phase`] view — sugar
+/// for `w.phase().ease_*(from, to)`, so a sub-windowed chain reads
+/// `w.sub_secs(0.4..0.8).ease_out_cubic(0.0, 1.0)` without the intermediate
+/// projection.
+impl PhaseEasing for Window {
+    fn linear(self, from: f32, to: f32) -> f32 {
+        self.phase().linear(from, to)
+    }
+
+    fn ease_smoothstep(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_smoothstep(from, to)
+    }
+
+    fn ease_out_cubic(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_out_cubic(from, to)
+    }
+
+    fn ease_out_quint(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_out_quint(from, to)
+    }
+
+    fn ease_in_out_quint(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_in_out_quint(from, to)
+    }
+
+    fn ease_in_out_expo(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_in_out_expo(from, to)
+    }
+
+    fn ease_in_back(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_in_back(from, to)
+    }
+
+    fn ease_out_elastic(self, from: f32, to: f32) -> f32 {
+        self.phase().ease_out_elastic(from, to)
     }
 }
 

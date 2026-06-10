@@ -5,23 +5,24 @@
 //! Each of the three effects is a one-shot gate confined to a short time
 //! window; for the long spans between them the overlay paints nothing. To let
 //! `CachingRenderContext` reuse the (empty or saturated) raster across those
-//! spans instead of re-rasterizing every frame, the component takes one
-//! `Phase` per gate window rather than raw time — the same trick `Hud` and
-//! `Backdrop` use. Outside a window its `Phase` is a stable 0.0 (before) or
-//! 1.0 (after), so the component hashes equal frame to frame and caches.
+//! spans instead of re-rasterizing every frame, the component takes a clamped
+//! `Window` per gate rather than raw time — the same trick `Hud` and
+//! `Backdrop` use. Outside a gate the clamped snapshot is frozen at the gate's
+//! start or end, so the component hashes equal frame to frame and caches.
 
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::phase::Phase;
 use tellur_core::text::Weight;
+use tellur_core::window::Window;
 
 use super::common::*;
 
 // Gate windows, each spanning a one-shot effect from its first sub-event start
-// to its last sub-event end. The matching `Phase` is `time.phase(START, END)`,
-// so it saturates to 1.0 once the effect is over and sits at 0.0 before it
-// begins — stable, and therefore cacheable, on every frame outside the window.
+// to its last sub-event end. The matching value is `time.window(START, END)`
+// clamped, so it freezes once the effect is over and before it begins —
+// stable, and therefore cacheable, on every frame outside the window.
 pub const OVERLAY_BOOT_START: f32 = 0.05;
 pub const OVERLAY_BOOT_END: f32 = 0.55;
 pub const OVERLAY_FLASH_START: f32 = 4.9;
@@ -30,7 +31,7 @@ pub const OVERLAY_FADE_START: f32 = 7.25;
 // The fade runs to the end of the timeline, so its window end is `DURATION`.
 
 #[tellur_core::component(vector)]
-pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl VectorComponent {
+pub fn Overlay(boot: Window, flash: Window, fade: Phase, palette: Palette) -> impl VectorComponent {
     let p = palette;
     VectorLayer::builder()
         .size(SCENE_SIZE)
@@ -39,18 +40,14 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // finished assembling. Reads as a system startup flash.
         .maybe_child({
             // Sub-events are addressed in window-local seconds via
-            // `sub_secs(boot, ...)`, so the original absolute starts are shifted
+            // `boot.sub_secs(...)`, so the original absolute starts are shifted
             // into the window's frame here.
-            let boot_in = sub_secs(
-                boot,
-                (0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START),
-            )
-            .ease_in_out_expo(0.0, 1.0);
-            let boot_out = sub_secs(
-                boot,
-                (0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START),
-            )
-            .ease_in_out_expo(1.0, 0.0);
+            let boot_in = boot
+                .sub_secs((0.05 - OVERLAY_BOOT_START)..(0.18 - OVERLAY_BOOT_START))
+                .ease_in_out_expo(0.0, 1.0);
+            let boot_out = boot
+                .sub_secs((0.32 - OVERLAY_BOOT_START)..(0.55 - OVERLAY_BOOT_START))
+                .ease_in_out_expo(1.0, 0.0);
             let boot_life = boot_in * boot_out;
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
@@ -86,16 +83,12 @@ pub fn Overlay(boot: Phase, flash: Phase, fade: Phase, palette: Palette) -> impl
         // unshadowed overlay so it doesn't smear into a grey haze through the
         // foreground shadow pass.
         .maybe_child({
-            let flash_in = sub_secs(
-                flash,
-                (4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START),
-            )
-            .ease_out_quint(0.0, 1.0);
-            let flash_out = sub_secs(
-                flash,
-                (5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START),
-            )
-            .ease_in_out_expo(1.0, 0.0);
+            let flash_in = flash
+                .sub_secs((4.9 - OVERLAY_FLASH_START)..(5.05 - OVERLAY_FLASH_START))
+                .ease_out_quint(0.0, 1.0);
+            let flash_out = flash
+                .sub_secs((5.05 - OVERLAY_FLASH_START)..(5.35 - OVERLAY_FLASH_START))
+                .ease_in_out_expo(1.0, 0.0);
             let flash = flash_in * flash_out;
             (flash > 0.0).then(|| {
                 Rect::builder()

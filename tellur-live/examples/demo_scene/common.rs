@@ -12,7 +12,6 @@
 //! `Aabb` alias for `geometry::Rect`.
 
 use std::f32::consts::TAU;
-use std::ops::Range;
 
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
@@ -55,12 +54,6 @@ pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
 
 pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
     ((time.seconds() / period + offset) * TAU).sin()
-}
-
-pub fn sub_secs(phase: Phase, range: Range<f32>) -> Phase {
-    phase
-        .sub_secs(range)
-        .expect("demo sub-phase should fit inside its source window")
 }
 
 // Rise-fall hat envelope `4x(1-x)`: peaks at 1 when value is 0.5, returns to

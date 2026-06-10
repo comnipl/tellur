@@ -1,14 +1,9 @@
 //! [`Window`] — a time interval `[start, end)` paired with the current time
-//! cursor, packaging together the saturating [`Phase`] view and the unbounded
-//! "seconds since the anchor" / "seconds past the close" durations that the
-//! [`Phase`] alone cannot represent.
-//!
-//! `Window` exists because [`Phase`] is saturating by design: once the cursor
-//! passes the window end, the Phase clamps at `1.0` and forgets how far past
-//! it went. For envelopes (rise / saturate / fall) that is exactly right;
-//! for "spin since this moment", "5 seconds after the intro finishes", or
-//! any ongoing motion that outlives the window, callers need the absolute
-//! time anchors back. `Window` keeps them attached.
+//! cursor. Where [`Phase`] is the pure "how far along am I" scalar, `Window`
+//! is the view that still knows the interval: it can carve sub-windows in
+//! seconds ([`Window::sub_secs`]), report unbounded durations
+//! ([`Window::elapsed`] / [`Window::after`]) that a saturating Phase cannot
+//! represent, and project down to a [`Phase`] via [`Window::phase`].
 //!
 //! ```
 //! use tellur_core::time::{Time, TimelineTime};
@@ -18,16 +13,43 @@
 //! assert_eq!(w.elapsed(), 2.0);           // 2s since the window opened
 //! assert_eq!(w.after(), 1.0);             // 1s past close
 //! ```
+//!
+//! ### Sub-windows
+//!
+//! [`Window::sub_secs`] reinterprets a seconds range (relative to the
+//! window's start) as a new window over the same cursor. Staggered
+//! sub-events fall out naturally:
+//!
+//! ```
+//! use tellur_core::time::{Time, TimelineTime};
+//! let reveal = TimelineTime::new(1.0).window(0.5, 2.5);
+//! let line_in = reveal.sub_secs(0.0..0.4).phase();   // first 0.4s of the reveal
+//! let tick_in = reveal.sub_secs(0.7..1.1).phase();   // a later slice
+//! assert_eq!(line_in.get(), 1.0);
+//! assert_eq!(tick_in.get(), 0.0);
+//! ```
+//!
+//! ### Memo-friendly snapshots
+//!
+//! A live `Window` changes every frame (its cursor keeps moving), so it is a
+//! poor cache-key term for a memoized component. [`Window::clamped`] clamps
+//! the cursor into `[start, end]`: before the window opens the snapshot is
+//! constant at `(start, end, start)`, and once it saturates it is constant at
+//! `(start, end, end)` — frame-to-frame stable exactly when the component's
+//! output is.
+
+use std::ops::Range;
 
 use crate::phase::Phase;
 use crate::Keyable;
 
 /// A time interval `[start, end)` plus the current time cursor — the pair
-/// `Phase` needs to talk about coordinates outside the window.
+/// [`Phase`] needs to talk about coordinates outside the window.
 ///
 /// Construct via [`crate::time::Time::window`]. All accessors are derived
 /// from `(start, end, current)`; the struct itself stores those three `f32`s
-/// directly so it can be `Keyable`-hashed for cache keys.
+/// directly so it can be `Keyable`-hashed for cache keys (see
+/// [`Window::clamped`] for the frame-stable form).
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct Window {
     start: f32,
@@ -70,13 +92,45 @@ impl Window {
     }
 
     /// The saturating [`Phase`] view: `0.0` before `start`, `1.0` after
-    /// `end`, linearly interpolated in between. Carries [`Phase::width`]
-    /// so the resulting Phase can be further carved with
-    /// [`Phase::sub_secs`].
+    /// `end`, linearly interpolated in between.
     pub fn phase(self) -> Phase {
-        let width = self.span();
-        let u = (self.current - self.start) / width;
-        Phase::windowed_saturating(u, width)
+        Phase::saturating((self.current - self.start) / self.span())
+    }
+
+    /// Reinterprets `range` (in seconds from this window's start) as a new
+    /// `Window` over the same cursor. Total: the sub-window may extend past
+    /// this window's end (the cursor still measures correctly); only a
+    /// finite, non-empty, ordered `range` is required.
+    ///
+    /// This is the "stagger sub-events in window-local seconds" primitive:
+    /// `w.sub_secs(0.4..0.8).phase()` rises across `[start + 0.4, start + 0.8)`.
+    pub fn sub_secs(self, range: Range<f32>) -> Window {
+        assert!(
+            range.start.is_finite() && range.end.is_finite() && range.end > range.start,
+            "Window::sub_secs requires a finite range with end > start"
+        );
+        Self {
+            start: self.start + range.start,
+            end: self.start + range.end,
+            current: self.current,
+        }
+    }
+
+    /// Clamps the cursor into `[start, end]`, turning this live view into a
+    /// saturating snapshot: constant `(start, end, start)` before the window
+    /// opens and constant `(start, end, end)` once it closes.
+    ///
+    /// Use this when a `Window` crosses a memoized component boundary as a
+    /// field — the raw cursor changes every frame and would defeat the
+    /// cache, while the clamped snapshot is stable exactly when every Phase
+    /// derived from it is. [`Self::elapsed`] / [`Self::after`] intentionally
+    /// lose their unbounded reading on a clamped window.
+    pub fn clamped(self) -> Window {
+        Self {
+            start: self.start,
+            end: self.end,
+            current: self.current.clamp(self.start, self.end),
+        }
     }
 
     /// Seconds the cursor has lived past `start`, clamped at `0` before the
@@ -85,6 +139,12 @@ impl Window {
     /// anchor" case [`Phase`] cannot express.
     pub fn elapsed(self) -> f32 {
         (self.current - self.start).max(0.0)
+    }
+
+    /// Seconds remaining until the window closes, `0` once it has. The
+    /// countdown twin of [`Self::elapsed`].
+    pub fn remaining(self) -> f32 {
+        (self.end - self.current).max(0.0)
     }
 
     /// Seconds remaining until the window opens, `0` once it has.
@@ -148,8 +208,57 @@ mod tests {
     }
 
     #[test]
-    fn phase_carries_width() {
-        assert_eq!(w(3.0, 5.0, 4.0).phase().width(), Some(2.0));
+    fn sub_secs_offsets_against_the_start() {
+        // Parent [3, 5), cursor 4.0. Sub-window 0.5..1.5 covers [3.5, 4.5).
+        let sub = w(3.0, 5.0, 4.0).sub_secs(0.5..1.5);
+        assert_eq!(sub.start(), 3.5);
+        assert_eq!(sub.end(), 4.5);
+        assert_eq!(sub.current(), 4.0);
+        assert!((sub.phase().get() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sub_secs_saturates_outside_inner_window() {
+        let parent = w(3.0, 5.0, 3.1);
+        assert_eq!(parent.sub_secs(0.5..1.0).phase().get(), 0.0);
+        let parent = w(3.0, 5.0, 4.9);
+        assert_eq!(parent.sub_secs(0.5..1.0).phase().get(), 1.0);
+    }
+
+    #[test]
+    fn sub_secs_may_extend_past_the_parent_end() {
+        // The sub-window is allowed to reach past the parent's declared end;
+        // the cursor still measures correctly.
+        let sub = w(3.0, 5.0, 5.5).sub_secs(1.5..3.0);
+        assert_eq!(sub.end(), 6.0);
+        assert!((sub.phase().get() - (5.5 - 4.5) / 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sub_secs_chains_in_local_seconds() {
+        // Chaining stays relative to each new start: 0.5 into the parent,
+        // then 0.25 into that sub-window.
+        let sub = w(3.0, 5.0, 4.0).sub_secs(0.5..2.0).sub_secs(0.25..0.75);
+        assert_eq!(sub.start(), 3.75);
+        assert_eq!(sub.end(), 4.25);
+    }
+
+    #[test]
+    #[should_panic(expected = "Window::sub_secs requires a finite range with end > start")]
+    fn sub_secs_rejects_empty_range() {
+        let _ = w(3.0, 5.0, 4.0).sub_secs(0.5..0.5);
+    }
+
+    #[test]
+    fn clamped_freezes_outside_the_window() {
+        // Before: cursor pinned to start.
+        let snap = w(3.0, 5.0, 1.0).clamped();
+        assert_eq!(snap.current(), 3.0);
+        // Inside: unchanged.
+        assert_eq!(w(3.0, 5.0, 4.2).clamped().current(), 4.2);
+        // After: pinned to end — stable however far the cursor travels.
+        assert_eq!(w(3.0, 5.0, 6.0).clamped(), w(3.0, 5.0, 99.0).clamped());
+        assert_eq!(w(3.0, 5.0, 6.0).clamped().phase().get(), 1.0);
     }
 
     #[test]
@@ -160,6 +269,16 @@ mod tests {
         assert!((w(3.0, 5.0, 4.0).elapsed() - 1.0).abs() < 1e-6);
         // After: still current - start, NOT clamped at width.
         assert!((w(3.0, 5.0, 7.5).elapsed() - 4.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn remaining_counts_down_then_zero() {
+        // Before the window opens the close is still 3 seconds away — the
+        // countdown is to `end`, not capped at the width.
+        assert_eq!(w(3.0, 5.0, 2.0).remaining(), 3.0);
+        assert!((w(3.0, 5.0, 4.5).remaining() - 0.5).abs() < 1e-6);
+        assert_eq!(w(3.0, 5.0, 5.0).remaining(), 0.0);
+        assert_eq!(w(3.0, 5.0, 9.0).remaining(), 0.0);
     }
 
     #[test]

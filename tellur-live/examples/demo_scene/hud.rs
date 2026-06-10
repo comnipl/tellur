@@ -1,9 +1,10 @@
 //! Persistent UI scaffolding — the "instrument panel" framing that keeps the
 //! piece reading as a deliberate system rather than free-floating shapes.
 //!
-//! Implemented as a `VectorComponent` whose state is reduced to three small,
-//! stable values: a `Palette`, two `Phase`s, and a `section` discriminator.
-//! Once the intro phase saturates to 1.0 (after ~1.35s), and as long as
+//! Implemented as a `VectorComponent` whose state is reduced to four small,
+//! stable values: a `Palette`, a clamped intro `Window`, an outro `Phase`, and
+//! a `section` discriminator.
+//! Once the intro window saturates (after ~1.35s), and as long as
 //! `section` hasn't ticked over, the struct hashes and compares equal across
 //! frames — so wrapping `Hud` in `.rasterize()` lets `CachingRenderContext`
 //! reuse the rasterized image for the full steady-state span instead of
@@ -16,11 +17,12 @@ use tellur_core::layer::VectorLayer;
 use tellur_core::phase::Phase;
 use tellur_core::text::Weight;
 use tellur_core::vector::{VectorComponent, VectorGraphic};
+use tellur_core::window::Window;
 
 use super::common::*;
 
 // HUD intro/outro time windows. All bracket/tick/label staggers fit inside
-// the intro window expressed via `Phase::sub_secs`; everything saturates by
+// the intro window expressed via `Window::sub_secs`; everything saturates by
 // `INTRO_END` and the component becomes byte-identical between frames.
 pub const HUD_INTRO_START: f32 = 0.15;
 pub const HUD_INTRO_END: f32 = 1.35;
@@ -51,7 +53,7 @@ pub fn section_index_at(t: f32) -> u8 {
 #[derive(Clone, Copy, PartialEq, Hash)]
 pub struct Hud {
     pub palette: Palette,
-    pub intro: Phase,
+    pub intro: Window,
     pub outro: Phase,
     pub section: u8,
 }
@@ -72,11 +74,11 @@ impl VectorComponent for Hud {
 impl Hud {
     fn layer(&self, size: Vec2) -> VectorLayer {
         // Each sub-event below carves a window-local seconds slice out of
-        // `intro` via `Phase::sub_secs`. The eased factors come out as f32
+        // `intro` via `Window::sub_secs`. The eased factors come out as f32
         // already interpolated into their target range (here `(0, 1)` for
         // alpha) via the uniform `ease_*(from, to)` shape.
         let intro = self.intro;
-        let alpha_in = sub_secs(intro, 0.0..0.4).ease_in_out_expo(0.0, 1.0);
+        let alpha_in = intro.sub_secs(0.0..0.4).ease_in_out_expo(0.0, 1.0);
         let alpha_remain = self.outro.ease_in_out_expo(1.0, 0.0);
         let life = alpha_in * alpha_remain;
         if life <= 0.0 {
@@ -88,7 +90,7 @@ impl Hud {
         let inset = 96.0_f32;
         let bracket_len = 92.0_f32;
 
-        let label_in = sub_secs(intro, 0.4..0.8).ease_in_out_expo(0.0, 1.0);
+        let label_in = intro.sub_secs(0.4..0.8).ease_in_out_expo(0.0, 1.0);
         let label_alpha = 0.95 * life * label_in;
         let (idx_text, idx_color) = section_marker(self.section, p);
         let marker_x = SCENE_SIZE.0 - inset;
@@ -109,7 +111,8 @@ impl Hud {
                     .enumerate()
                     .map(move |(i, (ax, ay, dx, dy))| {
                         let stagger = i as f32 * 0.05;
-                        let pop = sub_secs(intro, (0.1 + stagger)..(0.6 + stagger))
+                        let pop = intro
+                            .sub_secs((0.1 + stagger)..(0.6 + stagger))
                             .ease_out_cubic(0.0, 1.0);
                         let len = pop * bracket_len;
                         let color = p.paper.with_alpha(life * 0.55);
@@ -181,8 +184,9 @@ impl Hud {
             // Bottom edge tick ruler — every 4th tick is taller.
             .children((0..17).map(move |i| {
                 let stagger = i as f32 * 0.018;
-                let pop =
-                    sub_secs(intro, (0.3 + stagger)..(0.8 + stagger)).ease_out_cubic(0.0, 1.0);
+                let pop = intro
+                    .sub_secs((0.3 + stagger)..(0.8 + stagger))
+                    .ease_out_cubic(0.0, 1.0);
                 let bar_left = inset + 24.0;
                 let bar_right = SCENE_SIZE.0 - inset - 24.0;
                 let tick_y_top = SCENE_SIZE.1 - inset + 28.0;
@@ -200,8 +204,9 @@ impl Hud {
             // instrument frame so the scaffold reads as a full HUD.
             .children((0..11).map(move |i| {
                 let stagger = i as f32 * 0.02;
-                let pop =
-                    sub_secs(intro, (0.55 + stagger)..(1.0 + stagger)).ease_out_cubic(0.0, 1.0);
+                let pop = intro
+                    .sub_secs((0.55 + stagger)..(1.0 + stagger))
+                    .ease_out_cubic(0.0, 1.0);
                 let v_bar_top = inset + 60.0;
                 let v_bar_bottom = SCENE_SIZE.1 - inset - 60.0;
                 let frac = i as f32 / 10.0;
