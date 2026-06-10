@@ -136,50 +136,55 @@ impl Hud {
             )
             // Top-left wordmark + tagline.
             .child(
-                Label::builder()
-                    .position(Vec2(inset, inset - 22.0))
-                    .anchor(Anchor::BOTTOM_LEFT)
-                    .text("TELLUR")
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(20.0)
-                    .color(p.paper.with_alpha(label_alpha))
-                    .weight(Weight::BOLD),
+                    .weight(Weight::BOLD)
+                    .fill(p.paper.with_alpha(label_alpha))
+                    .span(TextSpan::plain("TELLUR"))
+                    .anchored(Anchor::BOTTOM_LEFT)
+                    .snap_to(Vec2(inset, inset - 22.0)),
             )
             .child(
-                Label::builder()
-                    .position(Vec2(inset + 96.0, inset - 22.0))
-                    .anchor(Anchor::BOTTOM_LEFT)
-                    .text("kinetic-motion · 7.6s")
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(13.0)
-                    .color(p.paper.with_alpha(0.5 * life * label_in))
-                    .weight(Weight::NORMAL),
+                    .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(0.5 * life * label_in))
+                    .span(TextSpan::plain("kinetic-motion · 7.6s"))
+                    .anchored(Anchor::BOTTOM_LEFT)
+                    .snap_to(Vec2(inset + 96.0, inset - 22.0)),
             )
             // Top-right section marker + accent dot.
             .child(
-                Label::builder()
-                    .position(Vec2(marker_x, inset - 22.0))
-                    .anchor(Anchor::BOTTOM_RIGHT)
-                    .text(idx_text)
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(14.0)
-                    .color(p.paper.with_alpha(0.75 * life * label_in))
-                    .weight(Weight::NORMAL),
+                    .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(0.75 * life * label_in))
+                    .span(TextSpan::plain(idx_text))
+                    .anchored(Anchor::BOTTOM_RIGHT)
+                    .snap_to(Vec2(marker_x, inset - 22.0)),
             )
             .child(
                 Circle::builder()
-                    .center(Vec2(marker_x - 128.0, inset - 28.0))
                     .radius(4.5 * label_in)
-                    .fill(idx_color.with_alpha(life * label_in)),
+                    .fill(idx_color.with_alpha(life * label_in))
+                    .anchored(Anchor::CENTER)
+                    .snap_to(Vec2(marker_x - 128.0, inset - 28.0)),
             )
             // Static "OBS" badge below the section marker — reads as a "live
             // observation" tag without animating per frame (so it stays inside
             // the cached HUD raster).
             .child(
-                Label::builder()
-                    .position(Vec2(marker_x, inset + 4.0))
-                    .anchor(Anchor::TOP_RIGHT)
-                    .text("OBS · TELLUR-04")
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(11.0)
-                    .color(p.paper.with_alpha(0.4 * life * label_in))
-                    .weight(Weight::NORMAL),
+                    .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(0.4 * life * label_in))
+                    .span(TextSpan::plain("OBS · TELLUR-04"))
+                    .anchored(Anchor::TOP_RIGHT)
+                    .snap_to(Vec2(marker_x, inset + 4.0)),
             )
             // Bottom edge tick ruler — every 4th tick is taller.
             .children((0..17).map(move |i| {
@@ -233,22 +238,24 @@ impl Hud {
             }))
             // Bottom-corner runtime + resolution readouts.
             .child(
-                Label::builder()
-                    .position(Vec2(inset, SCENE_SIZE.1 - inset + 20.0))
-                    .anchor(Anchor::TOP_LEFT)
-                    .text("RUNTIME 7600MS · 60FPS")
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(12.0)
-                    .color(p.paper.with_alpha(0.45 * life * label_in))
-                    .weight(Weight::NORMAL),
+                    .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(0.45 * life * label_in))
+                    .span(TextSpan::plain("RUNTIME 7600MS · 60FPS"))
+                    .anchored(Anchor::TOP_LEFT)
+                    .snap_to(Vec2(inset, SCENE_SIZE.1 - inset + 20.0)),
             )
             .child(
-                Label::builder()
-                    .position(Vec2(SCENE_SIZE.0 - inset, SCENE_SIZE.1 - inset + 20.0))
-                    .anchor(Anchor::TOP_RIGHT)
-                    .text("1920 × 1080 · RGBA")
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(12.0)
-                    .color(p.paper.with_alpha(0.45 * life * label_in))
-                    .weight(Weight::NORMAL),
+                    .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(0.45 * life * label_in))
+                    .span(TextSpan::plain("1920 × 1080 · RGBA"))
+                    .anchored(Anchor::TOP_RIGHT)
+                    .snap_to(Vec2(SCENE_SIZE.0 - inset, SCENE_SIZE.1 - inset + 20.0)),
             )
             .build()
     }

@@ -175,17 +175,18 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // Small open ring at the center of the reticle.
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(6.0 * s_clamped)
-                .stroke(mark_color)
-                .stroke_width(1.5),
+                .stroke(Stroke::new(mark_color, 1.5))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // A tiny solid dot at the very center for the bullseye.
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(1.5 * s_clamped)
-                .fill(mark_color),
+                .fill(mark_color)
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // Four corner dots inside the paper square, offset 110 from center then
         // rotated by `spin` to follow the square's orientation.
@@ -197,9 +198,10 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     let ly = dy * corner_off;
                     let pos = Vec2(CX + lx * cs - ly * sn, CY + lx * sn + ly * cs);
                     Circle::builder()
-                        .center(pos)
                         .radius(3.5 * hero_life)
                         .fill(mark_color)
+                        .anchored(Anchor::CENTER)
+                        .snap_to(pos)
                 }),
         )
         // Four registration dots locked onto the outline corners, alternating
@@ -249,22 +251,24 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 } else {
                     Anchor::BOTTOM_CENTER
                 };
-                Label::builder()
-                    .position(lpos)
-                    .anchor(anchor)
-                    .text(format!("0{}", s + 1))
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(10.0)
-                    .color(p.paper.with_alpha(label_alpha.clamp(0.0, 1.0)))
                     .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(label_alpha.clamp(0.0, 1.0)))
+                    .span(TextSpan::plain(format!("0{}", s + 1)))
+                    .anchored(anchor)
+                    .snap_to(lpos)
             });
 
             Fragment::builder()
                 .maybe_child(ray)
                 .child(
                     Circle::builder()
-                        .center(pos)
                         .radius(6.0 * hero_life)
-                        .fill((if s % 2 == 0 { p.pink } else { p.cyan }).with_alpha(hero_life)),
+                        .fill((if s % 2 == 0 { p.pink } else { p.cyan }).with_alpha(hero_life))
+                        .anchored(Anchor::CENTER)
+                        .snap_to(pos),
                 )
                 .maybe_child(tag)
                 .build()
@@ -318,13 +322,14 @@ fn LengthTag(palette: Palette, hero_life: f32, tag_in: f32) -> impl VectorCompon
                 .place_at(Vec2(CX - half_span * tag_in, y - 1.0)),
         )
         .child(
-            Label::builder()
-                .position(Vec2(CX, y + 18.0))
-                .anchor(Anchor::TOP_CENTER)
-                .text("L = 280 PX")
+            Text::builder()
+                .font(MONOSPACE.clone())
                 .size(12.0)
-                .color(p.paper.with_alpha(hero_life * tag_in * 0.75))
-                .weight(Weight::NORMAL),
+                .weight(Weight::NORMAL)
+                .fill(p.paper.with_alpha(hero_life * tag_in * 0.75))
+                .span(TextSpan::plain("L = 280 PX"))
+                .anchored(Anchor::TOP_CENTER)
+                .snap_to(Vec2(CX, y + 18.0)),
         )
         .build()
 }

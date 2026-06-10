@@ -74,17 +74,18 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         )
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(9.0 * reticle)
-                .fill(p.cyan.with_alpha(life)),
+                .fill(p.cyan.with_alpha(life))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // Single hero ring.
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(ring_r)
-                .stroke(p.cyan.with_alpha(life * 0.75))
-                .stroke_width(3.5),
+                .stroke(Stroke::new(p.cyan.with_alpha(life * 0.75), 3.5))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // Inner secondary reticle — a thinner cyan ring at ~120 + 4 cardinal
         // mini-ticks. Layers visual depth between the crosshair and the hero ring.
@@ -95,10 +96,10 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Fragment::builder()
                     .child(
                         Circle::builder()
-                            .center(Vec2(CX, CY))
                             .radius(inner_r2 * inner_ring_in)
-                            .stroke(p.cyan.with_alpha(life * 0.35))
-                            .stroke_width(1.5),
+                            .stroke(Stroke::new(p.cyan.with_alpha(life * 0.35), 1.5))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(Vec2(CX, CY)),
                     )
                     .children((0..4).map(move |i| {
                         let a = i as f32 * PI * 0.5 - PI * 0.5;
@@ -153,13 +154,14 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         life * label_in * time.phase(5.0, 5.35).ease_in_out_expo(1.0, 0.0);
                     (label_alpha > 0.0).then(|| {
                         let label_r = outer_r + 32.0;
-                        Label::builder()
-                            .position(Vec2(CX + a.cos() * label_r, CY + a.sin() * label_r))
-                            .anchor(Anchor::CENTER)
-                            .text(angle_label)
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(11.0)
-                            .color(p.paper.with_alpha(label_alpha * 0.7))
                             .weight(Weight::NORMAL)
+                            .fill(p.paper.with_alpha(label_alpha * 0.7))
+                            .span(TextSpan::plain(angle_label))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(Vec2(CX + a.cos() * label_r, CY + a.sin() * label_r))
                     })
                 })
                 .flatten();
@@ -206,21 +208,23 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     // Slight push along the chosen axis to avoid the satellite.
                     let push = 6.0;
                     let lpos = Vec2(lpos.0 + a.cos() * push, lpos.1 + a.sin() * push);
-                    Label::builder()
-                        .position(lpos)
-                        .anchor(anchor)
-                        .text(format!("0{}", i + 1))
+                    Text::builder()
+                        .font(MONOSPACE.clone())
                         .size(10.0)
-                        .color(p.paper.with_alpha(life * sat_label_in * 0.55))
                         .weight(Weight::NORMAL)
+                        .fill(p.paper.with_alpha(life * sat_label_in * 0.55))
+                        .span(TextSpan::plain(format!("0{}", i + 1)))
+                        .anchored(anchor)
+                        .snap_to(lpos)
                 });
 
                 Fragment::builder()
                     .child(
                         Circle::builder()
-                            .center(pos)
                             .radius(12.0 * sp)
-                            .fill(color.with_alpha(life)),
+                            .fill(color.with_alpha(life))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(pos),
                     )
                     .maybe_child(tag)
                     .build()
@@ -270,23 +274,25 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .place_at(Vec2(CX + ring_r, CY - 1.0)),
                     )
                     .child(
-                        Label::builder()
-                            .position(Vec2(CX + ring_r + 36.0, CY - 6.0))
-                            .anchor(Anchor::CENTER_LEFT)
-                            .text("R = 300 PX")
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(13.0)
-                            .color(p.paper.with_alpha(life * annot * 0.85))
-                            .weight(Weight::NORMAL),
+                            .weight(Weight::NORMAL)
+                            .fill(p.paper.with_alpha(life * annot * 0.85))
+                            .span(TextSpan::plain("R = 300 PX"))
+                            .anchored(Anchor::CENTER_LEFT)
+                            .snap_to(Vec2(CX + ring_r + 36.0, CY - 6.0)),
                     )
                     // Sub-label one line down (smaller, dimmer).
                     .child(
-                        Label::builder()
-                            .position(Vec2(CX + ring_r + 36.0, CY + 10.0))
-                            .anchor(Anchor::CENTER_LEFT)
-                            .text("NODES = 08")
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(11.0)
-                            .color(p.paper.with_alpha(life * annot * 0.55))
-                            .weight(Weight::NORMAL),
+                            .weight(Weight::NORMAL)
+                            .fill(p.paper.with_alpha(life * annot * 0.55))
+                            .span(TextSpan::plain("NODES = 08"))
+                            .anchored(Anchor::CENTER_LEFT)
+                            .snap_to(Vec2(CX + ring_r + 36.0, CY + 10.0)),
                     )
                     .build()
             })
@@ -310,13 +316,14 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .place_at(Vec2(CX - ring_r - 28.0, CY - 1.0)),
                     )
                     .child(
-                        Label::builder()
-                            .position(Vec2(CX - ring_r - 36.0, CY - 6.0))
-                            .anchor(Anchor::CENTER_RIGHT)
-                            .text(format!("θ = {:03}°", deg))
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(13.0)
-                            .color(p.paper.with_alpha(life * theta_in * 0.85))
-                            .weight(Weight::NORMAL),
+                            .weight(Weight::NORMAL)
+                            .fill(p.paper.with_alpha(life * theta_in * 0.85))
+                            .span(TextSpan::plain(format!("θ = {:03}°", deg)))
+                            .anchored(Anchor::CENTER_RIGHT)
+                            .snap_to(Vec2(CX - ring_r - 36.0, CY - 6.0)),
                     )
                     .build()
             })

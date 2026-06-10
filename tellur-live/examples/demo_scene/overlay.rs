@@ -52,22 +52,24 @@ pub fn Overlay(boot: Window, flash: Window, fade: Phase, palette: Palette) -> im
             (boot_life > 0.0).then(|| {
                 Fragment::builder()
                     .child(
-                        Label::builder()
-                            .position(Vec2(CX, CY - 18.0))
-                            .anchor(Anchor::BOTTOM_CENTER)
-                            .text("TELLUR")
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(42.0)
-                            .color(p.paper.with_alpha(boot_life * 0.95))
-                            .weight(Weight::BOLD),
+                            .weight(Weight::BOLD)
+                            .fill(p.paper.with_alpha(boot_life * 0.95))
+                            .span(TextSpan::plain("TELLUR"))
+                            .anchored(Anchor::BOTTOM_CENTER)
+                            .snap_to(Vec2(CX, CY - 18.0)),
                     )
                     .child(
-                        Label::builder()
-                            .position(Vec2(CX, CY + 4.0))
-                            .anchor(Anchor::TOP_CENTER)
-                            .text("00:00:00.000 · INIT")
+                        Text::builder()
+                            .font(MONOSPACE.clone())
                             .size(13.0)
-                            .color(p.paper.with_alpha(boot_life * 0.7))
-                            .weight(Weight::NORMAL),
+                            .weight(Weight::NORMAL)
+                            .fill(p.paper.with_alpha(boot_life * 0.7))
+                            .span(TextSpan::plain("00:00:00.000 · INIT"))
+                            .anchored(Anchor::TOP_CENTER)
+                            .snap_to(Vec2(CX, CY + 4.0)),
                     )
                     // A tiny pink underline dash to the right of "INIT".
                     .child(

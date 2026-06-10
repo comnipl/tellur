@@ -61,9 +61,10 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Fragment::builder()
                     .child(
                         Circle::builder()
-                            .center(Vec2(cx, cy))
                             .radius(14.0 * breathe * s)
-                            .fill(color.with_alpha(life * 0.92)),
+                            .fill(color.with_alpha(life * 0.92))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(Vec2(cx, cy)),
                     )
                     // The four corner dots get an accent outline ring — that
                     // small hierarchy cue costs nothing and pulls the eye to
@@ -74,10 +75,10 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                                 .phase(2.4 + stagger, 2.9 + stagger)
                                 .ease_out_cubic(0.0, 1.0);
                             Circle::builder()
-                                .center(Vec2(cx, cy))
                                 .radius(26.0 * ring_in * s)
-                                .stroke(color.with_alpha(life * 0.55))
-                                .stroke_width(2.0)
+                                .stroke(Stroke::new(color.with_alpha(life * 0.55), 2.0))
+                                .anchored(Anchor::CENTER)
+                                .snap_to(Vec2(cx, cy))
                         }),
                     )
                     .build()
@@ -95,13 +96,14 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let row_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((row_alpha > 0.0).then(|| {
-                    Label::builder()
-                        .position(Vec2(CX - 720.0, CY + dy))
-                        .anchor(Anchor::CENTER_RIGHT)
-                        .text(format!("R{:02}", r))
+                    Text::builder()
+                        .font(MONOSPACE.clone())
                         .size(12.0)
-                        .color(p.paper.with_alpha(row_alpha))
                         .weight(Weight::NORMAL)
+                        .fill(p.paper.with_alpha(row_alpha))
+                        .span(TextSpan::plain(format!("R{:02}", r)))
+                        .anchored(Anchor::CENTER_RIGHT)
+                        .snap_to(Vec2(CX - 720.0, CY + dy))
                 }))
                 .build()
         }))
@@ -116,16 +118,17 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let col_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
             Fragment::builder()
                 .maybe_child((col_alpha > 0.0).then(|| {
-                    Label::builder()
-                        .position(Vec2(
+                    Text::builder()
+                        .font(MONOSPACE.clone())
+                        .size(12.0)
+                        .weight(Weight::NORMAL)
+                        .fill(p.paper.with_alpha(col_alpha))
+                        .span(TextSpan::plain(format!("C{:02}", c)))
+                        .anchored(Anchor::BOTTOM_CENTER)
+                        .snap_to(Vec2(
                             CX + dx,
                             CY - (ROWS as f32 - 1.0) * 0.5 * SPACING_Y - 38.0,
                         ))
-                        .anchor(Anchor::BOTTOM_CENTER)
-                        .text(format!("C{:02}", c))
-                        .size(12.0)
-                        .color(p.paper.with_alpha(col_alpha))
-                        .weight(Weight::NORMAL)
                 }))
                 .build()
         }))
@@ -186,40 +189,42 @@ fn ScanLine(palette: Palette, life: f32, sweep: Phase) -> impl VectorComponent {
         // Bright head dot at the top of the sweep — like a phosphor pixel.
         .child(
             Circle::builder()
-                .center(Vec2(x, top_y))
                 .radius(7.0)
                 .fill(p.paper.with_alpha(head_alpha))
-                .stroke(p.pink.with_alpha(head_alpha))
-                .stroke_width(2.0),
+                .stroke(Stroke::new(p.pink.with_alpha(head_alpha), 2.0))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(x, top_y)),
         )
         // Mirror head dot at the bottom for symmetry.
         .child(
             Circle::builder()
-                .center(Vec2(x, bottom_y))
                 .radius(7.0)
                 .fill(p.paper.with_alpha(head_alpha))
-                .stroke(p.pink.with_alpha(head_alpha))
-                .stroke_width(2.0),
+                .stroke(Stroke::new(p.pink.with_alpha(head_alpha), 2.0))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(x, bottom_y)),
         )
         // Top tag.
         .child(
-            Label::builder()
-                .position(Vec2(x + 16.0, top_y - 8.0))
-                .anchor(Anchor::BOTTOM_LEFT)
-                .text("SCAN →")
+            Text::builder()
+                .font(MONOSPACE.clone())
                 .size(14.0)
-                .color(p.pink.with_alpha(head_alpha))
-                .weight(Weight::BOLD),
+                .weight(Weight::BOLD)
+                .fill(p.pink.with_alpha(head_alpha))
+                .span(TextSpan::plain("SCAN →"))
+                .anchored(Anchor::BOTTOM_LEFT)
+                .snap_to(Vec2(x + 16.0, top_y - 8.0)),
         )
         // Bottom percentage readout — "treats this as data" cue.
         .child(
-            Label::builder()
-                .position(Vec2(x + 16.0, bottom_y + 8.0))
-                .anchor(Anchor::TOP_LEFT)
-                .text(pct_text)
+            Text::builder()
+                .font(MONOSPACE.clone())
                 .size(13.0)
-                .color(p.paper.with_alpha(head_alpha * 0.95))
-                .weight(Weight::BOLD),
+                .weight(Weight::BOLD)
+                .fill(p.paper.with_alpha(head_alpha * 0.95))
+                .span(TextSpan::plain(pct_text))
+                .anchored(Anchor::TOP_LEFT)
+                .snap_to(Vec2(x + 16.0, bottom_y + 8.0)),
         )
         .build()
 }

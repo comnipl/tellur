@@ -49,10 +49,10 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
                     .into_iter()
                     .map(move |(r, a_mult)| {
                         Circle::builder()
-                            .center(Vec2(CX, CY))
                             .radius(r * ring_reveal)
-                            .stroke(p.paper.with_alpha(0.05 * a_mult))
-                            .stroke_width(1.0)
+                            .stroke(Stroke::new(p.paper.with_alpha(0.05 * a_mult), 1.0))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(Vec2(CX, CY))
                     })
                     .collect::<Fragment>()
             })
