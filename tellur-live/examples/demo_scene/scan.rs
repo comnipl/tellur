@@ -52,25 +52,25 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             (intro_sweep.get() > 0.0 && intro_sweep.get() < 1.0).then(|| {
                 let y = intro_sweep.linear(-80.0, SCENE_SIZE.1 + 80.0);
                 let visibility = peak(intro_sweep.get());
-                Rect::builder()
-                    .position(Vec2(0.0, y - 3.0))
+                Rectangle::builder()
                     .size(Vec2(SCENE_SIZE.0, 6.0))
-                    .color(p.cyan.with_alpha(visibility * 0.88))
+                    .fill(p.cyan.with_alpha(visibility * 0.88))
+                    .place_at(Vec2(0.0, y - 3.0))
             })
         })
         // Center reticle: crosshair arms + cyan dot. Reads as "this is the
         // origin", not "this is a hero blob".
         .child(
-            Rect::builder()
-                .position(Vec2(CX - cross_arm, CY - 1.0))
+            Rectangle::builder()
                 .size(Vec2(cross_arm * 2.0, 2.0))
-                .color(p.paper.with_alpha(life * 0.7)),
+                .fill(p.paper.with_alpha(life * 0.7))
+                .place_at(Vec2(CX - cross_arm, CY - 1.0)),
         )
         .child(
-            Rect::builder()
-                .position(Vec2(CX - 1.0, CY - cross_arm))
+            Rectangle::builder()
                 .size(Vec2(2.0, cross_arm * 2.0))
-                .color(p.paper.with_alpha(life * 0.7)),
+                .fill(p.paper.with_alpha(life * 0.7))
+                .place_at(Vec2(CX - 1.0, CY - cross_arm)),
         )
         .child(
             Circle::builder()
@@ -104,11 +104,12 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         let a = i as f32 * PI * 0.5 - PI * 0.5;
                         let mid_r = inner_r2 - 6.0;
                         let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
-                        FxRect::builder()
-                            .center(mid)
+                        Rectangle::builder()
                             .size(Vec2(2.0, 10.0 * inner_ring_in))
-                            .angle(a + PI * 0.5)
-                            .color(p.paper.with_alpha(life * 0.45))
+                            .fill(p.paper.with_alpha(life * 0.45))
+                            .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(mid)
                     }))
                     .build()
             })
@@ -131,11 +132,12 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
 
             let tick = (tk > 0.0).then(|| {
-                FxRect::builder()
-                    .center(mid)
+                Rectangle::builder()
                     .size(Vec2(if major { 3.0 } else { 2.0 }, length * tk))
-                    .angle(a + PI * 0.5)
-                    .color(p.paper.with_alpha(life * if major { 0.85 } else { 0.55 }))
+                    .fill(p.paper.with_alpha(life * if major { 0.85 } else { 0.55 }))
+                    .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                    .anchored(Anchor::CENTER)
+                    .snap_to(mid)
             });
 
             // Angle label outside major ticks — that gradicule-numeral detail
@@ -244,11 +246,12 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         let fade = (1.0 - frac).powi(2);
                         let r = ring_r * 0.95;
                         let mid = Vec2(CX + a.cos() * r * 0.5, CY + a.sin() * r * 0.5);
-                        FxRect::builder()
-                            .center(mid)
+                        Rectangle::builder()
                             .size(Vec2(4.0, r))
-                            .angle(a + PI * 0.5)
-                            .color(p.pink.with_alpha(life * sweep_life * fade * 0.6))
+                            .fill(p.pink.with_alpha(life * sweep_life * fade * 0.6))
+                            .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(mid)
                     })
                     .collect::<Fragment>()
             })
@@ -261,10 +264,10 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Fragment::builder()
                     // Mini connector tick from the ring to the label.
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX + ring_r, CY - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(28.0, 2.0))
-                            .color(p.paper.with_alpha(life * annot * 0.7)),
+                            .fill(p.paper.with_alpha(life * annot * 0.7))
+                            .place_at(Vec2(CX + ring_r, CY - 1.0)),
                     )
                     .child(
                         Label::builder()
@@ -301,10 +304,10 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 let deg = (base_angle.to_degrees().rem_euclid(360.0)) as i32;
                 Fragment::builder()
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX - ring_r - 28.0, CY - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(28.0, 2.0))
-                            .color(p.paper.with_alpha(life * theta_in * 0.7)),
+                            .fill(p.paper.with_alpha(life * theta_in * 0.7))
+                            .place_at(Vec2(CX - ring_r - 28.0, CY - 1.0)),
                     )
                     .child(
                         Label::builder()
@@ -333,11 +336,12 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         let mid_r = inner_r + length * 0.5;
                         let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
                         let color = if i % 3 == 0 { p.paper } else { p.cyan };
-                        FxRect::builder()
-                            .center(mid)
+                        Rectangle::builder()
                             .size(Vec2(2.5, length))
-                            .angle(a + PI * 0.5)
-                            .color(color.with_alpha(life * burst_life * 0.9))
+                            .fill(color.with_alpha(life * burst_life * 0.9))
+                            .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(mid)
                     })
                     .collect::<Fragment>()
             })

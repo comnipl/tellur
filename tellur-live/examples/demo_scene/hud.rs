@@ -120,16 +120,16 @@ impl Hud {
                         let vy = if dy > 0.0 { ay } else { ay - len };
                         Fragment::builder()
                             .child(
-                                Rect::builder()
-                                    .position(Vec2(hx, ay - stroke_w * 0.5))
+                                Rectangle::builder()
                                     .size(Vec2(len, stroke_w))
-                                    .color(color),
+                                    .fill(color)
+                                    .place_at(Vec2(hx, ay - stroke_w * 0.5)),
                             )
                             .child(
-                                Rect::builder()
-                                    .position(Vec2(ax - stroke_w * 0.5, vy))
+                                Rectangle::builder()
                                     .size(Vec2(stroke_w, len))
-                                    .color(color),
+                                    .fill(color)
+                                    .place_at(Vec2(ax - stroke_w * 0.5, vy)),
                             )
                             .build()
                     }),
@@ -195,10 +195,10 @@ impl Hud {
                 let major = i % 4 == 0;
                 let height = if major { 18.0 } else { 8.0 };
                 let color = p.paper.with_alpha(if major { 0.55 } else { 0.35 } * life);
-                Rect::builder()
-                    .position(Vec2(x - 1.0, tick_y_top))
+                Rectangle::builder()
                     .size(Vec2(2.0, height * pop))
-                    .color(color)
+                    .fill(color)
+                    .place_at(Vec2(x - 1.0, tick_y_top))
             }))
             // Left + right edge tick rulers — completes the four-sided
             // instrument frame so the scaffold reads as a full HUD.
@@ -217,17 +217,17 @@ impl Hud {
                 Fragment::builder()
                     // Left side ticks point inward.
                     .maybe_child((pop > 0.0).then(|| {
-                        Rect::builder()
-                            .position(Vec2(inset - 28.0, y - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(width * pop, 2.0))
-                            .color(color)
+                            .fill(color)
+                            .place_at(Vec2(inset - 28.0, y - 1.0))
                     }))
                     // Right side ticks point inward.
                     .maybe_child((pop > 0.0).then(|| {
-                        Rect::builder()
-                            .position(Vec2(SCENE_SIZE.0 - inset + 28.0 - width * pop, y - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(width * pop, 2.0))
-                            .color(color)
+                            .fill(color)
+                            .place_at(Vec2(SCENE_SIZE.0 - inset + 28.0 - width * pop, y - 1.0))
                     }))
                     .build()
             }))

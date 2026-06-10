@@ -11,17 +11,19 @@
 //! path-qualified here: `shapes::Rectangle` / `shapes::Circle` and the
 //! `Aabb` alias for `geometry::Rect`.
 
-use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::fragment::Fragment;
-use tellur_core::geometry::{Anchor, Transform, Vec2};
-use tellur_core::placement::VectorPlacement;
+use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
-use tellur_core::vector::{Stroke, VectorTransform};
 
+pub use tellur_core::builder::{VectorBuilderPlacement, VectorBuilderTransform};
 pub use tellur_core::easing::{Easing, PhaseEasing};
+pub use tellur_core::geometry::Transform;
+pub use tellur_core::placement::VectorPlacement;
+pub use tellur_core::shapes::Rectangle;
+pub use tellur_core::vector::{Stroke, VectorTransform};
 
 pub const DURATION: f32 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
@@ -52,21 +54,6 @@ pub fn peak(s: f32) -> f32 {
 }
 
 // --- leaf components ---
-
-/// A solid-filled rectangle placed with its top-left at `position`. Renders
-/// nothing (an empty [`Fragment`]) when it would be invisible.
-#[component(vector)]
-pub fn Rect(position: Vec2, size: Vec2, color: Color) -> impl VectorComponent {
-    if size.0 <= 0.0 || size.1 <= 0.0 || color.a <= 0.0 {
-        return Fragment::empty();
-    }
-    Fragment::single(
-        shapes::Rectangle::builder()
-            .size(size)
-            .fill(color)
-            .place_at(position),
-    )
-}
 
 /// A filled and/or stroked circle, centered on `center`. The stroke is
 /// flattened into `stroke` (color) + `stroke_width` so every field is
@@ -124,47 +111,5 @@ pub fn Label(
             .span(TextSpan::plain(text))
             .anchored(anchor)
             .snap_to(position),
-    )
-}
-
-/// A rotated / scaled / faded rectangle: filled by default, an outline when
-/// `stroke_width` is set. Renders nothing when it would be invisible or
-/// degenerate.
-#[component(vector)]
-pub fn FxRect(
-    center: Vec2,
-    size: Vec2,
-    #[builder(default)] angle: f32,
-    color: Color,
-    #[builder(default = 1.0)] opacity: f32,
-    #[builder(default = Vec2(1.0, 1.0))] scale: Vec2,
-    #[builder(into)] stroke_width: Option<f32>,
-) -> impl VectorComponent {
-    if size.0 <= 0.0 || size.1 <= 0.0 || opacity <= 0.0 || color.a <= 0.0 {
-        return Fragment::empty();
-    }
-    if scale.0 <= 0.0 || scale.1 <= 0.0 || stroke_width.is_some_and(|w| w <= 0.0) {
-        return Fragment::empty();
-    }
-    let rect = match stroke_width {
-        Some(width) => shapes::Rectangle::builder()
-            .size(size)
-            .stroke(Stroke {
-                paint: color.into(),
-                width,
-            })
-            .build(),
-        None => shapes::Rectangle::builder().size(size).fill(color).build(),
-    };
-    // Guard the scale away from zero so the transform matrix stays invertible.
-    let scale = Vec2(scale.0.max(0.0001), scale.1.max(0.0001));
-    Fragment::single(
-        rect.transform_around(
-            Anchor::CENTER,
-            Transform::scale(scale).then(Transform::rotate(angle)),
-        )
-        .opacity(opacity)
-        .anchored(Anchor::CENTER)
-        .snap_to(center),
     )
 }

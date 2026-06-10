@@ -71,10 +71,10 @@ pub fn Overlay(boot: Window, flash: Window, fade: Phase, palette: Palette) -> im
                     )
                     // A tiny pink underline dash to the right of "INIT".
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX + 88.0, CY + 18.0))
+                        Rectangle::builder()
                             .size(Vec2(20.0 * boot_in, 2.0))
-                            .color(p.pink.with_alpha(boot_life)),
+                            .fill(p.pink.with_alpha(boot_life))
+                            .place_at(Vec2(CX + 88.0, CY + 18.0)),
                     )
                     .build()
             })
@@ -91,10 +91,10 @@ pub fn Overlay(boot: Window, flash: Window, fade: Phase, palette: Palette) -> im
                 .ease_in_out_expo(1.0, 0.0);
             let flash = flash_in * flash_out;
             (flash > 0.0).then(|| {
-                Rect::builder()
-                    .position(Vec2::ZERO)
+                Rectangle::builder()
                     .size(SCENE_SIZE)
-                    .color(p.paper.with_alpha(flash * 0.22))
+                    .fill(p.paper.with_alpha(flash * 0.22))
+                    .place_at(Vec2::ZERO)
             })
         })
         // Exit fade — gentle quint ease into the bg color. The `fade` phase
@@ -102,10 +102,10 @@ pub fn Overlay(boot: Window, flash: Window, fade: Phase, palette: Palette) -> im
         .maybe_child({
             let fade = fade.ease_in_out_quint(0.0, 1.0);
             (fade > 0.0).then(|| {
-                Rect::builder()
-                    .position(Vec2::ZERO)
+                Rectangle::builder()
                     .size(SCENE_SIZE)
-                    .color(p.bg.with_alpha(fade))
+                    .fill(p.bg.with_alpha(fade))
+                    .place_at(Vec2::ZERO)
             })
         })
         .build()

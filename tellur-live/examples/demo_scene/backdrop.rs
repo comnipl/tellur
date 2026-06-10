@@ -8,7 +8,7 @@
 use std::f32::consts::{PI, TAU};
 
 use tellur_core::fragment::Fragment;
-use tellur_core::geometry::Vec2;
+use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::window::Window;
 
@@ -33,10 +33,10 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
         .children((0..18).map(move |i| {
             let y = 64.0 + i as f32 * 56.0;
             let line = reveal.sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008));
-            Rect::builder()
-                .position(Vec2(line.ease_in_out_expo(-1920.0, 0.0), y))
+            Rectangle::builder()
                 .size(Vec2(1920.0, 1.0))
-                .color(p.paper.with_alpha(line.ease_in_out_expo(0.0, 0.022)))
+                .fill(p.paper.with_alpha(line.ease_in_out_expo(0.0, 0.022)))
+                .place_at(Vec2(line.ease_in_out_expo(-1920.0, 0.0), y))
         }))
         // Two extremely dim "field boundary" rings — just inside the HUD frame
         // and just outside it. They suggest "this scene happens inside a
@@ -69,11 +69,12 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
             let length = if major { 16.0 } else { 8.0 };
             let mid_r = r_base + length * 0.5;
             let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
-            FxRect::builder()
-                .center(mid)
+            Rectangle::builder()
                 .size(Vec2(if major { 2.0 } else { 1.4 }, length * tick_in))
-                .angle(a + PI * 0.5)
-                .color(p.paper.with_alpha(if major { 0.16 } else { 0.1 }))
+                .fill(p.paper.with_alpha(if major { 0.16 } else { 0.1 }))
+                .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                .anchored(Anchor::CENTER)
+                .snap_to(mid)
         }))
         .build()
 }

@@ -164,24 +164,24 @@ fn ScanLine(palette: Palette, life: f32, sweep: Phase) -> impl VectorComponent {
 
     Fragment::builder()
         .child(
-            Rect::builder()
-                .position(Vec2(x - trail_w, top_y))
+            Rectangle::builder()
                 .size(Vec2(trail_w, height))
-                .color(p.pink.with_alpha(head_alpha * 0.14)),
+                .fill(p.pink.with_alpha(head_alpha * 0.14))
+                .place_at(Vec2(x - trail_w, top_y)),
         )
         // Inner brighter trail.
         .child(
-            Rect::builder()
-                .position(Vec2(x - inner_trail_w, top_y))
+            Rectangle::builder()
                 .size(Vec2(inner_trail_w, height))
-                .color(p.pink.with_alpha(head_alpha * 0.22)),
+                .fill(p.pink.with_alpha(head_alpha * 0.22))
+                .place_at(Vec2(x - inner_trail_w, top_y)),
         )
         // The crisp leading line.
         .child(
-            Rect::builder()
-                .position(Vec2(x - 2.0, top_y))
+            Rectangle::builder()
                 .size(Vec2(4.0, height))
-                .color(p.pink.with_alpha(head_alpha * 0.95)),
+                .fill(p.pink.with_alpha(head_alpha * 0.95))
+                .place_at(Vec2(x - 2.0, top_y)),
         )
         // Bright head dot at the top of the sweep — like a phosphor pixel.
         .child(

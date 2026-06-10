@@ -6,7 +6,7 @@
 use std::f32::consts::{PI, TAU};
 
 use tellur_core::fragment::Fragment;
-use tellur_core::geometry::Vec2;
+use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::time::{Time, TimelineTime};
 
@@ -113,11 +113,12 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                         let mid_r = inner_r + length * 0.5;
                         let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
                         let color = if i % 2 == 0 { p.pink } else { p.paper };
-                        FxRect::builder()
-                            .center(mid)
+                        Rectangle::builder()
                             .size(Vec2(2.0, length))
-                            .angle(a + PI_HALF)
-                            .color(color.with_alpha(life * shard_life * 0.9))
+                            .fill(color.with_alpha(life * shard_life * 0.9))
+                            .transform_around(Anchor::CENTER, Transform::rotate(a + PI_HALF))
+                            .anchored(Anchor::CENTER)
+                            .snap_to(mid)
                     })
                     .collect::<Fragment>()
             })
@@ -176,29 +177,29 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 Fragment::builder()
                     // Down + up vertical ticks.
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX - 1.0, CY + offset))
+                        Rectangle::builder()
                             .size(Vec2(2.0, arm_len))
-                            .color(tick_alpha),
+                            .fill(tick_alpha)
+                            .place_at(Vec2(CX - 1.0, CY + offset)),
                     )
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX - 1.0, CY - offset - arm_len))
+                        Rectangle::builder()
                             .size(Vec2(2.0, arm_len))
-                            .color(tick_alpha),
+                            .fill(tick_alpha)
+                            .place_at(Vec2(CX - 1.0, CY - offset - arm_len)),
                     )
                     // Right + left horizontal ticks.
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX + offset, CY - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(arm_len, 2.0))
-                            .color(tick_alpha),
+                            .fill(tick_alpha)
+                            .place_at(Vec2(CX + offset, CY - 1.0)),
                     )
                     .child(
-                        Rect::builder()
-                            .position(Vec2(CX - offset - arm_len, CY - 1.0))
+                        Rectangle::builder()
                             .size(Vec2(arm_len, 2.0))
-                            .color(tick_alpha),
+                            .fill(tick_alpha)
+                            .place_at(Vec2(CX - offset - arm_len, CY - 1.0)),
                     )
                     .build()
             })
@@ -250,11 +251,12 @@ fn CentralMark(
                     let mid_r = (inner + outer) * 0.5;
                     let length = outer - inner;
                     let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
-                    FxRect::builder()
-                        .center(mid)
+                    Rectangle::builder()
                         .size(Vec2(1.5, length))
-                        .angle(a + PI_HALF)
-                        .color(p.paper.with_alpha(life * 0.55))
+                        .fill(p.paper.with_alpha(life * 0.55))
+                        .transform_around(Anchor::CENTER, Transform::rotate(a + PI_HALF))
+                        .anchored(Anchor::CENTER)
+                        .snap_to(mid)
                 })
                 .collect::<Fragment>()
         }))
@@ -282,11 +284,12 @@ fn CentralMark(
                     let mid_r = (inner_r + outer_r) * 0.5;
                     let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
                     let major = k % 3 == 0;
-                    FxRect::builder()
-                        .center(mid)
+                    Rectangle::builder()
                         .size(Vec2(if major { 2.0 } else { 1.2 }, 8.0 * field_in))
-                        .angle(a + PI_HALF)
-                        .color(p.paper.with_alpha(life * if major { 0.6 } else { 0.35 }))
+                        .fill(p.paper.with_alpha(life * if major { 0.6 } else { 0.35 }))
+                        .transform_around(Anchor::CENTER, Transform::rotate(a + PI_HALF))
+                        .anchored(Anchor::CENTER)
+                        .snap_to(mid)
                 }))
                 // (e) a single small "scan dot" orbiting the field ring.
                 .maybe_child((orbit_in > 0.0).then(|| {
