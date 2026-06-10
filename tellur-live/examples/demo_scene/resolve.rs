@@ -226,7 +226,11 @@ fn CentralMark(
     cluster_spin: f32,
 ) -> impl VectorComponent {
     let p = palette;
-    let breath = time.wave(1.4).linear(0.94, 1.06);
+    // `wave` rises from its trough (1 - cos); the breathing was authored on a
+    // sine that starts mid-swing rising, so lead by a quarter period.
+    let breath = LocalTime::new(time.seconds() + 0.25 * 1.4)
+        .wave(1.4)
+        .linear(0.94, 1.06);
     let ray_in = time.phase(6.5, 6.95).ease_out_cubic(0.0, 1.0);
     let field_in = time.phase(6.65, 7.1).ease_out_cubic(0.0, 1.0);
 

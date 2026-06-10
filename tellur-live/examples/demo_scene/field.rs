@@ -49,8 +49,11 @@ pub fn Field(time: LocalTime, palette: Palette) -> impl VectorComponent {
                 let s = (pop * (1.0 - collapse)).clamp(0.0, 1.0);
 
                 // Stagger shifts each dot's breathing by a fraction of the
-                // 1.6s cycle so the grid doesn't pulse in lockstep.
-                let breathe = LocalTime::new(time.seconds() + stagger * 1.6)
+                // 1.6s cycle so the grid doesn't pulse in lockstep. `wave`
+                // rises from its trough (1 - cos); the breathing was authored
+                // on a sine that starts mid-swing rising, so lead by a
+                // quarter period on top of the stagger.
+                let breathe = LocalTime::new(time.seconds() + (stagger + 0.25) * 1.6)
                     .wave(1.6)
                     .linear(0.85, 1.15);
                 let cx = CX + dx;
