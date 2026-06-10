@@ -1,0 +1,266 @@
+# tellur 時間システム チュートリアル
+
+tellur の時間システムを、設計思想からステップバイステップで理解するためのドキュメントです。「時間から値を作るとき、どの型を使えばいいのか」が迷わず選べるようになることをゴールにしています。
+
+対応モジュール: `tellur-core/src/time.rs`・`phase.rs`・`window.rs`・`easing.rs`・`interpolate.rs`・`timeline_component/`・`timeline_container/`
+
+姉妹編: [レイアウトシステム チュートリアル](./layout-tutorial.ja.md)
+
+## 0. 全体像 — 2つの時間世界
+
+レイアウトに「キャンバス世界とフロー世界」があったように、時間にも **2つの世界** があります。
+
+| | 絶対時刻の世界 | 配置クロックの世界 |
+|---|---|---|
+| 時間の入手方法 | `Timeline::build` が渡す `TimelineTime` | `#[clock]` が注入する `Clock` |
+| 座標の決まり方 | 作者がタイムライン上の絶対秒で指定する | コンテナが `.at(..)` の配置から割り当てる |
+| 主な登場人物 | `Time` / `Phase` / `Window` | `Clock`, `Timeline`, `Sequence`, `Placed`, `Event` |
+| 向いている場面 | 一本物のモーショングラフィックス演出 | クリップを並べ替え・差し替えする構成的な動画 |
+
+空間側との対応もきれいに揃っています。
+
+| 空間（レイアウト） | 時間（このドキュメント） |
+|---|---|
+| `Layer`（重ねる） | `Timeline`（時間上に重ねる） |
+| `Flex`（カーソルで並べる） | `Sequence`（前から順に並べる) |
+| `Positioned`（1つを置く） | `Placed`（`.at(..)` の結果） |
+
+どちらの世界でも、時間から値を作る語彙は共通です: **`Time` → `Phase` / `Window` → eased な値**。
+
+## 1. 基本パイプライン — `Time` → `Phase` → 値
+
+時間駆動アニメーションの主力はこの1行です。
+
+```rust
+// Progress through [0.55s, 1.2s], eased, mapped into [0.0, 1.0].
+let hero_in = t.phase(0.55, 1.2).ease_out_cubic(0.0, 1.0);
+```
+
+3段階に分解すると:
+
+1. **`Time`** — 「何秒か」だけを知っている型。`TimelineTime`（タイムライン絶対時刻）と `LocalTime`（再基底化されたローカル時刻）の2つがあり、コンビネータはすべて共通です
+2. **`Phase`** — `[0.0, 1.0]` に検証済みの進捗スカラー。`t.phase(start, end)` は区間を単位区間へ線形写像し、外側では**飽和**（0 か 1 に張り付く）します
+3. **`PhaseEasing`** — `phase.ease_*(from, to)` がカーブを当てて目的の量（alpha・半径・座標…）まで一気に持っていきます。`linear` / `ease_smoothstep` / `ease_out_cubic` / `ease_out_quint` / `ease_in_out_quint` / `ease_in_out_expo` は `[from, to]` に収まり、`ease_in_back` / `ease_out_elastic` は意図的にはみ出します（その「行き過ぎ」が演出です）
+
+逆方向のアニメーションは `(from, to)` を入れ替えるだけです。
+
+```rust
+let fade_out = t.phase(1.7, 2.15).ease_in_back(1.0, 0.0);  // 1 → 0
+```
+
+> **footgun ①**: `phase` / `window` は `end > start` の有限区間を要求し、破ると panic します。ゼロ幅の区間に意味のある進捗は定義できないためです。
+
+## 2. `Phase` — 純粋な進捗スカラー
+
+`Phase` は「単位区間に検証済みの f32」以上のことを何も知りません。秒・区間・カーソルの知識は一切持たず、それらは次節の `Window` の仕事です。
+
+```rust
+Phase::new(0.5)        // Some(Phase) — validating
+Phase::saturating(2.0) // Phase(1.0) — clamping
+phase.get()            // the inner f32, guaranteed in [0, 1]
+phase.map(|x| 4.0 * x * (1.0 - x))  // custom value-space remap (hat curve)
+```
+
+小ささには理由があります。`Phase` は値のビットパターンで `Eq`/`Hash` されるので、**コンポーネントのフィールド（= レンダーキャッシュのキー）にそのまま使えます**。飽和する性質と合わせると「アニメーションが終わったらフレーム間でキーが一致し、キャッシュが当たり続ける」が自然に成立します（§4）。
+
+## 3. `Window` — 区間を覚えている視点
+
+`Phase` は便利ですが、写像した瞬間に区間を忘れます。「窓が閉じるまであと何秒？」「窓が開いてから累計何秒？」に答えるには、区間とカーソルを保持したままの視点が要ります。それが `Window` です。
+
+```rust
+let radar = time.window(3.95, 5.4);
+
+radar.phase()      // the saturating Phase view (0 → 1 inside the window)
+radar.elapsed()    // seconds since start — keeps counting PAST the end
+radar.remaining()  // countdown to the end, clamped at 0
+radar.before()     // seconds until the window opens
+radar.after()      // seconds past the close
+radar.is_inside()  // the same gate as t.during(a, b)
+```
+
+`phase()` と `elapsed()` を1つの宣言された区間に束ねられるのが肝です。たとえば「フェードインしながら、開始時点から回転し続けるレーダー」:
+
+```rust
+let radar = time.window(3.95, 5.4);
+let opacity = radar.phase().ease_out_cubic(0.0, 1.0);
+let angle = radar.elapsed() * 2.4;   // keeps accruing while visible
+```
+
+> **footgun ②**: `elapsed()` / `after()` は窓が閉じても止まりません。それが存在理由です（「イントロが終わってから5秒後」は飽和する `Phase` では表現できません）。止まってほしいときは `remaining()` か `clamped()`（§4）を使います。
+
+### `sub_secs` — 窓ローカル秒でサブイベントを刻む
+
+1つの窓の中に複数のサブイベントをスタッガーさせたいとき、`sub_secs(range)` が「窓の開始から数えた秒範囲」を新しい `Window` として切り出します。カーソルを持っているので**全域関数**です — 失敗しません。
+
+```rust
+let reveal = time.window(0.05, 1.332);
+
+// The i-th horizon line slides in over [i*8ms, 0.4s + i*8ms] of the reveal.
+let line_in = reveal
+    .sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008))
+    .ease_in_out_expo(0.0, 1.0);
+```
+
+`PhaseEasing` は `Window` にも実装されているので、`.phase()` を挟まずそのまま `.ease_*(from, to)` まで書けます。
+
+### `envelope` — 出現と退場をワンセットで
+
+```rust
+// Rise over the first 0.3s, hold, fall over the last 0.5s.
+let alpha = time.window(2.0, 6.0).envelope(0.3, 0.5).get();
+```
+
+字幕やテロップのような「現れて、留まって、消える」をひとことで表せます。もっと複雑な形（カーブ違いの rise/fall など）は、§1 のイディオムどおり **因子の積** で組みます: `rise * fall` はどちらも `[0, 1]` の f32 なので、掛け算が「両方の条件を満たすときだけ見える」を意味します。
+
+## 4. コンポーネント境界を越える — `clamped()` スナップショット
+
+時間駆動の値をコンポーネントの**フィールド**として渡すとき、その値はキャッシュキーの一部になります。ここで型の選択がキャッシュ効率を決めます。
+
+- **`Phase`** — 飽和したら一定。アニメーション完了後はフレーム間でキーが一致し、キャッシュが当たります
+- **生の `Window`** — カーソルが毎フレーム動くので、**キーが毎フレーム変わりキャッシュが全滅します**
+- **`Window::clamped()`** — カーソルを `[start, end]` に切り詰めたスナップショット。窓の手前では `(start, end, start)`、飽和後は `(start, end, end)` で一定になり、`Phase` と同じキャッシュ安定性を取り戻します
+
+```rust
+// The component receives a saturating snapshot, not the live cursor.
+Backdrop::builder()
+    .reveal(t.window(REVEAL_START, REVEAL_END).clamped())
+    .build()
+
+#[component(vector)]
+pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
+    // sub_secs staggering still works — and freezes once the reveal saturates.
+    let ring_in = reveal.sub_secs(0.55..1.05).ease_in_out_expo(0.0, 1.0);
+    // ...
+}
+```
+
+使い分けの目安: **その場で値まで潰すなら `phase`、サブイベントや経過秒が要るなら `window`、フィールドに渡すなら `Phase` か `clamped()` した `Window`**。
+
+> **footgun ③**: 生の `Window` をフィールドに置いてもコンパイルは通ります。症状は「キャッシュヒット率がゼロになる」だけなので気づきにくい — 境界を越える `Window` には `clamped()`、と覚えてください。
+
+## 5. 周期アニメーション — `cycle` / `bounce` / `wave`
+
+一定周期で繰り返す動きは3兄弟で表します。すべて `Phase` を返すので、そのまま easing に流せます。
+
+```rust
+t.cycle(2.0)    // sawtooth: 0 → 1 linearly, then snaps back   /| /| /|
+t.bounce(2.0)   // triangle: 0 → 1 → 0, linear both ways       /\ /\ /\
+t.wave(2.0)     // sine:     0 → 1 → 0, zero slope at the turnarounds
+```
+
+- 行って戻る往復運動は `bounce`（`timeline_to_mp4` のドットがこれ）
+- 揺らぎ・呼吸・ドリフトのような滑らかな振動は `wave`。`±amp` の振れ幅は `t.wave(period).linear(-amp, amp)`
+- 何周目かが必要なら `(t.seconds() / period).floor()` で取れます
+
+## 6. 型付き補間 — `Easing` / `eased` / `Interpolate`
+
+`f32` 以外の量（`Vec2`・`Anchor` …）を補間するときは、カーブを **`Phase` の中で** 当ててから `Interpolate` に渡します。
+
+```rust
+use tellur_core::easing::Easing;
+use tellur_core::interpolate::Interpolate;
+
+// Ease the progress, then drive a typed lerp with it.
+let p = t.phase(1.0, 2.0).eased(Easing::OutCubic);
+let pos = start_pos.interpolate(end_pos, p);
+let anchor = Anchor::CENTER_LEFT.interpolate(Anchor::CENTER, p);
+```
+
+`Easing` はカーブを値として持つ enum（`Linear` / `Smoothstep` / `OutCubic` / `OutQuint` / `InOutQuint` / `InOutExpo` / `InBack` / `OutElastic`）で、§1 の `ease_*` メソッド群と同じ実装を共有しています。
+
+> **footgun ④**: `eased` は `Phase` に留まるため **overshoot 系カーブ（`InBack` / `OutElastic`）は単位区間に clamp されます**。はみ出しを活かしたいときは `(from, to)` メソッド（`p.ease_out_elastic(from, to)`）で値域に直接 ease してください。
+
+## 7. 配置クロックの世界 — `Clock` の2軸
+
+`Timeline` / `Sequence` に `.at(..)` で置かれたコンポーネントは、`#[clock]` で `Clock` を受け取ります。`Clock` は **2本の時間軸** を運びます。
+
+```rust
+#[component(timeline)]
+fn Spinner(#[clock] clock: Clock) -> impl TimelineComponent {
+    let local = clock.local();    // 0 at THIS clip's resolved start
+    let global = clock.global();  // absolute timeline time — the Event axis
+    // ...
+}
+```
+
+- **`local()`** — 自分のクリップの開始が 0。`Sequence` の並び替えに追従するので、自己アニメーションはこちらで書きます: `clock.local().phase(0.0, 0.4)`
+- **`global()`** — タイムライン絶対時刻。`Event` のトリガと同じ軸です
+- **`window()`** — 自分のスロットの長さを `Option<Window>`（local 軸上の `[0, 長さ)`）で返します。開いた配置（`.fill()`・素の timeless 配置・ルート）では `None`。ここから先は §3 の語彙がそのまま使えます:
+
+```rust
+// Slide in over 0.32s, out over the last 0.24s of this clip's slot.
+let alpha = match clock.window() {
+    Some(w) => w.envelope(0.32, 0.24).get(),
+    None => clock.local().phase(0.0, 0.32).get(),  // open-ended: fade in only
+};
+```
+
+配置の語彙は3つだけです。
+
+```rust
+clip.at(2.0)        // place at 2.0s, play at native length
+clip.at(0.0..3.0)   // an explicit window — for a timed clip this is a STRETCH
+clip.fill()         // stretch to the container's resolved length (Timeline only)
+media.trim(1.0..4.0)  // crop SOURCE seconds (the way to truncate)
+```
+
+### `Event` — 解決済みの瞬間を木全体で共有する
+
+「このクリップが始まった瞬間に、別のオーバーレイを発火させたい」は `Event` で書きます。
+
+```rust
+let cue = Event::named("chorus");
+
+Timeline::builder()
+    .child(Sequence::builder()
+        .child(intro)
+        .child(chorus.trigger_at_start(cue))  // fires when ITS resolved start arrives
+        .build())
+    .child(Reveal::builder().event(cue).build().fill())
+    .build()
+
+// Inside Reveal:
+let burst = cue.phase(&clock, 0.0, 0.5).ease_out_cubic(0.0, 1.0);
+```
+
+resolve パスがトリガ時刻を表に焼き込み、`Clock` 経由で全コンポーネントから読めます。未発火のイベントは `+∞` 扱い（`phase` は 0 のまま）です。
+
+> **footgun ⑤**: `.trigger_*` は **外側** に付けます。`x.at(5.0).trigger_at_start(e)` と書くと、トリガは内側の `.at(5.0)` を無視して自分が渡された開始時刻に記録されます。正しくは `x.trigger_at_start(e).at(5.0)`、またはコンテナが位置決めする子に直接付けます。
+>
+> **footgun ⑥**: `.at(a..b)` の窓は半開区間 `[a, b)` です。隣接するクリップが境界フレームで二重描画されることはありません。
+
+## 8. 決定表
+
+| やりたいこと | 使うもの |
+|---|---|
+| 区間内の進捗で値を駆動する | `t.phase(a, b).ease_*(from, to)` |
+| 窓の中に秒単位でサブイベントを刻む | `t.window(a, b).sub_secs(r).ease_*(..)` |
+| 窓が閉じた後も続く動き（回転・ドリフト） | `t.window(a, b).elapsed()` |
+| 閉じるまでのカウントダウン | `window.remaining()` |
+| 出現・退場のフェード | `window.envelope(fade_in, fade_out)` |
+| 区間ゲート（範囲外では描かない） | `t.during(a, b)` / `window.is_inside()` |
+| 往復・繰り返し・揺らぎ | `t.cycle(p)` / `t.bounce(p)` / `t.wave(p)` |
+| フレームレートの量子化（カクつき表現） | `t.fps(n)` |
+| `Vec2` / `Anchor` などを eased に補間 | `a.interpolate(b, p.eased(Easing::X))` |
+| コンポーネントのフィールドに渡す | `Phase`、または `Window::clamped()` |
+| クリップの並びに追従する自己アニメ | `clock.local()` / `clock.window()` |
+| 別のクリップの解決済み開始に反応する | `Event` + `.trigger_*` + `event.phase(&clock, a, b)` |
+
+## 9. 実例 — 2つの世界の合流
+
+`tellur-renderer/examples/timeline_to_mp4.rs` のドットは絶対時刻の世界の最小形です。
+
+```rust
+#[component(raster)]
+fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
+    let rx = t.bounce(2.5).linear(0.0, 1.0);   // periodic Phase → anchor ratio
+    Frame::builder()
+        .width(SizeMode::Fill)
+        .height(SizeMode::Fixed(60.0))
+        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
+        .child(circle)
+        .build()
+}
+```
+
+一方 `tellur-live` の `timeline_showcase` は配置クロックの世界で、`clock.local()` 駆動の自己アニメと `clock.global()` 駆動の全体進行を1画面に共存させています。`demo_scene` は絶対時刻の世界で、`phase` / `window` / `clamped()` のパターンがすべて登場します。**演出の時間設計は絶対時刻で、構成の時間設計は配置クロックで**。レイアウトの「演出は座標で、構造はフローで」と同じ使い分けです。
