@@ -4,7 +4,8 @@
 use std::hash::Hash;
 
 use crate::dyn_compare::{DynEq, DynHash};
-use crate::geometry::Vec2;
+use crate::geometry::{Rect, Vec2};
+use crate::layer::composite_children;
 use crate::raster::{RasterComponent, RasterImage, Resolution};
 use crate::render_context::RenderContext;
 
@@ -230,7 +231,26 @@ where
         // `ctx.render` scales that logical canvas to the pixel target with no
         // distortion (mirrors the raster root, where `size` aspect matches
         // `target`).
-        Some(ctx.render(self, canvas, target))
+        let canvas_rect = Rect {
+            origin: Vec2::ZERO,
+            size: canvas,
+        };
+        if self.paint_bounds(canvas) == canvas_rect {
+            return Some(ctx.render(self, canvas, target));
+        }
+        // A visual painting outside its layout box (a drop shadow, an
+        // outline) expects its pixel `target` to span `paint_bounds`, not the
+        // canvas (`composite_children`'s contract) — handing it the frame's
+        // `target` directly would squeeze the wider paint bounds into the
+        // canvas-sized pixel grid, shrinking and distorting the content.
+        // Composite it like a `Layer` child instead: render at paint-bounds
+        // resolution, blit at the painted origin, clip spill at the frame edge.
+        Some(composite_children(
+            canvas_rect,
+            target,
+            &[(Vec2::ZERO, canvas, self as &dyn RasterComponent)],
+            ctx,
+        ))
     }
 
     fn samples(&self, _clock: Clock<'_>, _window: f32) -> Option<AudioBuffer> {

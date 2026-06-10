@@ -1,5 +1,5 @@
 use super::*;
-use crate::geometry::{Constraints, Vec2};
+use crate::geometry::{Constraints, Rect, Vec2};
 use crate::phase::Phase;
 use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use crate::render_context::{PassThrough, RenderContext};
@@ -160,6 +160,77 @@ fn blanket_frame_lays_out_against_the_canvas_not_the_intrinsic_box() {
     assert!(
         diff <= 2,
         "square must stay square (no aspect stretch): {span_w}x{span_h}",
+    );
+}
+
+// A visual that paints OUTSIDE its layout box, like a drop shadow: its
+// `paint_bounds` carry a `MARGIN` on every side, and `render` — following
+// `composite_children`'s contract, where `target` pixels span
+// `paint_bounds(size)` — paints one opaque marker pixel at the logical
+// canvas origin (0,0).
+#[derive(PartialEq, Hash)]
+struct Margined;
+
+impl Margined {
+    const MARGIN: f32 = 4.0;
+}
+
+impl RasterComponent for Margined {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        constraints.constrain(Vec2(8.0, 8.0))
+    }
+
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        Rect {
+            origin: Vec2(-Self::MARGIN, -Self::MARGIN),
+            size: Vec2(size.0 + 2.0 * Self::MARGIN, size.1 + 2.0 * Self::MARGIN),
+        }
+    }
+
+    fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        let bounds = self.paint_bounds(size);
+        let sx = target.width as f32 / bounds.size.0;
+        let sy = target.height as f32 / bounds.size.1;
+        let px = ((0.0 - bounds.origin.0) * sx).round() as usize;
+        let py = ((0.0 - bounds.origin.1) * sy).round() as usize;
+        let w = target.width as usize;
+        let h = target.height as usize;
+        let mut pixels = vec![0u8; w * h * 4];
+        let i = (py.min(h - 1) * w + px.min(w - 1)) * 4;
+        pixels[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, pixels)
+    }
+}
+
+#[test]
+fn blanket_frame_gives_paint_bounds_pixels_and_composites_at_the_painted_origin() {
+    // A shadow-like visual paints beyond its layout box. `frame` must hand it
+    // a pixel target spanning its `paint_bounds` and composite the result at
+    // the painted origin, clipping spill at the frame edge — handing it the
+    // frame's own `target` would squeeze the wider paint bounds into the
+    // canvas-sized pixel grid, shrinking and shifting everything it painted
+    // toward the center.
+    let table = TriggerTable::new();
+    let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+    let mut ctx = PassThrough;
+    let target = Resolution::new(8, 8);
+    let canvas = Vec2(8.0, 8.0);
+    let frame = Margined
+        .frame(clock, canvas, target, &mut ctx)
+        .expect("a visual contributes a frame");
+    let cpu = frame.as_cpu().expect("cpu image");
+    assert_eq!(
+        (cpu.width, cpu.height),
+        (8, 8),
+        "the frame stays target-sized regardless of the visual's paint bounds",
+    );
+    // The marker painted at logical (0,0) must land at frame pixel (0,0).
+    // The squeezed path maps it to ((0 + MARGIN) * 8/16, …) = (2, 2).
+    assert_eq!(cpu.pixels[3], 255, "logical (0,0) lands at frame (0,0)");
+    let squeezed = (2 * 8 + 2) * 4 + 3;
+    assert_eq!(
+        cpu.pixels[squeezed], 0,
+        "content must not be squeezed toward the center",
     );
 }
 
