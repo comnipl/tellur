@@ -22,11 +22,11 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 
     // Hero square: controlled ease_out_cubic pop (no rubbery elastic),
     // a slow drift-spin, and an ease_in_back dismissal.
-    let hero_in = time.phase(0.55, 1.2).ease_out_cubic(0.0, 1.0);
+    let hero_in = time.phase(0.55, 1.2).eased(Easing::OutCubic);
     let hero_remain = time.phase(1.7, 2.15).ease_in_back(1.0, 0.0);
-    let hero_life = (hero_in * hero_remain).clamp(0.0, 1.0);
+    let hero_life = (hero_in.get() * hero_remain).clamp(0.0, 1.0);
     let spin = time.seconds() * 0.35 + PI * 0.25;
-    let scale = lerp(0.55, 1.0, hero_in) * hero_remain;
+    let scale = hero_in.linear(0.55, 1.0) * hero_remain;
     let s_clamped = scale.max(0.001);
 
     // Registration markings inside the hero square — a reticle (cross arms +
@@ -48,7 +48,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
     let ray_in = time.phase(0.85, 1.4).ease_out_cubic(0.0, 1.0) * hero_remain;
     let tag_in = time.phase(0.95, 1.35).ease_in_out_expo(0.0, 1.0)
         * time.phase(1.55, 2.0).ease_in_out_expo(1.0, 0.0);
-    let sweep = time.phase(1.45, 2.0).ease_in_out_expo(0.0, 1.0);
+    let sweep = time.phase(1.45, 2.0).eased(Easing::InOutExpo);
 
     // Two clamp bars — one cyan above, one pink below — that frame the
     // central hero. Snappy ease_in_out_expo in, ease_in_back out (lifts off
@@ -67,13 +67,13 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     let stagger = i as f32 * 0.06;
                     let enter = time
                         .phase(0.32 + stagger, 0.92 + stagger)
-                        .ease_in_out_expo(0.0, 1.0);
+                        .eased(Easing::InOutExpo);
                     let leave = time
                         .phase(1.55 + stagger * 0.5, 2.05 + stagger * 0.5)
                         .ease_in_back(0.0, 1.0);
-                    let bar_x = lerp(side * 2400.0 + CX, CX, enter);
+                    let bar_x = enter.linear(side * 2400.0 + CX, CX);
                     let exit_dy = leave * if side > 0.0 { 320.0 } else { -320.0 };
-                    let alpha_factor = (enter * (1.0 - leave)).clamp(0.0, 1.0) * 0.92;
+                    let alpha_factor = (enter.get() * (1.0 - leave)).clamp(0.0, 1.0) * 0.92;
                     let y_center = CY + dy + exit_dy;
 
                     // End-cap mini brackets at each bar end — small perpendicular
@@ -91,10 +91,8 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             FxRect::builder()
                                 .center(Vec2(bar_x, y_center))
                                 .size(Vec2(bar_w, bar_h))
-                                .angle(0.0)
                                 .color(color)
-                                .opacity(alpha_factor)
-                                .scale(Vec2(1.0, 1.0)),
+                                .opacity(alpha_factor),
                         )
                         .children(
                             (cap_pop > 0.0)
@@ -133,7 +131,6 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 .size(Vec2(420.0, 420.0))
                 .angle(-spin * 0.4)
                 .color(p.pink.with_alpha(hero_life * 0.82))
-                .opacity(1.0)
                 .scale(Vec2(s_clamped, s_clamped))
                 .stroke_width(3.0),
         )
@@ -162,8 +159,6 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .size(Vec2(w, h))
                     .angle(spin)
                     .color(mark_color)
-                    .opacity(1.0)
-                    .scale(Vec2(1.0, 1.0))
             }),
         )
         // Small open ring at the center of the reticle.
@@ -218,8 +213,6 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .size(Vec2(1.5, length))
                     .angle(a + PI * 0.5)
                     .color(p.paper.with_alpha(hero_life * 0.45))
-                    .opacity(1.0)
-                    .scale(Vec2(1.0, 1.0))
             });
 
             // Small index tag next to each outside dot. The tag follows the
@@ -274,9 +267,9 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         }))
         // Pink horizontal scan stripe sweeping vertically as the scene exits —
         // a transition wipe that hands the frame off to FIELD.
-        .maybe_child((sweep > 0.0 && sweep < 1.0).then(|| {
-            let y = lerp(-80.0, SCENE_SIZE.1 + 80.0, sweep);
-            let visibility = peak(sweep);
+        .maybe_child((sweep.get() > 0.0 && sweep.get() < 1.0).then(|| {
+            let y = sweep.linear(-80.0, SCENE_SIZE.1 + 80.0);
+            let visibility = peak(sweep.get());
             Rect::builder()
                 .position(Vec2(0.0, y - 3.0))
                 .size(Vec2(SCENE_SIZE.0, 6.0))

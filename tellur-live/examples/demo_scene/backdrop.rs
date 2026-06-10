@@ -32,13 +32,11 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
         // Faint horizon lines sliding in from the left.
         .children((0..18).map(move |i| {
             let y = 64.0 + i as f32 * 56.0;
-            let line_in = reveal
-                .sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008))
-                .ease_in_out_expo(0.0, 1.0);
+            let line = reveal.sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008));
             Rect::builder()
-                .position(Vec2(lerp(-1920.0, 0.0, line_in), y))
+                .position(Vec2(line.ease_in_out_expo(-1920.0, 0.0), y))
                 .size(Vec2(1920.0, 1.0))
-                .color(p.paper.with_alpha(0.022 * line_in))
+                .color(p.paper.with_alpha(line.ease_in_out_expo(0.0, 0.022)))
         }))
         // Two extremely dim "field boundary" rings — just inside the HUD frame
         // and just outside it. They suggest "this scene happens inside a
@@ -76,8 +74,6 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
                 .size(Vec2(if major { 2.0 } else { 1.4 }, length * tick_in))
                 .angle(a + PI * 0.5)
                 .color(p.paper.with_alpha(if major { 0.16 } else { 0.1 }))
-                .opacity(1.0)
-                .scale(Vec2(1.0, 1.0))
         }))
         .build()
 }

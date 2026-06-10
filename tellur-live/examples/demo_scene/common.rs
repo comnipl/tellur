@@ -19,10 +19,9 @@ use tellur_core::geometry::{Anchor, Transform, Vec2};
 use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
-use tellur_core::time::{LocalTime, Time};
 use tellur_core::vector::{Stroke, VectorTransform};
 
-pub use tellur_core::easing::PhaseEasing;
+pub use tellur_core::easing::{Easing, PhaseEasing};
 
 pub const DURATION: f32 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
@@ -42,19 +41,6 @@ pub struct Palette {
     pub paper: Color,
     pub pink: Color,
     pub cyan: Color,
-}
-
-pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
-    from + (to - from) * p
-}
-
-// Sine oscillation in ±1 with a fractional cycle `offset` to decorrelate
-// siblings. `Time::wave` is the cosine-start 0..1 form, so shift by the
-// offset plus a quarter period to recover `sin` and widen to ±1.
-pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
-    LocalTime::new(time.seconds() + (offset + 0.25) * period)
-        .wave(period)
-        .linear(-1.0, 1.0)
 }
 
 // Rise-fall hat envelope `4x(1-x)`: peaks at 1 when value is 0.5, returns to
@@ -154,10 +140,10 @@ pub fn Label(
 pub fn FxRect(
     center: Vec2,
     size: Vec2,
-    angle: f32,
+    #[builder(default)] angle: f32,
     color: Color,
-    opacity: f32,
-    scale: Vec2,
+    #[builder(default = 1.0)] opacity: f32,
+    #[builder(default = Vec2(1.0, 1.0))] scale: Vec2,
     #[builder(into)] stroke_width: Option<f32>,
 ) -> impl VectorComponent {
     if size.0 <= 0.0 || size.1 <= 0.0 || opacity <= 0.0 || color.a <= 0.0 {

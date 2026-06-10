@@ -22,16 +22,16 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
     let life = time.phase(5.05, 5.5).ease_in_out_expo(0.0, 1.0);
 
     // Phase 1: contracting hero ring (same R=300 that SCAN ended on).
-    let contract = time.phase(5.2, 6.3).ease_in_out_expo(0.0, 1.0);
-    let ring_r = lerp(300.0, 22.0, contract);
+    let contract = time.phase(5.2, 6.3).eased(Easing::InOutExpo);
+    let ring_r = contract.linear(300.0, 22.0);
     // Fade ring from full to 45% as it contracts.
-    let ring_alpha = lerp(1.0, 0.45, contract) * life;
+    let ring_alpha = contract.linear(1.0, 0.45) * life;
 
     // Phase 2 inputs. `cluster_spin` is shared by the satellites and the
     // surviving central mark's rays / field hash marks. The cluster `Window`
     // ties the ease-in envelope (`phase()`) and the unbounded post-anchor
     // angular sweep (`elapsed()`) to one declared `[6.35, 7.0)` interval.
-    let sats_in = time.phase(5.25, 6.35).ease_in_out_expo(0.0, 1.0);
+    let sats_in = time.phase(5.25, 6.35).eased(Easing::InOutExpo);
     let cluster = time.window(6.35, 7.0);
     let cluster_spin = cluster.phase().ease_out_cubic(0.0, 1.0) * cluster.elapsed() * 0.18;
 
@@ -53,12 +53,12 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
             let cardinal = i % 2 == 0;
             let base_a = i as f32 / 8.0 * TAU - PI_HALF;
             let final_r = if cardinal { 46.0 } else { 22.0 };
-            let target_r = lerp(300.0, final_r, sats_in);
+            let target_r = sats_in.linear(300.0, final_r);
             let a = base_a + cluster_spin;
             let pos = Vec2(CX + a.cos() * target_r, CY + a.sin() * target_r);
             let color = if cardinal { p.pink } else { p.cyan };
-            let size = lerp(12.0, if cardinal { 6.0 } else { 4.5 }, sats_in);
-            let sat_alpha = lerp(1.0, 0.6, sats_in) * life;
+            let size = sats_in.linear(12.0, if cardinal { 6.0 } else { 4.5 });
+            let sat_alpha = sats_in.linear(1.0, 0.6) * life;
             Circle::builder()
                 .center(pos)
                 .radius(size)
@@ -118,8 +118,6 @@ pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .size(Vec2(2.0, length))
                             .angle(a + PI_HALF)
                             .color(color.with_alpha(life * shard_life * 0.9))
-                            .opacity(1.0)
-                            .scale(Vec2(1.0, 1.0))
                     })
                     .collect::<Fragment>()
             })
@@ -222,7 +220,7 @@ fn CentralMark(
     cluster_spin: f32,
 ) -> impl VectorComponent {
     let p = palette;
-    let breath = 1.0 + wave(time, 1.4, 0.0) * 0.06;
+    let breath = time.wave(1.4).linear(0.94, 1.06);
     let ray_in = time.phase(6.5, 6.95).ease_out_cubic(0.0, 1.0);
     let field_in = time.phase(6.65, 7.1).ease_out_cubic(0.0, 1.0);
 
@@ -257,8 +255,6 @@ fn CentralMark(
                         .size(Vec2(1.5, length))
                         .angle(a + PI_HALF)
                         .color(p.paper.with_alpha(life * 0.55))
-                        .opacity(1.0)
-                        .scale(Vec2(1.0, 1.0))
                 })
                 .collect::<Fragment>()
         }))
@@ -291,8 +287,6 @@ fn CentralMark(
                         .size(Vec2(if major { 2.0 } else { 1.2 }, 8.0 * field_in))
                         .angle(a + PI_HALF)
                         .color(p.paper.with_alpha(life * if major { 0.6 } else { 0.35 }))
-                        .opacity(1.0)
-                        .scale(Vec2(1.0, 1.0))
                 }))
                 // (e) a single small "scan dot" orbiting the field ring.
                 .maybe_child((orbit_in > 0.0).then(|| {

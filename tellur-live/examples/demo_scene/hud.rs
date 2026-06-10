@@ -191,7 +191,7 @@ impl Hud {
                 let bar_right = SCENE_SIZE.0 - inset - 24.0;
                 let tick_y_top = SCENE_SIZE.1 - inset + 28.0;
                 let frac = i as f32 / 16.0;
-                let x = lerp(bar_left, bar_right, frac);
+                let x = bar_left + (bar_right - bar_left) * frac;
                 let major = i % 4 == 0;
                 let height = if major { 18.0 } else { 8.0 };
                 let color = p.paper.with_alpha(if major { 0.55 } else { 0.35 } * life);
@@ -210,7 +210,7 @@ impl Hud {
                 let v_bar_top = inset + 60.0;
                 let v_bar_bottom = SCENE_SIZE.1 - inset - 60.0;
                 let frac = i as f32 / 10.0;
-                let y = lerp(v_bar_top, v_bar_bottom, frac);
+                let y = v_bar_top + (v_bar_bottom - v_bar_top) * frac;
                 let major = i % 5 == 0;
                 let width = if major { 16.0 } else { 7.0 };
                 let color = p.paper.with_alpha(if major { 0.5 } else { 0.3 } * life);

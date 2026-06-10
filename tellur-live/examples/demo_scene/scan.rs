@@ -48,10 +48,10 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // transition wipe between FIELD and SCAN. Echoes the pink stripe at
         // the OVERTURE→FIELD handoff so the structure rhymes.
         .maybe_child({
-            let intro_sweep = time.phase(3.35, 3.85).ease_in_out_expo(0.0, 1.0);
-            (intro_sweep > 0.0 && intro_sweep < 1.0).then(|| {
-                let y = lerp(-80.0, SCENE_SIZE.1 + 80.0, intro_sweep);
-                let visibility = peak(intro_sweep);
+            let intro_sweep = time.phase(3.35, 3.85).eased(Easing::InOutExpo);
+            (intro_sweep.get() > 0.0 && intro_sweep.get() < 1.0).then(|| {
+                let y = intro_sweep.linear(-80.0, SCENE_SIZE.1 + 80.0);
+                let visibility = peak(intro_sweep.get());
                 Rect::builder()
                     .position(Vec2(0.0, y - 3.0))
                     .size(Vec2(SCENE_SIZE.0, 6.0))
@@ -109,8 +109,6 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .size(Vec2(2.0, 10.0 * inner_ring_in))
                             .angle(a + PI * 0.5)
                             .color(p.paper.with_alpha(life * 0.45))
-                            .opacity(1.0)
-                            .scale(Vec2(1.0, 1.0))
                     }))
                     .build()
             })
@@ -138,8 +136,6 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .size(Vec2(if major { 3.0 } else { 2.0 }, length * tk))
                     .angle(a + PI * 0.5)
                     .color(p.paper.with_alpha(life * if major { 0.85 } else { 0.55 }))
-                    .opacity(1.0)
-                    .scale(Vec2(1.0, 1.0))
             });
 
             // Angle label outside major ticks — that gradicule-numeral detail
@@ -253,8 +249,6 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .size(Vec2(4.0, r))
                             .angle(a + PI * 0.5)
                             .color(p.pink.with_alpha(life * sweep_life * fade * 0.6))
-                            .opacity(1.0)
-                            .scale(Vec2(1.0, 1.0))
                     })
                     .collect::<Fragment>()
             })
@@ -344,8 +338,6 @@ pub fn Scan(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                             .size(Vec2(2.5, length))
                             .angle(a + PI * 0.5)
                             .color(color.with_alpha(life * burst_life * 0.9))
-                            .opacity(1.0)
-                            .scale(Vec2(1.0, 1.0))
                     })
                     .collect::<Fragment>()
             })

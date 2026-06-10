@@ -5,8 +5,9 @@
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
+use tellur_core::phase::Phase;
 use tellur_core::text::Weight;
-use tellur_core::time::{Time, TimelineTime};
+use tellur_core::time::{LocalTime, Time, TimelineTime};
 
 use super::common::*;
 
@@ -47,7 +48,11 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     .ease_in_back(0.0, 1.0);
                 let s = (pop * (1.0 - collapse)).clamp(0.0, 1.0);
 
-                let breathe = 1.0 + wave(time, 1.6, stagger) * 0.15;
+                // Stagger shifts each dot's breathing by a fraction of the
+                // 1.6s cycle so the grid doesn't pulse in lockstep.
+                let breathe = LocalTime::new(time.seconds() + stagger * 1.6)
+                    .wave(1.6)
+                    .linear(0.85, 1.15);
                 let cx = CX + dx;
                 let cy = CY + dy * (1.0 - collapse * 0.45);
 
@@ -128,8 +133,8 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         // head + dimmer trailing wash, with a small "SCAN" data tag at the top
         // and a running-position readout at the bottom.
         .maybe_child({
-            let sweep = time.phase(2.35, 3.0).ease_in_out_expo(0.0, 1.0);
-            (sweep > 0.0 && sweep < 1.0)
+            let sweep = time.phase(2.35, 3.0).eased(Easing::InOutExpo);
+            (sweep.get() > 0.0 && sweep.get() < 1.0)
                 .then(|| ScanLine::builder().palette(p).life(life).sweep(sweep))
         })
         .build()
@@ -139,12 +144,12 @@ pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 // top + bottom phosphor head dots, and the SCAN / percentage readouts — in
 // that paint order.
 #[tellur_core::component(vector)]
-fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
+fn ScanLine(palette: Palette, life: f32, sweep: Phase) -> impl VectorComponent {
     let p = palette;
-    let x = lerp(CX - 580.0, CX + 580.0, sweep);
+    let x = sweep.linear(CX - 580.0, CX + 580.0);
     // Hat-shaped visibility curve `4x(1-x)` peaks at 1 when sweep = 0.5 and
     // is 0 at both ends.
-    let visibility = peak(sweep);
+    let visibility = peak(sweep.get());
     let height = (ROWS as f32 + 0.3) * SPACING_Y * 0.5 * 2.0;
     let top_y = CY - height * 0.5;
     let bottom_y = top_y + height;
@@ -153,7 +158,7 @@ fn ScanLine(palette: Palette, life: f32, sweep: f32) -> impl VectorComponent {
     // gives the sweep a feeling of "leaving a trace".
     let trail_w = 120.0;
     let inner_trail_w = 32.0;
-    let pct = (sweep * 100.0) as i32;
+    let pct = (sweep.get() * 100.0) as i32;
     let pct_text = format!("{:03}%", pct);
     let head_alpha = visibility * life;
 
