@@ -23,6 +23,7 @@
 use std::hash::Hash;
 
 use crate::geometry::{Anchor, Constraints, Transform, Vec2};
+use crate::layout::{raster::Flexible as RasterFlexible, Flexible};
 use crate::placement::{raster::Positioned as RasterPositioned, Positioned};
 use crate::raster::RasterComponent;
 use crate::vector::{Transformed, VectorComponent, VectorTransform};
@@ -80,6 +81,21 @@ pub trait VectorBuilderTransform: VectorBuilder {
 
 impl<B: VectorBuilder> VectorBuilderTransform for B {}
 
+/// Flex weighting on complete vector builders, mirroring
+/// [`VectorFlex`](crate::layout::VectorFlex) on built components: marks the
+/// built component to take a `grow`-weighted share of a parent
+/// [`Flex`](crate::layout::Flex)'s leftover main-axis space.
+pub trait VectorBuilderFlex: VectorBuilder {
+    fn grow(self, grow: f32) -> Flexible {
+        Flexible {
+            grow,
+            child: Box::new(self.build_component()),
+        }
+    }
+}
+
+impl<B: VectorBuilder> VectorBuilderFlex for B {}
+
 /// Raster counterpart of [`VectorBuilderPlacement`].
 pub trait RasterBuilderPlacement: RasterBuilder {
     fn place_at(self, position: Vec2) -> RasterPositioned {
@@ -98,6 +114,18 @@ pub trait RasterBuilderPlacement: RasterBuilder {
 }
 
 impl<B: RasterBuilder> RasterBuilderPlacement for B {}
+
+/// Raster counterpart of [`VectorBuilderFlex`].
+pub trait RasterBuilderFlex: RasterBuilder {
+    fn grow(self, grow: f32) -> RasterFlexible {
+        RasterFlexible {
+            grow,
+            child: Box::new(self.build_component()),
+        }
+    }
+}
+
+impl<B: RasterBuilder> RasterBuilderFlex for B {}
 
 /// Intermediate produced by [`VectorBuilderPlacement::anchored`]; mirrors
 /// [`AnchoredVectorComponent`](crate::placement::AnchoredVectorComponent) but

@@ -3,7 +3,7 @@
 //! Renders a 5-second timeline where four blue dots bounce horizontally.
 //! Each dot is a `BouncingDot` whose motion is driven by the time fed
 //! to it; the four instances receive the same `t` quantized to
-//! different framerates via `Time::fps`. A vertical `Stack`
+//! different framerates via `Time::fps`. A vertical `Flex`
 //! distributes the four tracks evenly inside a padded scene with
 //! `CrossAlign::Stretch`. The dot itself is purely a tree of layout
 //! containers — `Frame` declares its outer shape and anchors the
@@ -19,7 +19,7 @@ use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
-use tellur_core::layout::raster::{DecoratedBox, Frame, Padding, Stack};
+use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::Circle;
@@ -31,7 +31,7 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 /// A circle that triangle-wave scrubs left-to-right-to-left across the
 /// track's width. `Frame` declares the track's outer shape (fill the
 /// parent width, fix the height at 60) and anchors the circle so it
-/// stays fully inside: both `child_anchor` and `at` use the same
+/// stays fully inside: both sides of the alignment use the same
 /// bounce-driven ratio. The circle itself is decorated via
 /// `.rasterize().effect(Outline).effect(DropShadow)` — the first
 /// `.effect()` is innermost, so the white `Outline` runs first and the
@@ -47,8 +47,7 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))
-        .child_anchor(Anchor::CENTER)
-        .at(Anchor::new(rx, 0.5))
+        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
         .child(
             Circle::builder()
                 .radius(30.0)
@@ -76,7 +75,7 @@ fn main() {
             .background(Color::rgb_u8(20, 20, 30))
             .child(
                 Padding::builder().insets(EdgeInsets::all(100.0)).child(
-                    Stack::builder()
+                    Flex::builder()
                         .axis(Axis::Vertical)
                         .main_align(MainAlign::SpaceEvenly)
                         .cross_align(CrossAlign::Stretch)

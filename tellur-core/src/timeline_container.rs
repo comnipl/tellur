@@ -5,14 +5,14 @@
 //! the [`resolve`](crate::timeline_component::resolve) pass committed in steps
 //! 1–3. It mirrors the SPATIAL side of the library on purpose:
 //!
-//! | space (`layout.rs` / `layer.rs`)        | time (this module)                |
+//! | space (`layout/` / `layer.rs`)          | time (this module)                |
 //! |-----------------------------------------|-----------------------------------|
 //! | `Layer` (overlay children)              | [`Timeline`] (overlay in time)    |
-//! | `Stack` (lay along an axis, cursor)     | [`Sequence`] (lay one-after-another) |
+//! | `Flex` (lay along an axis, cursor)      | [`Sequence`] (lay one-after-another) |
 //!
 //! Both containers are struct-form `#[component(timeline)]` (builder + glue
 //! only, NO trait impl from the macro) plus a hand-written
-//! `impl TimelineComponent`, exactly as raster `Stack` is a
+//! `impl TimelineComponent`, exactly as raster `Flex` is a
 //! `#[component(raster)] struct` + hand-written `impl RasterComponent`.
 //!
 //! The leaves ([`VideoFile`], [`AudioFile`], [`Subtitle`]) are buildless
@@ -49,7 +49,7 @@ use crate::timeline_component::{
 #[derive(crate::Keyable)]
 pub struct Timeline {
     // `#[builder(field)]` members (the streamed children) must precede the
-    // setter members, per bon's member-ordering rule (mirrors raster `Stack`).
+    // setter members, per bon's member-ordering rule (mirrors raster `Flex`).
     #[children(each = child)]
     pub children: Vec<Box<dyn TimelineComponent + Send>>,
 }
@@ -287,15 +287,15 @@ impl TimelineComponent for Timeline {
     }
 }
 
-/// In-a-row container — the temporal twin of [`Stack`](crate::layout::raster::Stack).
+/// In-a-row container — the temporal twin of [`Flex`](crate::layout::raster::Flex).
 ///
 /// Lays children one after another: child N starts at child N-1's resolved end.
 /// RE-FLOW falls out for free — the cursor is recomputed from the children's
 /// current lengths every resolve, so a length change shifts everything after it
-/// (`.sketch/02 §6`). Mirrors `compute_stack_pass`'s `Start` branch.
+/// (`.sketch/02 §6`). Mirrors `compute_flex_pass`'s `Start` branch.
 ///
 /// A `.fill()` child here is a RESOLVE error (ZONE C #1): a `Sequence` imposes
-/// no container length for the fill to take, the same reason the spatial `Stack`
+/// no container length for the fill to take, the same reason the spatial `Flex`
 /// has no main-axis `Fill`. Span the row from the parent overlay `Timeline`
 /// instead. `.fill()` is a runtime `Placed` value, so this is caught at resolve
 /// time (via [`ResolveCtx::error`]), not by the type system.
