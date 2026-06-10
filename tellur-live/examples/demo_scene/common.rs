@@ -11,8 +11,6 @@
 //! path-qualified here: `shapes::Rectangle` / `shapes::Circle` and the
 //! `Aabb` alias for `geometry::Rect`.
 
-use std::f32::consts::TAU;
-
 use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::component;
@@ -22,7 +20,7 @@ use tellur_core::phase::Phase;
 use tellur_core::placement::VectorPlacement;
 use tellur_core::shapes;
 use tellur_core::text::{Text, TextSpan, Weight, MONOSPACE};
-use tellur_core::time::Time;
+use tellur_core::time::{LocalTime, Time};
 use tellur_core::vector::{Stroke, VectorComponent, VectorGraphic, VectorTransform};
 use tellur_core::Keyable;
 
@@ -52,8 +50,13 @@ pub fn lerp(from: f32, to: f32, p: f32) -> f32 {
     from + (to - from) * p
 }
 
+// Sine oscillation in ±1 with a fractional cycle `offset` to decorrelate
+// siblings. `Time::wave` is the cosine-start 0..1 form, so shift by the
+// offset plus a quarter period to recover `sin` and widen to ±1.
 pub fn wave<T: Time>(time: T, period: f32, offset: f32) -> f32 {
-    ((time.seconds() / period + offset) * TAU).sin()
+    LocalTime::new(time.seconds() + (offset + 0.25) * period)
+        .wave(period)
+        .linear(-1.0, 1.0)
 }
 
 // Rise-fall hat envelope `4x(1-x)`: peaks at 1 when value is 0.5, returns to

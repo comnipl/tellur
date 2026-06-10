@@ -12,7 +12,7 @@
 //!
 //! Both implement the [`Time`] trait, which provides the gating /
 //! quantization combinators, periodic decompositions ([`Time::cycle`],
-//! [`Time::bounce`]) and the two progress views:
+//! [`Time::bounce`], [`Time::wave`]) and the two progress views:
 //! [`Time::phase`] (a saturating [`Phase`]) and [`Time::window`] (a
 //! [`Window`], which keeps the interval and cursor available). The trait
 //! methods are defaulted so the operations work identically on either type.
@@ -33,8 +33,8 @@ use crate::Keyable;
 
 /// A point in time, measured in seconds.
 ///
-/// All combinators (`during`, `fps`, `cycle`, `bounce`, `phase`, `window`)
-/// are provided as default methods so implementors only need to
+/// All combinators (`during`, `fps`, `cycle`, `bounce`, `wave`, `phase`,
+/// `window`) are provided as default methods so implementors only need to
 /// express their own representation via [`Self::seconds`] and
 /// [`Self::from_seconds`].
 pub trait Time: Copy + Sized {
@@ -78,6 +78,18 @@ pub trait Time: Copy + Sized {
         assert_valid_period(period, "Time::bounce");
         let p = self.cycle(period).get();
         Phase::saturating(1.0 - (2.0 * p - 1.0).abs())
+    }
+
+    /// Sine-wave decomposition — the smooth sibling of [`Self::bounce`]:
+    /// the phase rises 0 → 1 across the first half of each `period`-second
+    /// cycle and falls 1 → 0 across the second half, with zero slope at the
+    /// turnarounds (`(1 - cos(2πt/period)) / 2`). The natural driver for
+    /// idle oscillation (drift, breathing, shimmer); a `±amp` swing is
+    /// `t.wave(period).linear(-amp, amp)`.
+    fn wave(&self, period: f32) -> Phase {
+        assert_valid_period(period, "Time::wave");
+        let u = self.seconds() / period;
+        Phase::saturating(0.5 - 0.5 * (std::f32::consts::TAU * u).cos())
     }
 
     /// Maps `[start, end]` to `[0.0, 1.0]` linearly, clamping outside.
@@ -247,6 +259,25 @@ mod tests {
         assert_eq!(TimelineTime::new(0.0).bounce(1.0).get(), 0.0);
         assert_eq!(TimelineTime::new(1.0).bounce(1.0).get(), 0.0);
         assert_eq!(TimelineTime::new(2.0).bounce(1.0).get(), 0.0);
+    }
+
+    #[test]
+    fn wave_matches_bounce_at_the_landmarks() {
+        // 0 at cycle start, 1 at half period, 0 at the boundary — same
+        // landmarks as bounce, smooth in between.
+        assert!(TimelineTime::new(0.0).wave(2.0).get() < 1e-6);
+        assert!((TimelineTime::new(1.0).wave(2.0).get() - 1.0).abs() < 1e-6);
+        assert!(TimelineTime::new(2.0).wave(2.0).get() < 1e-5);
+    }
+
+    #[test]
+    fn wave_is_smooth_not_linear() {
+        // At 1/8 period the triangle reads 0.25 but the sine, easing out of
+        // its zero-slope turnaround, is still below it.
+        let triangle = TimelineTime::new(0.25).bounce(2.0).get();
+        let sine = TimelineTime::new(0.25).wave(2.0).get();
+        assert!((triangle - 0.25).abs() < 1e-6);
+        assert!(sine < triangle);
     }
 
     #[test]
