@@ -9,7 +9,9 @@
 //! [`PhaseEasing::linear`](crate::easing::PhaseEasing::linear) (and the
 //! eased variants on the same trait) — they wrap this trait so callers
 //! reach `phase.linear(from, to)` directly. This trait exists primarily so
-//! richer value types (`Vec2`, `Anchor`, …) can be lerped the same way.
+//! richer value types (`Vec2`, `Anchor`, …) can be lerped the same way. To
+//! ease a typed interpolation, reshape the Phase first via
+//! [`Phase::eased`]: `a.interpolate(b, p.eased(Easing::OutCubic))`.
 
 use crate::geometry::{Anchor, Vec2};
 use crate::phase::Phase;
