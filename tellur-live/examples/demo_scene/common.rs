@@ -51,12 +51,6 @@ pub fn peak(s: f32) -> f32 {
     4.0 * s * (1.0 - s)
 }
 
-fn center_transform(size: Vec2, angle: f32, scale: Vec2) -> Transform {
-    let transform = Transform::scale(Vec2(scale.0.max(0.0001), scale.1.max(0.0001)))
-        .then(Transform::rotate(angle));
-    Transform::around_point(Vec2(size.0 * 0.5, size.1 * 0.5), transform)
-}
-
 // --- leaf components ---
 
 /// A solid-filled rectangle placed with its top-left at `position`. Renders
@@ -162,10 +156,15 @@ pub fn FxRect(
             .build(),
         None => shapes::Rectangle::builder().size(size).fill(color).build(),
     };
+    // Guard the scale away from zero so the transform matrix stays invertible.
+    let scale = Vec2(scale.0.max(0.0001), scale.1.max(0.0001));
     Fragment::single(
-        rect.transform(center_transform(size, angle, scale))
-            .opacity(opacity)
-            .anchored(Anchor::CENTER)
-            .snap_to(center),
+        rect.transform_around(
+            Anchor::CENTER,
+            Transform::scale(scale).then(Transform::rotate(angle)),
+        )
+        .opacity(opacity)
+        .anchored(Anchor::CENTER)
+        .snap_to(center),
     )
 }

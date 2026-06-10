@@ -3,7 +3,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::color::Color;
 use crate::dyn_compare::{DynEq, DynHash};
-use crate::geometry::{Constraints, Rect, Transform, Vec2};
+use crate::geometry::{Anchor, Constraints, Rect, Transform, Vec2};
 use crate::scalar::clamp_unit;
 use crate::Keyable;
 
@@ -108,25 +108,29 @@ impl Hash for dyn VectorComponent {
 /// bounds. Anchor-based placement therefore snaps the pre-transform intrinsic
 /// box; callers that need transformed geometry to affect layout should wrap the
 /// transformed component in an explicit container.
+///
+/// `pivot` anchors the transform on the child's layout box: it is resolved
+/// against the laid-out size at paint time, so "rotate around the center"
+/// needs no knowledge of the size at the call site (see
+/// [`VectorTransform::transform_around`]). The default pivot is the origin
+/// ([`Anchor::TOP_LEFT`]), which applies `transform` verbatim.
 #[derive(Keyable)]
 pub struct Transformed {
     pub transform: Transform,
+    pub pivot: Anchor,
     pub opacity: f32,
     pub child: Box<dyn VectorComponent>,
 }
 
 impl Transformed {
     pub fn new<C: VectorComponent + 'static>(transform: Transform, child: C) -> Self {
-        Self {
-            transform,
-            opacity: 1.0,
-            child: Box::new(child),
-        }
+        Self::from_box(transform, Box::new(child))
     }
 
     pub fn from_box(transform: Transform, child: Box<dyn VectorComponent>) -> Self {
         Self {
             transform,
+            pivot: Anchor::TOP_LEFT,
             opacity: 1.0,
             child,
         }
@@ -136,6 +140,18 @@ impl Transformed {
         self.opacity = opacity;
         self
     }
+
+    /// The transform with the pivot folded in, resolved against `size`.
+    fn effective_transform(&self, size: Vec2) -> Transform {
+        if self.pivot == Anchor::TOP_LEFT {
+            // The origin pivot is the identity wrapping — keep the raw
+            // transform bit-for-bit so existing cache keys and outputs are
+            // untouched.
+            return self.transform;
+        }
+        let point = Vec2(size.0 * self.pivot.rx, size.1 * self.pivot.ry);
+        Transform::around_point(point, self.transform)
+    }
 }
 
 impl VectorComponent for Transformed {
@@ -144,14 +160,19 @@ impl VectorComponent for Transformed {
     }
 
     fn paint_bounds(&self, size: Vec2) -> Rect {
-        transformed_bounds(size, self.child.paint_bounds(size), self.transform)
+        transformed_bounds(
+            size,
+            self.child.paint_bounds(size),
+            self.effective_transform(size),
+        )
     }
 
     fn render(&self, size: Vec2) -> VectorGraphic {
         let inner = self.child.render(size);
+        let transform = self.effective_transform(size);
         VectorGraphic {
-            view_box: transformed_bounds(size, inner.view_box, self.transform),
-            root: Node::single_group(self.transform, self.opacity, inner.root),
+            view_box: transformed_bounds(size, inner.view_box, transform),
+            root: Node::single_group(transform, self.opacity, inner.root),
         }
     }
 }
@@ -166,6 +187,17 @@ impl From<Transformed> for Box<dyn VectorComponent> {
 pub trait VectorTransform: VectorComponent + Sized + 'static {
     fn transform(self, transform: Transform) -> Transformed {
         Transformed::new(transform, self)
+    }
+
+    /// Like [`transform`](Self::transform), but pivots the transform on
+    /// `anchor` of this component's layout box. The pivot is resolved
+    /// against the laid-out size at paint time, so spinning a box in place
+    /// is `rect.transform_around(Anchor::CENTER, Transform::rotate(a))` —
+    /// no size restated, no [`Transform::around_point`] arithmetic.
+    fn transform_around(self, anchor: Anchor, transform: Transform) -> Transformed {
+        let mut transformed = Transformed::new(transform, self);
+        transformed.pivot = anchor;
+        transformed
     }
 
     fn opacity(self, opacity: f32) -> Transformed {
@@ -413,6 +445,44 @@ mod tests {
         assert_eq!(transformed.layout(Constraints::UNBOUNDED), Vec2(4.0, 20.0));
         assert_eq!(transformed.paint_bounds(Vec2(4.0, 20.0)), expected);
         assert_eq!(transformed.render(Vec2(4.0, 20.0)).view_box, expected);
+    }
+
+    #[test]
+    fn transform_around_resolves_the_pivot_against_the_size() {
+        let angle = 0.5_f32;
+        let transformed = Rectangle {
+            size: Vec2(4.0, 2.0),
+            fill: None,
+            stroke: None,
+        }
+        .transform_around(Anchor::CENTER, Transform::rotate(angle));
+
+        let graphic = transformed.render(Vec2(4.0, 2.0));
+        let Node::SingleGroup(group) = graphic.root else {
+            panic!("Transformed should render as a single-child group");
+        };
+        // The emitted transform pivots on the box center (2, 1).
+        assert_eq!(
+            group.transform,
+            Transform::around_point(Vec2(2.0, 1.0), Transform::rotate(angle))
+        );
+    }
+
+    #[test]
+    fn transform_with_origin_pivot_stays_verbatim() {
+        let transform = Transform::rotate(0.5);
+        let transformed = Rectangle {
+            size: Vec2(4.0, 2.0),
+            fill: None,
+            stroke: None,
+        }
+        .transform(transform);
+
+        let graphic = transformed.render(Vec2(4.0, 2.0));
+        let Node::SingleGroup(group) = graphic.root else {
+            panic!("Transformed should render as a single-child group");
+        };
+        assert_eq!(group.transform, transform);
     }
 
     #[test]

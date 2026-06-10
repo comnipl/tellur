@@ -232,6 +232,7 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 | 背景・枠線・はみ出しクリップ | `DecoratedBox` |
 | 固定サイズの空白 | `SizedBox` |
 | 回転・拡縮・不透明度（レイアウト不変） | `.transform()` / `.opacity()`（= `Transformed`） |
+| アンカーを軸に回転・拡縮（中心回転など） | `.transform_around(Anchor::CENTER, t)` |
 
 ## 9. vector と raster の対応
 
