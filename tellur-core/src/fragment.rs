@@ -137,3 +137,58 @@ pub mod raster {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::Color;
+    use crate::placement::VectorPlacement;
+    use crate::shapes::Rectangle;
+    use crate::vector::Paint;
+
+    fn rect(w: f32, h: f32) -> Rectangle {
+        Rectangle {
+            size: Vec2(w, h),
+            fill: Paint::Solid(Color::rgb_u8(0, 0, 0)).into(),
+            stroke: None,
+        }
+    }
+
+    #[test]
+    fn fragment_fits_single_child_size() {
+        let fragment = Fragment {
+            children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0)).into()],
+        };
+        assert_eq!(fragment.layout(Constraints::UNBOUNDED), Vec2(80.0, 40.0));
+    }
+
+    #[test]
+    fn fragment_unions_disjoint_children() {
+        let fragment = Fragment {
+            children: vec![
+                rect(50.0, 50.0).place_at(Vec2(0.0, 0.0)).into(),
+                rect(50.0, 50.0).place_at(Vec2(100.0, 100.0)).into(),
+            ],
+        };
+        // bounding (0,0)..(150,150) → size (150, 150)
+        assert_eq!(fragment.layout(Constraints::UNBOUNDED), Vec2(150.0, 150.0));
+    }
+
+    #[test]
+    fn fragment_handles_negative_positions() {
+        let fragment = Fragment {
+            children: vec![
+                rect(100.0, 100.0).place_at(Vec2(-30.0, 0.0)).into(),
+                rect(100.0, 100.0).place_at(Vec2(50.0, 20.0)).into(),
+            ],
+        };
+        // bounding (-30,0)..(150,120) → size (180, 120)
+        assert_eq!(fragment.layout(Constraints::UNBOUNDED), Vec2(180.0, 120.0));
+    }
+
+    #[test]
+    fn fragment_empty_is_zero() {
+        let fragment = Fragment::empty();
+        assert_eq!(fragment.layout(Constraints::UNBOUNDED), Vec2::ZERO);
+    }
+}

@@ -53,7 +53,7 @@ use crate::time::{LocalTime, Time, TimelineTime};
 /// impls below `Box<dyn TimelineComponent + Send>`), so a container that holds
 /// `Vec<Box<dyn TimelineComponent + Send>>` (e.g. [`Timeline`] / [`Sequence`])
 /// can satisfy the `TimelineBuilder::Output: PartialEq + Hash` marker bound the
-/// same way the raster [`Stack`](crate::layout::raster::Stack) does — by
+/// same way the raster [`Flex`](crate::layout::raster::Flex) does — by
 /// deriving over a comparable child vec. Timeline nodes are never memoized
 /// through `ctx.render` (`.sketch/02 §11`), so this identity is purely the
 /// builder-marker key, not a per-frame cache key.

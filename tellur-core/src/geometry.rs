@@ -190,6 +190,53 @@ impl Anchor {
     pub fn point(self, size: Vec2) -> Vec2 {
         Vec2(size.0 * self.rx, size.1 * self.ry)
     }
+
+    /// Pairs this anchor (on the child) with an anchor on the surrounding box,
+    /// producing the [`Alignment`] that snaps the former onto the latter:
+    /// `Anchor::CENTER.to(Anchor::BOTTOM_RIGHT)` pins the child's center to the
+    /// box's bottom-right corner.
+    pub const fn to(self, at: Anchor) -> Alignment {
+        Alignment { child: self, at }
+    }
+}
+
+/// How a child box is aligned inside a surrounding box: the `child` anchor
+/// (a point on the child) is snapped onto the `at` anchor (a point on the
+/// surrounding box).
+///
+/// The common case where both anchors coincide — centering, corner-pinning —
+/// converts straight from a single [`Anchor`] (`Alignment::from(Anchor::CENTER)`
+/// or just passing an `Anchor` to an `impl Into<Alignment>` slot). Build the
+/// asymmetric form with [`Anchor::to`].
+#[derive(Debug, Clone, Copy, Keyable)]
+pub struct Alignment {
+    /// The anchor on the child box.
+    pub child: Anchor,
+    /// The anchor on the surrounding box the child anchor lands on.
+    pub at: Anchor,
+}
+
+impl Alignment {
+    pub const TOP_LEFT: Self = Self::uniform(Anchor::TOP_LEFT);
+    pub const CENTER: Self = Self::uniform(Anchor::CENTER);
+
+    pub const fn new(child: Anchor, at: Anchor) -> Self {
+        Self { child, at }
+    }
+
+    /// The same anchor on both boxes — centering, corner- or edge-pinning.
+    pub const fn uniform(anchor: Anchor) -> Self {
+        Self {
+            child: anchor,
+            at: anchor,
+        }
+    }
+}
+
+impl From<Anchor> for Alignment {
+    fn from(anchor: Anchor) -> Self {
+        Self::uniform(anchor)
+    }
 }
 
 /// A size paired with an anchor on that size, produced by [`Vec2::anchored`].
@@ -346,7 +393,7 @@ impl Constraints {
     }
 
     /// Replaces the cross-axis bound with a tight `value` while leaving
-    /// the main axis unchanged. Used by `Stack`'s `CrossAlign::Stretch`.
+    /// the main axis unchanged. Used by `Flex`'s `CrossAlign::Stretch`.
     pub fn tighten_cross(&self, axis: Axis, value: f32) -> Self {
         match axis {
             Axis::Horizontal => Self {
@@ -356,6 +403,22 @@ impl Constraints {
             Axis::Vertical => Self {
                 min: Vec2(value, self.min.1),
                 max: Vec2(value, self.max.1),
+            },
+        }
+    }
+
+    /// Replaces the main-axis bound with a tight `value` while leaving the
+    /// cross axis unchanged. Used by `Flex` to hand a flexible child its
+    /// share of the leftover main-axis space.
+    pub fn tighten_main(&self, axis: Axis, value: f32) -> Self {
+        match axis {
+            Axis::Horizontal => Self {
+                min: Vec2(value, self.min.1),
+                max: Vec2(value, self.max.1),
+            },
+            Axis::Vertical => Self {
+                min: Vec2(self.min.0, value),
+                max: Vec2(self.max.0, value),
             },
         }
     }

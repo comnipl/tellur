@@ -6,7 +6,7 @@
 //! bounded LRU cache, once through `PassThrough` — and prints
 //! per-frame and total times for both. Cache hits should make the
 //! cached run noticeably faster on the static blur subtree
-//! (`DropShadow`), while time-varying nodes (`Stack`, `Padding`,
+//! (`DropShadow`), while time-varying nodes (`Flex`, `Padding`,
 //! `BouncingDot { t }`) hit the cache rarely or not at all.
 
 use std::time::Instant;
@@ -16,7 +16,7 @@ use tellur_core::color::Color;
 use tellur_core::component;
 use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
-use tellur_core::layout::raster::{DecoratedBox, Frame, Padding, Stack};
+use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::render_context::{PassThrough, RenderContext};
@@ -33,8 +33,7 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))
-        .child_anchor(Anchor::CENTER)
-        .at(Anchor::new(rx, 0.5))
+        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
         .child(
             Circle::builder()
                 .radius(30.0)
@@ -88,7 +87,7 @@ fn main() {
             .background(Color::rgb_u8(20, 20, 30))
             .child(
                 Padding::builder().insets(EdgeInsets::all(100.0)).child(
-                    Stack::builder()
+                    Flex::builder()
                         .axis(Axis::Vertical)
                         .main_align(MainAlign::SpaceEvenly)
                         .cross_align(CrossAlign::Stretch)

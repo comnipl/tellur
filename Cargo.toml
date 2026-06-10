@@ -6,6 +6,5 @@ members = [
     "tellur-macros",
     "tellur-plugin",
     "tellur-renderer",
-    "examples/quickstart",
 ]
 resolver = "2"
