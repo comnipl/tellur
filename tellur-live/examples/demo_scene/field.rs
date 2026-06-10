@@ -7,7 +7,7 @@ use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::phase::Phase;
 use tellur_core::text::Weight;
-use tellur_core::time::{LocalTime, Time, TimelineTime};
+use tellur_core::time::{LocalTime, Time};
 
 use super::common::*;
 
@@ -17,7 +17,7 @@ const SPACING_X: f32 = 220.0;
 const SPACING_Y: f32 = 200.0;
 
 #[tellur_core::component(vector)]
-pub fn Field(time: TimelineTime, palette: Palette) -> impl VectorComponent {
+pub fn Field(time: LocalTime, palette: Palette) -> impl VectorComponent {
     let p = palette;
     if time.during(1.7, 3.6).is_none() {
         return VectorLayer::builder().size(SCENE_SIZE).build();

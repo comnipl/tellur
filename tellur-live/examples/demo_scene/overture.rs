@@ -9,12 +9,12 @@ use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::text::Weight;
-use tellur_core::time::{Time, TimelineTime};
+use tellur_core::time::{LocalTime, Time};
 
 use super::common::*;
 
 #[tellur_core::component(vector)]
-pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
+pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
     let p = palette;
     if time.during(0.0, 2.2).is_none() {
         return VectorLayer::builder().size(SCENE_SIZE).build();

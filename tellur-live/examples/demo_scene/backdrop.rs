@@ -29,6 +29,13 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
     // the built layer is identical frame to frame.
     VectorLayer::builder()
         .size(SCENE_SIZE)
+        // The scene's base ink — the bg fill the scene root used to paint.
+        .child(
+            Rectangle::builder()
+                .size(SCENE_SIZE)
+                .fill(p.bg)
+                .place_at(Vec2::ZERO),
+        )
         // Faint horizon lines sliding in from the left.
         .children((0..18).map(move |i| {
             let y = 64.0 + i as f32 * 56.0;

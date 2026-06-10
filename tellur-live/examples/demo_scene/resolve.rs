@@ -8,12 +8,12 @@ use std::f32::consts::{PI, TAU};
 use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
-use tellur_core::time::{Time, TimelineTime};
+use tellur_core::time::{LocalTime, Time};
 
 use super::common::*;
 
 #[tellur_core::component(vector)]
-pub fn Resolve(time: TimelineTime, palette: Palette) -> impl VectorComponent {
+pub fn Resolve(time: LocalTime, palette: Palette) -> impl VectorComponent {
     let p = palette;
     if time.during(4.9, DURATION).is_none() {
         return VectorLayer::builder().size(SCENE_SIZE).build();
@@ -219,7 +219,7 @@ const PI_HALF: f32 = PI * 0.5;
 // trailing whisker — built in that paint order.
 #[tellur_core::component(vector)]
 fn CentralMark(
-    time: TimelineTime,
+    time: LocalTime,
     palette: Palette,
     life: f32,
     comp_in: f32,
