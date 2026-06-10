@@ -60,7 +60,7 @@ Layer::builder()
 
 `anchored().snap_to()` は幾何語彙（`Vec2::anchored` → `AnchoredSize::snap_to`）をそのまま componentに持ち上げたもので、「**子のどこを・どこに**」を読み下せるのが特徴です。どちらも `Positioned` という普通のコンポーネントを返すだけなので、特別な「placed の世界」はありません。
 
-`Layer` のサイズは**必須**です。「子に合わせて縮むグループ」が欲しいときは次の `Fragment` を使います（昔は `Layer::fit()` がありましたが、役割が `Fragment` と重複するため一本化されました）。
+`Layer` のサイズは**必須**です。「子に合わせて縮むグループ」が欲しいときは次の `Fragment` を使います。
 
 ## 3. `Fragment` — 透明なグループ
 
