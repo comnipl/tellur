@@ -48,8 +48,14 @@ impl Positioned {
 }
 
 impl VectorComponent for Positioned {
-    fn layout(&self, constraints: Constraints) -> Vec2 {
-        self.child.layout(constraints)
+    fn layout(&self, _constraints: Constraints) -> Vec2 {
+        // A placed child is author-positioned: the canvas does not impose a
+        // size on it, so measure it unbounded — the same measurement
+        // `anchored().snap_to()` and `Fragment` use. Passing the parent's
+        // constraints through would let a loose canvas clamp the child
+        // (squashing an oversized circle into an ellipse) while the snap
+        // offset was computed against the unclamped size.
+        self.child.layout(Constraints::UNBOUNDED)
     }
 
     fn paint_bounds(&self, size: Vec2) -> Rect {
@@ -161,8 +167,11 @@ pub mod raster {
     }
 
     impl RasterComponent for Positioned {
-        fn layout(&self, constraints: Constraints) -> Vec2 {
-            self.child.layout(constraints)
+        fn layout(&self, _constraints: Constraints) -> Vec2 {
+            // Same rule as the vector `Positioned`: a placed child is
+            // author-positioned, so it is measured unbounded rather than
+            // clamped by the canvas it happens to sit in.
+            self.child.layout(Constraints::UNBOUNDED)
         }
 
         fn paint_bounds(&self, size: Vec2) -> Rect {
@@ -241,3 +250,65 @@ pub mod raster {
 // Re-export the raster placement trait at the module root so existing
 // `use tellur_core::placement::RasterPlacement;` paths keep resolving.
 pub use raster::RasterPlacement;
+
+#[cfg(test)]
+mod tests {
+    use super::raster::RasterPlacement;
+    use super::*;
+    use crate::color::Color;
+    use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+    use crate::render_context::RenderContext;
+    use crate::shapes::Circle;
+    use crate::vector::Paint;
+
+    fn big_circle() -> Circle {
+        // Diameter 1440 — taller than a 1080-high canvas.
+        Circle::builder()
+            .radius(720.0)
+            .fill(Paint::Solid(Color::rgb_u8(0, 0, 0)))
+            .build()
+    }
+
+    #[test]
+    fn placed_child_is_measured_unbounded() {
+        // The canvas hands loose constraints smaller than the circle; the
+        // placed child still reports its intrinsic size instead of getting
+        // squashed into an ellipse.
+        let placed = big_circle().place_at(Vec2::ZERO);
+        let size = placed.layout(Constraints::loose(Vec2(1920.0, 1080.0)));
+        assert_eq!(size, Vec2(1440.0, 1440.0));
+    }
+
+    #[test]
+    fn snap_offset_and_layout_agree_for_oversized_children() {
+        // `anchored()` computes the offset against the unbounded measurement;
+        // `layout` must report the same size or the child renders off-center.
+        let placed = big_circle()
+            .anchored(Anchor::CENTER)
+            .snap_to(Vec2(960.0, 540.0));
+        assert_eq!(placed.offset, Vec2(240.0, -180.0));
+        let size = placed.layout(Constraints::loose(Vec2(1920.0, 1080.0)));
+        assert_eq!(size, Vec2(1440.0, 1440.0));
+    }
+
+    #[derive(PartialEq, Hash)]
+    struct FixedRaster;
+
+    impl RasterComponent for FixedRaster {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(2000.0, 2000.0))
+        }
+
+        fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+            let bytes = (t.width as usize) * (t.height as usize) * 4;
+            RasterImage::cpu(t.width, t.height, PixelFormat::Rgba8, vec![0; bytes])
+        }
+    }
+
+    #[test]
+    fn raster_placed_child_is_measured_unbounded() {
+        let placed = FixedRaster.place_at(Vec2::ZERO);
+        let size = placed.layout(Constraints::loose(Vec2(100.0, 100.0)));
+        assert_eq!(size, Vec2(2000.0, 2000.0));
+    }
+}

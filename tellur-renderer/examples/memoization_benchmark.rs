@@ -28,8 +28,7 @@ use tellur_renderer::{CachingRenderContext, DropShadow, RasterizableBuilder};
 
 #[component(raster)]
 fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
-    let (phase, _) = t.bounce(2.5);
-    let rx = phase.linear(0.0, 1.0);
+    let rx = t.bounce(2.5).linear(0.0, 1.0);
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))

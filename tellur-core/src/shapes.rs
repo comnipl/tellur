@@ -31,6 +31,9 @@ impl VectorComponent for Rectangle {
 
     fn render(&self, size: Vec2) -> VectorGraphic {
         let Vec2(w, h) = size;
+        let Some((fill, stroke)) = visible_paints(size, &self.fill, &self.stroke) else {
+            return empty_graphic(size);
+        };
         let commands = vec![
             PathCommand::MoveTo(Vec2(0.0, 0.0)),
             PathCommand::LineTo(Vec2(w, 0.0)),
@@ -42,8 +45,8 @@ impl VectorComponent for Rectangle {
             view_box: stroked_bounds(size, &self.stroke),
             root: Node::Path(Path {
                 commands,
-                fill: self.fill.clone(),
-                stroke: self.stroke.clone(),
+                fill,
+                stroke,
                 transform: Transform::IDENTITY,
             }),
         }
@@ -121,11 +124,46 @@ fn stroked_bounds(size: Vec2, stroke: &Option<Stroke>) -> Rect {
     }
 }
 
+/// Drops paints that cannot produce visible ink, and reports `None` when the
+/// shape as a whole is invisible (degenerate box, or no visible fill/stroke)
+/// so the caller can render an [`empty_graphic`] instead. Shapes cull
+/// themselves: callers never need an "is it visible?" guard around a leaf.
+#[allow(clippy::type_complexity)]
+fn visible_paints(
+    size: Vec2,
+    fill: &Option<Fill>,
+    stroke: &Option<Stroke>,
+) -> Option<(Option<Fill>, Option<Stroke>)> {
+    if size.0 <= 0.0 || size.1 <= 0.0 {
+        return None;
+    }
+    let fill = fill.clone().filter(Fill::is_visible);
+    let stroke = stroke.clone().filter(Stroke::is_visible);
+    if fill.is_none() && stroke.is_none() {
+        return None;
+    }
+    Some((fill, stroke))
+}
+
+/// The graphic an invisible shape renders as: the layout box with no ink.
+fn empty_graphic(size: Vec2) -> VectorGraphic {
+    VectorGraphic {
+        view_box: Rect {
+            origin: Vec2::ZERO,
+            size,
+        },
+        root: Node::empty(),
+    }
+}
+
 // Builds an ellipse whose tight bounding box is anchored at the local origin
 // `(0, 0)` and has size `2 * radii`.
 fn ellipse_to_graphic(radii: Vec2, fill: Option<Fill>, stroke: Option<Stroke>) -> VectorGraphic {
     let Vec2(rx, ry) = radii;
     let size = Vec2(rx * 2.0, ry * 2.0);
+    let Some((fill, stroke)) = visible_paints(size, &fill, &stroke) else {
+        return empty_graphic(size);
+    };
     let cx = rx;
     let cy = ry;
     let ox = rx * KAPPA;

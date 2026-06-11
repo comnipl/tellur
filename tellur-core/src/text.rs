@@ -669,6 +669,7 @@ impl VectorComponent for TextSpanGraphic {
         let children: Vec<Node> = self
             .paths
             .iter()
+            .filter(|(_, fill)| fill.is_visible())
             .map(|(commands, fill)| {
                 Node::Path(VPath {
                     commands: commands.clone(),
@@ -704,6 +705,7 @@ impl VectorComponent for Text {
         let (paths, _intrinsic) = self.shape_and_layout();
         let nodes: Vec<Node> = paths
             .into_iter()
+            .filter(|(_, fill)| fill.is_visible())
             .map(|(commands, fill)| {
                 Node::Path(VPath {
                     commands,

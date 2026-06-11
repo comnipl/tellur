@@ -9,12 +9,12 @@ use tellur_core::fragment::Fragment;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::text::Weight;
-use tellur_core::time::{Time, TimelineTime};
+use tellur_core::time::{LocalTime, Time};
 
 use super::common::*;
 
 #[tellur_core::component(vector)]
-pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
+pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
     let p = palette;
     if time.during(0.0, 2.2).is_none() {
         return VectorLayer::builder().size(SCENE_SIZE).build();
@@ -22,11 +22,11 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 
     // Hero square: controlled ease_out_cubic pop (no rubbery elastic),
     // a slow drift-spin, and an ease_in_back dismissal.
-    let hero_in = time.phase(0.55, 1.2).ease_out_cubic(0.0, 1.0);
+    let hero_in = time.phase(0.55, 1.2).eased(Easing::OutCubic);
     let hero_remain = time.phase(1.7, 2.15).ease_in_back(1.0, 0.0);
-    let hero_life = (hero_in * hero_remain).clamp(0.0, 1.0);
+    let hero_life = (hero_in.get() * hero_remain).clamp(0.0, 1.0);
     let spin = time.seconds() * 0.35 + PI * 0.25;
-    let scale = lerp(0.55, 1.0, hero_in) * hero_remain;
+    let scale = hero_in.linear(0.55, 1.0) * hero_remain;
     let s_clamped = scale.max(0.001);
 
     // Registration markings inside the hero square — a reticle (cross arms +
@@ -48,7 +48,7 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
     let ray_in = time.phase(0.85, 1.4).ease_out_cubic(0.0, 1.0) * hero_remain;
     let tag_in = time.phase(0.95, 1.35).ease_in_out_expo(0.0, 1.0)
         * time.phase(1.55, 2.0).ease_in_out_expo(1.0, 0.0);
-    let sweep = time.phase(1.45, 2.0).ease_in_out_expo(0.0, 1.0);
+    let sweep = time.phase(1.45, 2.0).eased(Easing::InOutExpo);
 
     // Two clamp bars — one cyan above, one pink below — that frame the
     // central hero. Snappy ease_in_out_expo in, ease_in_back out (lifts off
@@ -67,13 +67,13 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     let stagger = i as f32 * 0.06;
                     let enter = time
                         .phase(0.32 + stagger, 0.92 + stagger)
-                        .ease_in_out_expo(0.0, 1.0);
+                        .eased(Easing::InOutExpo);
                     let leave = time
                         .phase(1.55 + stagger * 0.5, 2.05 + stagger * 0.5)
                         .ease_in_back(0.0, 1.0);
-                    let bar_x = lerp(side * 2400.0 + CX, CX, enter);
+                    let bar_x = enter.linear(side * 2400.0 + CX, CX);
                     let exit_dy = leave * if side > 0.0 { 320.0 } else { -320.0 };
-                    let alpha_factor = (enter * (1.0 - leave)).clamp(0.0, 1.0) * 0.92;
+                    let alpha_factor = (enter.get() * (1.0 - leave)).clamp(0.0, 1.0) * 0.92;
                     let y_center = CY + dy + exit_dy;
 
                     // End-cap mini brackets at each bar end — small perpendicular
@@ -88,13 +88,12 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
 
                     Fragment::builder()
                         .child(
-                            FxRect::builder()
-                                .center(Vec2(bar_x, y_center))
+                            Rectangle::builder()
                                 .size(Vec2(bar_w, bar_h))
-                                .angle(0.0)
-                                .color(color)
+                                .fill(color)
                                 .opacity(alpha_factor)
-                                .scale(Vec2(1.0, 1.0)),
+                                .anchored(Anchor::CENTER)
+                                .snap_to(Vec2(bar_x, y_center)),
                         )
                         .children(
                             (cap_pop > 0.0)
@@ -103,13 +102,13 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                                     let cap_w = 3.0;
                                     [-1.0_f32, 1.0].into_iter().map(move |cap_side| {
                                         let cap_x = bar_x + cap_side * (bar_w * 0.5 + 1.0);
-                                        Rect::builder()
-                                            .position(Vec2(
+                                        Rectangle::builder()
+                                            .size(Vec2(cap_w, cap_h * cap_pop))
+                                            .fill(color.with_alpha(alpha_factor))
+                                            .place_at(Vec2(
                                                 cap_x - cap_w * 0.5,
                                                 y_center - cap_h * 0.5,
                                             ))
-                                            .size(Vec2(cap_w, cap_h * cap_pop))
-                                            .color(color.with_alpha(alpha_factor))
                                     })
                                 })
                                 .into_iter()
@@ -119,23 +118,31 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 }),
         )
         .child(
-            FxRect::builder()
-                .center(Vec2(CX, CY))
+            Rectangle::builder()
                 .size(Vec2(280.0, 280.0))
-                .angle(spin)
-                .color(p.paper)
+                .fill(p.paper)
+                .transform_around(
+                    Anchor::CENTER,
+                    Transform::scale(Vec2(s_clamped, s_clamped)).then(Transform::rotate(spin)),
+                )
                 .opacity(hero_life)
-                .scale(Vec2(s_clamped, s_clamped)),
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         .child(
-            FxOutlineRect::builder()
-                .center(Vec2(CX, CY))
+            Rectangle::builder()
                 .size(Vec2(420.0, 420.0))
-                .angle(-spin * 0.4)
-                .color(p.pink.with_alpha(hero_life * 0.82))
-                .opacity(1.0)
-                .scale(Vec2(s_clamped, s_clamped))
-                .width(3.0),
+                .stroke(Stroke {
+                    paint: p.pink.with_alpha(hero_life * 0.82).into(),
+                    width: 3.0,
+                })
+                .transform_around(
+                    Anchor::CENTER,
+                    Transform::scale(Vec2(s_clamped, s_clamped))
+                        .then(Transform::rotate(-spin * 0.4)),
+                )
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // Crosshair arms — note the gap in the middle (drawn as 4 short
         // segments) so the reticle reads as a scope mark, not a solid plus.
@@ -157,29 +164,29 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 } else {
                     (arm_segment, 2.0)
                 };
-                FxRect::builder()
-                    .center(pos)
+                Rectangle::builder()
                     .size(Vec2(w, h))
-                    .angle(spin)
-                    .color(mark_color)
-                    .opacity(1.0)
-                    .scale(Vec2(1.0, 1.0))
+                    .fill(mark_color)
+                    .transform_around(Anchor::CENTER, Transform::rotate(spin))
+                    .anchored(Anchor::CENTER)
+                    .snap_to(pos)
             }),
         )
         // Small open ring at the center of the reticle.
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(6.0 * s_clamped)
-                .stroke(mark_color)
-                .stroke_width(1.5),
+                .stroke(Stroke::new(mark_color, 1.5))
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // A tiny solid dot at the very center for the bullseye.
         .child(
             Circle::builder()
-                .center(Vec2(CX, CY))
                 .radius(1.5 * s_clamped)
-                .fill(mark_color),
+                .fill(mark_color)
+                .anchored(Anchor::CENTER)
+                .snap_to(Vec2(CX, CY)),
         )
         // Four corner dots inside the paper square, offset 110 from center then
         // rotated by `spin` to follow the square's orientation.
@@ -191,9 +198,10 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                     let ly = dy * corner_off;
                     let pos = Vec2(CX + lx * cs - ly * sn, CY + lx * sn + ly * cs);
                     Circle::builder()
-                        .center(pos)
                         .radius(3.5 * hero_life)
                         .fill(mark_color)
+                        .anchored(Anchor::CENTER)
+                        .snap_to(pos)
                 }),
         )
         // Four registration dots locked onto the outline corners, alternating
@@ -213,13 +221,12 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 let length = (outer_r - inner_r) * ray_in;
                 let mid_r = inner_r + length * 0.5;
                 let mid = Vec2(CX + a.cos() * mid_r, CY + a.sin() * mid_r);
-                FxRect::builder()
-                    .center(mid)
+                Rectangle::builder()
                     .size(Vec2(1.5, length))
-                    .angle(a + PI * 0.5)
-                    .color(p.paper.with_alpha(hero_life * 0.45))
-                    .opacity(1.0)
-                    .scale(Vec2(1.0, 1.0))
+                    .fill(p.paper.with_alpha(hero_life * 0.45))
+                    .transform_around(Anchor::CENTER, Transform::rotate(a + PI * 0.5))
+                    .anchored(Anchor::CENTER)
+                    .snap_to(mid)
             });
 
             // Small index tag next to each outside dot. The tag follows the
@@ -244,22 +251,24 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
                 } else {
                     Anchor::BOTTOM_CENTER
                 };
-                Label::builder()
-                    .position(lpos)
-                    .anchor(anchor)
-                    .text(format!("0{}", s + 1))
+                Text::builder()
+                    .font(MONOSPACE.clone())
                     .size(10.0)
-                    .color(p.paper.with_alpha(label_alpha.clamp(0.0, 1.0)))
                     .weight(Weight::NORMAL)
+                    .fill(p.paper.with_alpha(label_alpha.clamp(0.0, 1.0)))
+                    .span(TextSpan::plain(format!("0{}", s + 1)))
+                    .anchored(anchor)
+                    .snap_to(lpos)
             });
 
             Fragment::builder()
                 .maybe_child(ray)
                 .child(
                     Circle::builder()
-                        .center(pos)
                         .radius(6.0 * hero_life)
-                        .fill((if s % 2 == 0 { p.pink } else { p.cyan }).with_alpha(hero_life)),
+                        .fill((if s % 2 == 0 { p.pink } else { p.cyan }).with_alpha(hero_life))
+                        .anchored(Anchor::CENTER)
+                        .snap_to(pos),
                 )
                 .maybe_child(tag)
                 .build()
@@ -274,13 +283,13 @@ pub fn Overture(time: TimelineTime, palette: Palette) -> impl VectorComponent {
         }))
         // Pink horizontal scan stripe sweeping vertically as the scene exits —
         // a transition wipe that hands the frame off to FIELD.
-        .maybe_child((sweep > 0.0 && sweep < 1.0).then(|| {
-            let y = lerp(-80.0, SCENE_SIZE.1 + 80.0, sweep);
-            let visibility = peak(sweep);
-            Rect::builder()
-                .position(Vec2(0.0, y - 3.0))
+        .maybe_child((sweep.get() > 0.0 && sweep.get() < 1.0).then(|| {
+            let y = sweep.linear(-80.0, SCENE_SIZE.1 + 80.0);
+            let visibility = peak(sweep.get());
+            Rectangle::builder()
                 .size(Vec2(SCENE_SIZE.0, 6.0))
-                .color(p.pink.with_alpha(visibility * 0.88))
+                .fill(p.pink.with_alpha(visibility * 0.88))
+                .place_at(Vec2(0.0, y - 3.0))
         }))
         .build()
 }
@@ -295,31 +304,32 @@ fn LengthTag(palette: Palette, hero_life: f32, tag_in: f32) -> impl VectorCompon
     let half_span = 90.0;
     Fragment::builder()
         .child(
-            Rect::builder()
-                .position(Vec2(CX - half_span - 1.0, y - tick_h * 0.5))
+            Rectangle::builder()
                 .size(Vec2(2.0, tick_h))
-                .color(p.paper.with_alpha(hero_life * tag_in * 0.65)),
+                .fill(p.paper.with_alpha(hero_life * tag_in * 0.65))
+                .place_at(Vec2(CX - half_span - 1.0, y - tick_h * 0.5)),
         )
         .child(
-            Rect::builder()
-                .position(Vec2(CX + half_span - 1.0, y - tick_h * 0.5))
+            Rectangle::builder()
                 .size(Vec2(2.0, tick_h))
-                .color(p.paper.with_alpha(hero_life * tag_in * 0.65)),
+                .fill(p.paper.with_alpha(hero_life * tag_in * 0.65))
+                .place_at(Vec2(CX + half_span - 1.0, y - tick_h * 0.5)),
         )
         .child(
-            Rect::builder()
-                .position(Vec2(CX - half_span * tag_in, y - 1.0))
+            Rectangle::builder()
                 .size(Vec2(half_span * 2.0 * tag_in, 2.0))
-                .color(p.paper.with_alpha(hero_life * tag_in * 0.55)),
+                .fill(p.paper.with_alpha(hero_life * tag_in * 0.55))
+                .place_at(Vec2(CX - half_span * tag_in, y - 1.0)),
         )
         .child(
-            Label::builder()
-                .position(Vec2(CX, y + 18.0))
-                .anchor(Anchor::TOP_CENTER)
-                .text("L = 280 PX")
+            Text::builder()
+                .font(MONOSPACE.clone())
                 .size(12.0)
-                .color(p.paper.with_alpha(hero_life * tag_in * 0.75))
-                .weight(Weight::NORMAL),
+                .weight(Weight::NORMAL)
+                .fill(p.paper.with_alpha(hero_life * tag_in * 0.75))
+                .span(TextSpan::plain("L = 280 PX"))
+                .anchored(Anchor::TOP_CENTER)
+                .snap_to(Vec2(CX, y + 18.0)),
         )
         .build()
 }

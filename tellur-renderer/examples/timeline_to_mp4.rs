@@ -42,8 +42,7 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 /// is at this component's own tree root; every child below it is buildless.
 #[component(raster)]
 fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
-    let (phase, _) = t.bounce(2.5);
-    let rx = phase.linear(0.0, 1.0);
+    let rx = t.bounce(2.5).linear(0.0, 1.0);
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))

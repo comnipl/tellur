@@ -74,6 +74,10 @@ pub trait VectorBuilderTransform: VectorBuilder {
         self.build_component().transform(transform)
     }
 
+    fn transform_around(self, anchor: Anchor, transform: Transform) -> Transformed {
+        self.build_component().transform_around(anchor, transform)
+    }
+
     fn opacity(self, opacity: f32) -> Transformed {
         self.build_component().opacity(opacity)
     }
