@@ -26,6 +26,7 @@ mod overlay;
 mod overture;
 mod resolve;
 mod scan;
+mod streak;
 
 use tellur_core::builder::{RasterEffect, VectorBuilderPlacement};
 use tellur_core::color::Color;
@@ -34,7 +35,7 @@ use tellur_core::layer::VectorLayer;
 use tellur_core::time::Time;
 use tellur_core::timeline_component::{Clock, TimedBuilder, TimelineComponent};
 use tellur_core::timeline_container::Timeline;
-use tellur_renderer::{DropShadow, Rasterizable, RasterizableBuilder};
+use tellur_renderer::{DropShadow, MotionBlur, Rasterizable, RasterizableBuilder};
 
 use common::{Palette, DURATION, SCENE_SIZE};
 use hud::{Hud, HUD_INTRO_END, HUD_INTRO_START, HUD_OUTRO_END, HUD_OUTRO_START};
@@ -48,6 +49,7 @@ use overlay::{
 use overture::Overture;
 use resolve::Resolve;
 use scan::Scan;
+use streak::{Streak, STREAK_SAMPLES, STREAK_SHUTTER};
 
 // The scene palette. Constant, so it is hoisted out of the per-frame body.
 const PALETTE: Palette = Palette {
@@ -67,6 +69,16 @@ fn KineticMotion() -> impl TimelineComponent {
         // overlay's length — every other child is a `.fill()`, and an
         // all-fill overlay has no length anchor and would collapse to 0.
         .child(Foreground::builder().at(0.0..DURATION))
+        // The motion-blur showcase: the wrapper goes INSIDE the placement
+        // verb (`MotionBlur` around the section, then `.fill()`) so the
+        // container still sees the `Placed` and can resolve the fill.
+        .child(
+            MotionBlur::builder()
+                .shutter(STREAK_SHUTTER)
+                .samples(STREAK_SAMPLES)
+                .child(StreakSection::builder().build())
+                .fill(),
+        )
         .child(HudSection::builder().fill())
         .child(OverlaySection::builder().fill())
         .build()
@@ -153,6 +165,17 @@ fn HudSection(#[clock] clock: Clock) -> impl TimelineComponent {
         section: hud::section_index_at(t.seconds()),
     }
     .rasterize()
+}
+
+/// The comet pass, rasterized as its own layer so the wrapping
+/// [`MotionBlur`] samples just this subtree across its shutter. While a
+/// dash runs, each shutter sample bakes a different comet position (its own
+/// cache entry); during the rests every sample collapses to one entry and
+/// the blur short-circuits.
+#[tellur_core::component(timeline, name = "Streak")]
+fn StreakSection(#[clock] clock: Clock) -> impl TimelineComponent {
+    let t = clock.local();
+    Streak::builder().time(t).palette(PALETTE).rasterize()
 }
 
 /// The unshadowed overlay pass: boot flash, transition flash, exit fade.
