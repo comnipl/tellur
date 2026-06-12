@@ -100,6 +100,44 @@ select option {
   color: var(--text-primary);
 }
 
+/* Generic CSS-only tooltip: any element with a `data-tooltip` attribute grows a
+   small dark pill (same look as the panel heading pills) centered above itself
+   on hover or keyboard focus. Used instead of the native `title` attribute so
+   the styling and show delay match the UI. The pill is click-through and only
+   fades in after a short delay so quick mouse passes don't flash labels. */
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 8px;
+  color: #f2f2f4;
+  background: #3f3f42;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  line-height: 1.4;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s, visibility 0.12s;
+  pointer-events: none;
+  z-index: 10;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0.3s;
+}
+
 .app {
   display: grid;
   grid-template-rows: var(--header-h) minmax(0, 1fr);
@@ -464,37 +502,29 @@ select option {
   color: var(--text-secondary);
 }
 
-/* On/off toggle button (e.g. Motion Blur) in the right control cluster. Typography
-   matches the bare <select> controls; the small dot carries the on/off state —
-   accent-colored when on, faint when off — with the label dimmed while off. */
+/* Icon-only on/off toggle (e.g. Motion Blur) in the right control cluster. Same
+   geometry as .transport__btn; the state lives in the icon color — accent when
+   on, faint when off (dimmer than plain buttons so "off" reads as a state, not
+   just an idle control). The label is provided by aria-label + data-tooltip. */
 .transport__toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 650;
-  transition: color 0.12s;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  color: var(--text-faint);
+  border-radius: 4px;
+  transition: color 0.12s, background 0.12s;
 }
 
 .transport__toggle:hover {
-  color: var(--text-primary);
+  color: var(--text-muted);
+  background: var(--bg-control);
 }
 
-.transport__toggle--on {
-  color: var(--text-secondary);
-}
-
-.transport__toggle-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-faint);
-  transition: background 0.12s;
-}
-
-.transport__toggle--on .transport__toggle-dot {
-  background: var(--accent-pink);
+.transport__toggle--on,
+.transport__toggle--on:hover {
+  color: var(--accent-pink);
 }
 
 /* Inspector: a general detail panel for the selected timeline node, sitting to
