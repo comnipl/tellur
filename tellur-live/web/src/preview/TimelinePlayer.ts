@@ -57,6 +57,20 @@ const STALL_GAP_JUMP_MAX = 0.25;
 // this long. The ticker kicks the fill loop every animation frame, so without a
 // backoff a persistently failing server gets hammered ~60 times per second.
 const STREAM_ERROR_BACKOFF_MS = 1000;
+// Buffered lead required past the playhead before playback STARTS (the reveal), and
+// the larger lead required before it RESUMES after starving mid-clip. Without a lead,
+// a stream that encodes at ~1x realtime glues the playhead to the live edge and
+// playback inches forward one GOP fragment (fps/4 ≈ 12-15 frames) at a time — a
+// rhythmic micro-stutter. With it, playback rides a cushion: encode-at-speed plays
+// smoothly, and slower-than-realtime degrades to a few clean rebuffers instead.
+// Either lead is satisfied early when the buffer already reaches the timeline tail.
+const PLAYBACK_LEAD = 1;
+const REBUFFER_LEAD = 2;
+// Consecutive no-progress ticks (~100ms) and the look-ahead probe distance that
+// classify a stall as "starved at the live edge" (vs a seam gap, which has data
+// right behind it and is handled by the nudge watchdog).
+const STARVE_TICKS = 6;
+const STARVE_PROBE = 0.2;
 
 // A/V-with-FLAC variants FIRST: the preview stream ALWAYS carries a FLAC audio track
 // (silent when the timeline has no audio), so the SourceBuffer must declare the audio
@@ -184,6 +198,9 @@ export class TimelinePlayer {
   // Earliest time (Date.now ms) the fill loop may issue another stream fetch after a
   // failure; 0 when streaming is healthy.
   private streamBlockedUntil = 0;
+  // True while playback is parked (element paused, mode still "playing") waiting for
+  // the REBUFFER_LEAD to build after starving at the live edge.
+  private rebuffering = false;
   private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   // One-shot "reveal the playhead and (if playing) start" once its chunk is buffered.
   private pendingReveal: { target: number; fillGen: number } | null = null;
@@ -226,6 +243,7 @@ export class TimelinePlayer {
     this.position = target;
     this.fillGen++;
     this.lastEvictedTo = 0;
+    this.rebuffering = false;
     this.abortInflight();
     this.clearSeekDebounce();
     this.emitTime(target);
@@ -322,6 +340,7 @@ export class TimelinePlayer {
     this.video.pause();
     this.stopTicker();
     this.mode = "priming";
+    this.rebuffering = false;
     this.pendingReveal = null;
     this.events.onPlaying?.(false);
     this.emitTime(this.position);
@@ -896,8 +915,23 @@ export class TimelinePlayer {
     const pending = this.pendingReveal;
     if (!pending || this.disposed || pending.fillGen !== this.fillGen) return;
     if (!this.isTimeBuffered(pending.target)) return;
+    // Starting playback the instant the first fragment lands would pin the playhead
+    // to the live edge (GOP-cadence stutter when encoding runs near realtime); wait
+    // for a lead. Paused reveals (frame display) need no lead — show the frame now.
+    if (this.mode === "playing" && !this.hasLead(pending.target, PLAYBACK_LEAD)) {
+      return;
+    }
     this.pendingReveal = null;
     await this.revealAt(pending.target, this.mode === "playing", pending.fillGen);
+  }
+
+  // Whether at least `lead` seconds are buffered contiguously past `t`, or the buffer
+  // already reaches everything the timeline can produce (the tail lands a few frames
+  // short of duration, hence the END_STALL_TAIL allowance).
+  private hasLead(t: number, lead: number): boolean {
+    const end = this.bufferedEndContaining(t);
+    if (end - t >= lead) return true;
+    return end >= this.config.duration - END_STALL_TAIL;
   }
 
   private async revealAt(
@@ -980,6 +1014,7 @@ export class TimelinePlayer {
 
   private startTicker(gen: number): void {
     this.stopTicker();
+    this.rebuffering = false;
     let lastTime = -1;
     let stalledTicks = 0;
     let settled = false;
@@ -1006,7 +1041,24 @@ export class TimelinePlayer {
           this.settleAtEnd();
           return;
         }
-        if (stalledTicks >= STALL_NUDGE_TICKS) {
+        if (this.rebuffering) {
+          if (this.hasLead(t, REBUFFER_LEAD)) {
+            this.rebuffering = false;
+            // Rejection = pause()/seek() landed first and owns the element now.
+            void this.video.play().catch(() => {});
+          }
+        } else if (
+          stalledTicks >= STARVE_TICKS &&
+          !this.video.paused &&
+          !this.isTimeBuffered(t + STARVE_PROBE)
+        ) {
+          // Starved at the live edge mid-clip: park and rebuild a lead instead of
+          // resuming the moment one GOP fragment lands (which inches playback
+          // forward 12-15 frames at a time). The element stays on its last frame
+          // and mode stays "playing", so the UI keeps its playing state.
+          this.rebuffering = true;
+          this.video.pause();
+        } else if (stalledTicks >= STALL_NUDGE_TICKS) {
           stalledTicks = 0;
           this.nudgeThroughStall(t);
         }
@@ -1070,6 +1122,7 @@ export class TimelinePlayer {
   private settleAtEnd(): void {
     if (this.disposed || this.mode !== "playing") return;
     this.stopTicker();
+    this.rebuffering = false;
     try {
       this.video.pause();
     } catch {
