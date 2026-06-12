@@ -86,6 +86,17 @@ pub trait RenderContext {
         None
     }
 
+    /// Whether temporal effects should sample and average across their
+    /// shutter window this frame.
+    ///
+    /// A policy signal like [`gpu_preference`](Self::gpu_preference): a
+    /// preview host can switch it off to trade motion blur for cheaper
+    /// frames, and a temporal effect must then degrade to its unblurred
+    /// child render. Defaults to `true` so offline exports stay exact.
+    fn motion_blur_enabled(&self) -> bool {
+        true
+    }
+
     /// Renders `component` at the given logical `size` into a
     /// `target`-sized pixel buffer, possibly returning a cached result
     /// from a previous identical request.
@@ -168,6 +179,21 @@ pub trait GpuRasterBackend {
     /// Lets solid-color leaves (backgrounds, transparent spacers) start
     /// life on the GPU instead of being CPU-filled and uploaded.
     fn solid_fill(&mut self, target: Resolution, color: Color) -> Option<RasterImage>;
+
+    /// Averages `frames` over `total` shutter samples into one
+    /// `target`-sized image (a motion-blur accumulate).
+    ///
+    /// Every frame must already be `target`-sized; samples beyond
+    /// `frames.len()` count as fully transparent, so a child that
+    /// contributed no frame for part of the shutter fades out instead of
+    /// brightening. The average is computed in premultiplied integer
+    /// space and must match the CPU fallback byte-for-byte.
+    fn temporal_average(
+        &mut self,
+        target: Resolution,
+        frames: &[&RasterImage],
+        total: u32,
+    ) -> Option<RasterImage>;
 
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage>;
 }

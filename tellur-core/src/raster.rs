@@ -61,6 +61,30 @@ impl RasterImage {
             Self::Gpu(_) => Err(self),
         }
     }
+
+    /// Whether two images share the same backing storage (one `Bytes`
+    /// allocation / one GPU handle).
+    ///
+    /// A cheap identity check, not a pixel comparison: a caching render
+    /// context hands out clones of one cache entry, so shared storage ⇒
+    /// pixel-identical images. `false` carries no information — equal
+    /// pixels in distinct buffers also compare `false`.
+    pub fn shares_storage(&self, other: &RasterImage) -> bool {
+        match (self, other) {
+            (Self::Cpu(a), Self::Cpu(b)) => {
+                a.pixels.len() == b.pixels.len() && a.pixels.as_ptr() == b.pixels.as_ptr()
+            }
+            (Self::Gpu(a), Self::Gpu(b)) => {
+                // Compare the Arc data pointers as thin pointers so the
+                // (non-unique) trait-object vtable half never participates.
+                std::ptr::eq(
+                    Arc::as_ptr(&a.handle) as *const (),
+                    Arc::as_ptr(&b.handle) as *const (),
+                )
+            }
+            _ => false,
+        }
+    }
 }
 
 impl From<CpuRasterImage> for RasterImage {

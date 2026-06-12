@@ -25,6 +25,8 @@ pub struct GpuRenderer {
     outline_pipeline: wgpu::ComputePipeline,
     texture_to_buffer_pipeline: wgpu::ComputePipeline,
     fill_pipeline: wgpu::ComputePipeline,
+    motion_accum_pipeline: wgpu::ComputePipeline,
+    motion_resolve_pipeline: wgpu::ComputePipeline,
     vello_renderer: Option<vello::Renderer>,
     stats: GpuRenderStats,
     // Per-resolution scratch reused across frames instead of reallocated each
@@ -42,12 +44,18 @@ pub struct GpuRenderStats {
     pub outlines: u64,
     pub rasterizes: u64,
     pub fills: u64,
+    pub temporal_averages: u64,
     pub readbacks: u64,
 }
 
 impl GpuRenderStats {
     pub fn total_ops(self) -> u64 {
-        self.composites + self.drop_shadows + self.outlines + self.rasterizes + self.fills
+        self.composites
+            + self.drop_shadows
+            + self.outlines
+            + self.rasterizes
+            + self.fills
+            + self.temporal_averages
     }
 }
 
@@ -146,6 +154,20 @@ struct FillParams {
 unsafe impl bytemuck::Zeroable for FillParams {}
 unsafe impl bytemuck::Pod for FillParams {}
 
+/// Shared by the motion accumulate and resolve passes; the accumulate pass
+/// ignores `total`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MotionPassParams {
+    width: u32,
+    height: u32,
+    total: u32,
+    _pad0: u32,
+}
+
+unsafe impl bytemuck::Zeroable for MotionPassParams {}
+unsafe impl bytemuck::Pod for MotionPassParams {}
+
 impl GpuRenderer {
     pub fn new() -> Result<Self, String> {
         pollster::block_on(Self::new_async())
@@ -197,6 +219,16 @@ impl GpuRenderer {
                 TEXTURE_TO_BUFFER_SHADER,
             ),
             fill_pipeline: compute_pipeline(&device, "tellur-solid-fill", FILL_SHADER),
+            motion_accum_pipeline: compute_pipeline(
+                &device,
+                "tellur-motion-accum",
+                &format!("{COMMON_WGSL}{MOTION_ACCUM_SHADER}"),
+            ),
+            motion_resolve_pipeline: compute_pipeline(
+                &device,
+                "tellur-motion-resolve",
+                &format!("{COMMON_WGSL}{MOTION_RESOLVE_SHADER}"),
+            ),
             device,
             queue,
             vello_renderer: None,
@@ -767,6 +799,75 @@ impl GpuRasterBackend for GpuRenderer {
         let image = self.filled_image(target, packed);
         self.stats.fills = self.stats.fills.saturating_add(1);
         Some(self.raster_image(image))
+    }
+
+    fn temporal_average(
+        &mut self,
+        target: Resolution,
+        frames: &[&RasterImage],
+        total: u32,
+    ) -> Option<RasterImage> {
+        if total == 0 || frames.is_empty() || frames.len() as u32 > total {
+            return None;
+        }
+        // Resolve every source up front so an unsupported frame bails before
+        // any GPU work is encoded.
+        let mut sources = Vec::with_capacity(frames.len());
+        for frame in frames {
+            if frame.width() != target.width || frame.height() != target.height {
+                return None;
+            }
+            let src = self.image_ref(frame)?;
+            if src.format != PixelFormat::Rgba8 {
+                return None;
+            }
+            sources.push(src);
+        }
+
+        // Premultiplied u32 channel sums, 4 words per pixel. A fresh wgpu
+        // buffer is zero-initialized, so accumulation starts from zero
+        // without an explicit clear pass.
+        let acc_len = (target.width as u64) * (target.height as u64) * 16;
+        let acc = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tellur-gpu-motion-acc"),
+            size: acc_len,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let out = self.empty_image(target);
+
+        let params = MotionPassParams {
+            width: target.width,
+            height: target.height,
+            total,
+            _pad0: 0,
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tellur-gpu-temporal-average"),
+            });
+        for src in &sources {
+            dispatch_three_buffer(
+                &self.device,
+                &mut encoder,
+                &self.motion_accum_pipeline,
+                [&acc, &src.buffer],
+                &params,
+                DispatchSize::new(target.width, target.height),
+            );
+        }
+        dispatch_three_buffer(
+            &self.device,
+            &mut encoder,
+            &self.motion_resolve_pipeline,
+            [&acc, &out.buffer],
+            &params,
+            DispatchSize::new(target.width, target.height),
+        );
+        self.queue.submit(Some(encoder.finish()));
+        self.stats.temporal_averages = self.stats.temporal_averages.saturating_add(1);
+        Some(self.raster_image(out))
     }
 
     fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage> {
@@ -1445,6 +1546,76 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
+// One shutter sample into the premultiplied u32 sums (4 words per pixel).
+// Integer math throughout so the GPU result is byte-identical to the CPU
+// fallback in `motion_blur.rs` — keep the two in lockstep.
+const MOTION_ACCUM_SHADER: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    total: u32,
+    pad0: u32,
+}
+
+@group(0) @binding(0) var<storage, read_write> acc: array<u32>;
+@group(0) @binding(1) var<storage, read> src: array<u32>;
+@group(0) @binding(2) var<storage, read> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let x = id.x;
+    let y = id.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    let idx = y * params.width + x;
+    let s = unpack_rgba(src[idx]);
+    let base = idx * 4u;
+    acc[base] = acc[base] + s.x * s.w;
+    acc[base + 1u] = acc[base + 1u] + s.y * s.w;
+    acc[base + 2u] = acc[base + 2u] + s.z * s.w;
+    acc[base + 3u] = acc[base + 3u] + s.w;
+}
+"#;
+
+// Resolve the sums into straight-alpha RGBA8: color = the alpha-weighted
+// average of the straight source colors (rounded), alpha = the mean over
+// ALL `total` shutter samples — missing samples counted as transparent.
+const MOTION_RESOLVE_SHADER: &str = r#"
+struct Params {
+    width: u32,
+    height: u32,
+    total: u32,
+    pad0: u32,
+}
+
+@group(0) @binding(0) var<storage, read> acc: array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+@group(0) @binding(2) var<storage, read> params: Params;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let x = id.x;
+    let y = id.y;
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    let idx = y * params.width + x;
+    let base = idx * 4u;
+    let sum_a = acc[base + 3u];
+    if (sum_a == 0u) {
+        dst[idx] = 0u;
+        return;
+    }
+    let half = sum_a / 2u;
+    let r = min((acc[base] + half) / sum_a, 255u);
+    let g = min((acc[base + 1u] + half) / sum_a, 255u);
+    let b = min((acc[base + 2u] + half) / sum_a, 255u);
+    let a = min((sum_a + params.total / 2u) / params.total, 255u);
+    dst[idx] = pack_rgba(vec4<u32>(r, g, b, a));
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,6 +1642,49 @@ mod tests {
 
     fn readback(gpu: &mut GpuRenderer, image: RasterImage) -> CpuRasterImage {
         GpuRasterBackend::readback(gpu, image).expect("GPU image should read back")
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn temporal_average_matches_cpu_average() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let target = Resolution::new(2, 2);
+        let a = image(
+            2,
+            2,
+            &[
+                255, 0, 0, 255, //
+                0, 255, 0, 128, //
+                0, 0, 255, 0, //
+                10, 20, 30, 40,
+            ],
+        );
+        let b = image(
+            2,
+            2,
+            &[
+                0, 0, 0, 0, //
+                255, 255, 255, 255, //
+                0, 0, 255, 64, //
+                200, 100, 50, 130,
+            ],
+        );
+        // total = 3 leaves one sample missing, exercising the fade divisor.
+        let total = 3;
+
+        let rendered =
+            GpuRasterBackend::temporal_average(&mut gpu, target, &[&a, &b], total).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+
+        let cpu_frames: Vec<CpuRasterImage> = [&a, &b]
+            .iter()
+            .map(|img| img.as_cpu().expect("test inputs are CPU images").clone())
+            .collect();
+        let expected = crate::motion_blur::average_frames_cpu(&cpu_frames, total, target);
+        let expected = expected.as_cpu().expect("CPU average is a CPU image");
+        assert_eq!(rendered.pixels.as_ref(), expected.pixels.as_ref());
     }
 
     #[test]

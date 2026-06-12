@@ -37,7 +37,13 @@ pub use tellur_core as __core;
 /// so a stale 2-method `v1` `.so` would dlsym/transmute fine yet hit a
 /// vtable-slot UB at call time. Renaming the symbol makes the lookup fail
 /// cleanly on an old plugin instead.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v2\0";
+///
+/// Bumped to `v3` for motion blur: `RenderContext` (which the host passes
+/// across the boundary as `&mut dyn`) gained the `motion_blur_enabled`
+/// vtable slot and `GpuRasterBackend` gained `temporal_average`, so a `v2`
+/// plugin calling through a `v3` host context would hit the same class of
+/// vtable mismatch.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v3\0";
 
 /// The signature of the [`ENTRY_SYMBOL`] entry point a plugin exports.
 pub type EntryFn = unsafe extern "Rust" fn() -> Box<dyn TimelineCollection>;
@@ -270,14 +276,14 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
 macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v2(
+        pub extern "Rust" fn tellur_timeline_collection_v3(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
     };
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v2(
+        pub extern "Rust" fn tellur_timeline_collection_v3(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -301,7 +307,7 @@ macro_rules! export_timeline {
 macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v2(
+        pub extern "Rust" fn tellur_timeline_collection_v3(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -317,7 +323,7 @@ macro_rules! export_legacy_timeline {
 macro_rules! export_timeline_collection {
     ($builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v2(
+        pub extern "Rust" fn tellur_timeline_collection_v3(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
