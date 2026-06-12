@@ -20,6 +20,13 @@ const KEEP_BEHIND = 6;
 // (seek away) wastes at most this much, and a completed piece is a self-contained,
 // frame-aligned cached segment.
 const STREAM_PIECE = 3;
+// Minimum length for a cached segment row to be worth re-appending from IndexedDB.
+// Shorter rows (shards from the old lookahead-clamped frontier) are streamed over in
+// full pieces instead — putSegment's subsume then deletes them, so a fragmented store
+// heals itself. Re-appending shards one by one is strictly worse: every segmentAt is
+// a cursor walk over ALL of the group's rows, and every shard seam is a potential
+// sub-frame gap for playback to trip on.
+const MIN_SEGMENT_REUSE = 1;
 // Paused scrubbing fires many seeks; defer the actual FETCH until the playhead has been
 // quiet this long so a drag issues ~1 fetch at its resting point, not 120.
 const SEEK_DEBOUNCE_MS = 150;
@@ -530,11 +537,17 @@ export class TimelinePlayer {
 
       // Covered by a committed cache range (in-memory check — NO IndexedDB on the hot /
       // cold-streaming path)? Only then fetch the exact segment blob to re-append it
-      // (this only happens for a cached segment the UA evicted from MSE).
+      // (this only happens for a cached segment the UA evicted from MSE). Shard rows
+      // are not reused (see MIN_SEGMENT_REUSE) — fall through and stream over them,
+      // except at the timeline tail, where a legitimately short final piece lives.
       if (this.cachedRangeContaining(cursor)) {
         const seg = await cache.segmentAt(groupKey, cursor);
         if (this.disposed || gen !== this.fillGen) return;
-        if (seg && seg.end > cursor + EPSILON) {
+        const reusable =
+          seg != null &&
+          (seg.end - seg.start >= MIN_SEGMENT_REUSE ||
+            seg.end >= duration - EPSILON);
+        if (seg && reusable && seg.end > cursor + EPSILON) {
           await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
           if (this.disposed || gen !== this.fillGen) return;
           if (!this.isTimeBuffered(cursor)) {
@@ -552,11 +565,16 @@ export class TimelinePlayer {
           cursor = Math.max(cursor + EPSILON, seg.end);
           continue;
         }
-        // segment unexpectedly missing — fall through and stream the gap.
+        // Row missing or a shard — fall through and stream over it.
       }
 
       // Cache miss: stream FORWARD from the cursor (frame-aligned), bounded by the next
-      // committed cache range (in-memory), the lookahead target, and STREAM_PIECE.
+      // committed cache range (in-memory) and STREAM_PIECE. Deliberately NOT bounded by
+      // targetEnd: the lookahead only gates WHEN to stream (the window check above), never
+      // the piece size. Clamping the piece to the moving lookahead edge degenerates the
+      // frontier into per-tick frame-sized requests once it catches up — each one a fresh
+      // server encode and a one-frame IndexedDB row — grinding forward caching far below
+      // realtime and fragmenting the store.
       // While the post-failure backoff is armed, end this pass instead of fetching —
       // the ticker re-kicks the fill every frame, so the retry happens as soon as the
       // backoff expires.
@@ -564,7 +582,6 @@ export class TimelinePlayer {
       const start = this.frameAlign(cursor);
       const end = Math.min(
         this.nextCachedStart(cursor),
-        targetEnd,
         start + STREAM_PIECE,
         duration,
       );
@@ -1018,6 +1035,12 @@ export class TimelinePlayer {
   private nudgeThroughStall(t: number): void {
     const sb = this.sourceBuffer;
     if (!sb || this.video.paused) return;
+    // The stall is just buffering: the in-flight stream brackets the playhead, so its
+    // data is en route — jumping now would skip real frames that are about to land.
+    const inflight = this.inflight;
+    if (inflight && inflight.start <= t + EPSILON && inflight.end > t + EPSILON) {
+      return;
+    }
     let containedEnd = t;
     let nextStart = Infinity;
     try {
