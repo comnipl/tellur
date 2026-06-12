@@ -40,6 +40,7 @@ export interface PreviewSettings {
   timeline: TimelineInfo | null;
   resolution: PreviewResolution;
   fps: number;
+  motionBlur: boolean;
 }
 
 // Thin React shell over TimelinePlayer (which owns all MSE/cache logic). The hook's
@@ -47,7 +48,7 @@ export interface PreviewSettings {
 // plugin/resolution/fps/timeline "group" changes, mirror the player's events into
 // React state, and fetch the paused/seek PNG still the player asks it to display.
 export function usePreview(settings: PreviewSettings): PreviewControls {
-  const { info, timeline, resolution, fps } = settings;
+  const { info, timeline, resolution, fps, motionBlur } = settings;
   const pluginKey = info?.cacheKey ?? "";
   const timelineId = timeline?.id ?? "";
   const duration = timeline?.duration ?? 0;
@@ -57,8 +58,17 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
   const groupKey = useMemo(
     () =>
-      groupKeyOf({ pluginKey, timelineId, width, height, fps, gop, crf: CRF }),
-    [pluginKey, timelineId, width, height, fps, gop],
+      groupKeyOf({
+        pluginKey,
+        timelineId,
+        width,
+        height,
+        fps,
+        motionBlur,
+        gop,
+        crf: CRF,
+      }),
+    [pluginKey, timelineId, width, height, fps, motionBlur, gop],
   );
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -104,9 +114,9 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   }, []);
 
   // (Re)create the player whenever the group identity changes. groupKey folds the
-  // plugin cacheKey, timeline, resolution, fps and encode params — so an unchanged
-  // plugin reload (same cacheKey string from the SSE churn) does NOT recreate it,
-  // while a real plugin/resolution/fps change tears down + rebuilds MSE.
+  // plugin cacheKey, timeline, resolution, fps, motion blur and encode params — so an
+  // unchanged plugin reload (same cacheKey string from the SSE churn) does NOT recreate
+  // it, while a real plugin/resolution/fps/motion-blur change tears down + rebuilds MSE.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !groupKey || !pluginKey || !timelineId || duration <= 0) {
@@ -124,6 +134,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         width,
         height,
         fps,
+        motionBlur,
         gop,
         crf: CRF,
         duration: segmentDuration,
@@ -146,6 +157,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         width,
         height,
         fps,
+        motionBlur,
         cacheKey: pluginKey,
       });
       const token = ++stillTokenRef.current;
@@ -242,7 +254,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       playerRef.current = null;
       void player?.dispose();
     };
-  }, [groupKey, pluginKey, timelineId, duration, width, height, fps, gop, setSeconds]);
+  }, [groupKey, pluginKey, timelineId, duration, width, height, fps, motionBlur, gop, setSeconds]);
 
   // Revoke the last still URL on unmount.
   useEffect(

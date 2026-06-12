@@ -33,6 +33,7 @@ export interface FrameRequestParams {
   width: number;
   height: number;
   fps: number;
+  motionBlur: boolean;
   cacheKey: string;
 }
 
@@ -43,6 +44,7 @@ export function frameUrl(params: FrameRequestParams): string {
     width: String(params.width),
     height: String(params.height),
     fps: String(params.fps),
+    motion_blur: params.motionBlur ? "1" : "0",
     format: "png",
     v: params.cacheKey,
   });
@@ -62,6 +64,7 @@ export function videoUrl(params: VideoRequestParams): string {
     width: String(params.width),
     height: String(params.height),
     fps: String(params.fps),
+    motion_blur: params.motionBlur ? "1" : "0",
     gop: String(params.gop),
     crf: String(params.crf),
     v: params.cacheKey,

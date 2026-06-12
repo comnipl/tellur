@@ -464,6 +464,39 @@ select option {
   color: var(--text-secondary);
 }
 
+/* On/off toggle button (e.g. Motion Blur) in the right control cluster. Typography
+   matches the bare <select> controls; the small dot carries the on/off state —
+   accent-colored when on, faint when off — with the label dimmed while off. */
+.transport__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  transition: color 0.12s;
+}
+
+.transport__toggle:hover {
+  color: var(--text-primary);
+}
+
+.transport__toggle--on {
+  color: var(--text-secondary);
+}
+
+.transport__toggle-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: background 0.12s;
+}
+
+.transport__toggle--on .transport__toggle-dot {
+  background: var(--accent-pink);
+}
+
 /* Inspector: a general detail panel for the selected timeline node, sitting to
    the right of the preview in the top row. Styled to match the other panels
    (panel bg, border, radius) with its own internal padding and a small heading.

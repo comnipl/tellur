@@ -13,12 +13,14 @@ interface TransportProps {
   measuredFps: number;
   resolution: PreviewResolution;
   resolutionOptions: ResolutionOption[];
+  motionBlur: boolean;
   playing: boolean;
   onTogglePlay: () => void;
   onStep: (delta: number) => void;
   onRewind: () => void;
   onResolutionChange: (resolution: PreviewResolution) => void;
   onFpsChange: (fps: number) => void;
+  onMotionBlurChange: (motionBlur: boolean) => void;
 }
 
 const FPS_OPTIONS = [60, 30, 24, 15, 12];
@@ -31,12 +33,14 @@ export function Transport(props: TransportProps) {
     measuredFps,
     resolution,
     resolutionOptions,
+    motionBlur,
     playing,
     onTogglePlay,
     onStep,
     onRewind,
     onResolutionChange,
     onFpsChange,
+    onMotionBlurChange,
   } = props;
   const selectedResolutionKey = resolutionKey(resolution);
 
@@ -98,6 +102,25 @@ export function Transport(props: TransportProps) {
         </button>
       </div>
       <div className="transport__right">
+        <button
+          type="button"
+          className={
+            motionBlur
+              ? "transport__toggle transport__toggle--on"
+              : "transport__toggle"
+          }
+          aria-pressed={motionBlur}
+          aria-label={motionBlur ? "Disable motion blur" : "Enable motion blur"}
+          // Blur after activation so focus doesn't stay on the button and
+          // swallow the global Space/arrow keyboard shortcuts.
+          onClick={(e) => {
+            onMotionBlurChange(!motionBlur);
+            e.currentTarget.blur();
+          }}
+        >
+          <span className="transport__toggle-dot" />
+          Motion Blur
+        </button>
         <label className="transport__control">
           <select
             value={fps}

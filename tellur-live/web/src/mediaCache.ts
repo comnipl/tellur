@@ -67,6 +67,7 @@ export interface ChunkGroupParams {
   width: number;
   height: number;
   fps: number;
+  motionBlur: boolean;
   gop: number;
   crf: number;
 }
@@ -94,6 +95,7 @@ export function groupKeyOf(p: ChunkGroupParams): string {
     p.timelineId,
     `${p.width}x${p.height}`,
     String(p.fps),
+    p.motionBlur ? "mb1" : "mb0",
     String(p.gop),
     String(p.crf),
   ].join("|");

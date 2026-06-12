@@ -50,6 +50,7 @@ export function App() {
     DEFAULT_PREVIEW_RESOLUTION,
   );
   const [fps, setFps] = useState(30);
+  const [motionBlur, setMotionBlur] = useState(true);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
     zoom: DEFAULT_TIMELINE_ZOOM,
@@ -124,6 +125,7 @@ export function App() {
     timeline,
     resolution,
     fps,
+    motionBlur,
   });
 
   useEffect(() => {
@@ -263,12 +265,14 @@ export function App() {
               measuredFps={preview.state.playing ? measuredFps : fps}
               resolution={resolution}
               resolutionOptions={resolutionOptions}
+              motionBlur={motionBlur}
               playing={preview.state.playing}
               onTogglePlay={preview.togglePlay}
               onStep={preview.stepFrame}
               onRewind={preview.rewindToStart}
               onResolutionChange={changeResolution}
               onFpsChange={setFps}
+              onMotionBlurChange={setMotionBlur}
             />
           </section>
           <Inspector node={selectedNode} fps={fps} />
