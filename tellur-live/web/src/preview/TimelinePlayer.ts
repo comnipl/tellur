@@ -35,6 +35,21 @@ const SETTLE_TIMEOUT_MS = 1500;
 // for the end.
 const END_STALL_TICKS = 6;
 const END_STALL_TAIL = 0.5;
+// Mid-clip stall watchdog: while playing, if currentTime makes no progress for this
+// many RAF ticks (~300ms at 60Hz), try to un-stick it. Distinct from END_STALL_*,
+// which only handles the timeline tail. Without this, a sub-frame seam gap (coded
+// frame removal / float jitter where two segments meet) freezes playback forever
+// while the fill loop keeps caching ahead — the green bar grows but the playhead
+// never moves.
+const STALL_NUDGE_TICKS = 18;
+// Max gap (seconds) the watchdog will jump to reach the next buffered range. Seam
+// gaps are sub-frame; anything larger is real missing content that the fill loop
+// must stream first, so jumping it would skip frames the user should see.
+const STALL_GAP_JUMP_MAX = 0.25;
+// After a stream fetch fails (server error / unparsable body), hold off re-fetching
+// this long. The ticker kicks the fill loop every animation frame, so without a
+// backoff a persistently failing server gets hammered ~60 times per second.
+const STREAM_ERROR_BACKOFF_MS = 1000;
 
 // A/V-with-FLAC variants FIRST: the preview stream ALWAYS carries a FLAC audio track
 // (silent when the timeline has no audio), so the SourceBuffer must declare the audio
@@ -56,14 +71,15 @@ export type DisplayMode = "video" | "still";
 
 // How the shell should cover the <video> when switching to a still, chosen so the user
 // never sees a frame for the WRONG time:
-// - "hold":     the <video> already shows the correct frame (pause / end-stop / play from
-//               a parked frame). Keep it on screen and swap to the still only once the
-//               fresh still for stillTime has decoded — a seamless same-frame swap.
+// - "hold":     keep whatever is on screen (the parked video frame or the trailing
+//               still) and swap to the still only once the fresh still for stillTime
+//               has decoded. Used for pause / end-stop / paused scrubs over cold
+//               frames — the current display stays up for continuity, never a flash.
 // - "blank":    the <video> shows a DIFFERENT time (a seek while playing into a cold
 //               region). Clear to the neutral background immediately — never flash a
 //               recognizable stale frame — then show the fresh still when it decodes.
-// - "trailing": a paused scrub. Keep whatever still is already up for drag continuity and
-//               refine it to the fresh frame as each debounced still loads.
+// - "trailing": mount. Show the still layer immediately and refine it once the first
+//               frame loads.
 export type StillCover = "hold" | "blank" | "trailing";
 
 export interface TimelinePlayerEvents {
@@ -158,6 +174,9 @@ export class TimelinePlayer {
 
   private fillActiveGen = -1;
   private lastEvictedTo = 0;
+  // Earliest time (Date.now ms) the fill loop may issue another stream fetch after a
+  // failure; 0 when streaming is healthy.
+  private streamBlockedUntil = 0;
   private seekDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   // One-shot "reveal the playhead and (if playing) start" once its chunk is buffered.
   private pendingReveal: { target: number; fillGen: number } | null = null;
@@ -235,11 +254,23 @@ export class TimelinePlayer {
         this.kickFill();
       }
     } else {
-      // Paused scrub: keep the trailing still up for drag continuity and prime ahead. The
-      // fetch is debounced so a drag doesn't storm the server.
+      // Paused scrub / frame step.
       this.mode = "priming";
-      this.pendingReveal = null;
-      this.setDisplayMode("still", target, "trailing");
+      if (this.isTimeBuffered(target) || this.cachedRangeContaining(target)) {
+        // The frame is locally available (MSE buffer or a committed IndexedDB
+        // segment): show it from the <video> element instead of fetching a PNG
+        // still — no server round-trip. Keep whatever is on screen until the
+        // reveal swaps in the correct frame.
+        this.pendingReveal = { target, fillGen: this.fillGen };
+        void this.revealFromCache(target, this.fillGen);
+      } else {
+        // Cold frame: keep the current display (trailing still or held video
+        // frame) up for drag continuity and swap in the fresh server still once
+        // it decodes. The prime fetch is debounced so a drag doesn't storm the
+        // server.
+        this.pendingReveal = null;
+        this.setDisplayMode("still", target, "hold");
+      }
       this.scheduleDebouncedFill();
     }
   }
@@ -387,6 +418,23 @@ export class TimelinePlayer {
     this.committedRanges = mergeRanges([...this.committedRanges, { start, end }]);
   }
 
+  // Subtract [start, end] from the committed mirror — used when a cached segment turns
+  // out to be unusable, so the fill loop streams the span fresh instead of retrying the
+  // same doomed append forever. IndexedDB is left alone: the replacement putSegment
+  // subsumes the stale row.
+  private uncommitRange(start: number, end: number): void {
+    const next: CacheRange[] = [];
+    for (const r of this.committedRanges) {
+      if (r.end <= start + EPSILON || r.start >= end - EPSILON) {
+        next.push(r);
+        continue;
+      }
+      if (r.start < start - EPSILON) next.push({ start: r.start, end: start });
+      if (r.end > end + EPSILON) next.push({ start: end, end: r.end });
+    }
+    this.committedRanges = next;
+  }
+
   // Quantize a time DOWN to the frame boundary at or before t, so every streamed segment
   // starts exactly on a frame boundary. Two reasons: (1) segments from DIFFERENT seek
   // points stay sample-aligned where they meet (an off-grid start would shift a whole
@@ -489,10 +537,16 @@ export class TimelinePlayer {
         if (seg && seg.end > cursor + EPSILON) {
           await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
           if (this.disposed || gen !== this.fillGen) return;
-          // If the append couldn't land (buffer full, nothing evictable) stop rather than
-          // spin; the segment stays green (it IS in IndexedDB) and re-appends once the
-          // playhead advances and eviction frees room.
-          if (!this.isTimeBuffered(cursor)) return;
+          if (!this.isTimeBuffered(cursor)) {
+            // The append never landed (quota that even eviction couldn't relieve, or
+            // an unparsable blob). Drop the range from the in-memory mirror and
+            // stream it fresh — putSegment subsumes the stale row, so a bad blob
+            // self-heals. Never just stop here: the ticker re-kicks the fill every
+            // animation frame, so a permanently failing append would re-read a
+            // multi-MB blob from IndexedDB at 60Hz while playback stays frozen.
+            this.uncommitRange(seg.start, seg.end);
+            continue;
+          }
           this.emitRanges();
           this.tryResolveReveal();
           cursor = Math.max(cursor + EPSILON, seg.end);
@@ -503,6 +557,10 @@ export class TimelinePlayer {
 
       // Cache miss: stream FORWARD from the cursor (frame-aligned), bounded by the next
       // committed cache range (in-memory), the lookahead target, and STREAM_PIECE.
+      // While the post-failure backoff is armed, end this pass instead of fetching —
+      // the ticker re-kicks the fill every frame, so the retry happens as soon as the
+      // backoff expires.
+      if (Date.now() < this.streamBlockedUntil) return;
       const start = this.frameAlign(cursor);
       const end = Math.min(
         this.nextCachedStart(cursor),
@@ -569,20 +627,27 @@ export class TimelinePlayer {
       // Natural EOF: persist [start, actual buffered end]. The recorded end is the last
       // complete fragment (frame-aligned) so the next segment butts up gaplessly.
       const persistedEnd = Math.max(this.liveEndOf(start, end), start);
-      reached = persistedEnd;
       if (this.inflight === inflight) this.inflight = null;
-      if (persistedEnd > start + EPSILON) {
-        const blob = new Blob(inflight.received, { type: "video/mp4" });
-        const ok = await this.config.cache.putSegment(
-          this.config.groupKey,
-          this.config.pluginKey,
-          start,
-          persistedEnd,
-          blob,
-        );
-        if (this.disposed) return reached;
-        if (ok) this.recordCommitted(start, persistedEnd);
+      if (!(persistedEnd > start + EPSILON)) {
+        // The request completed but yielded nothing appendable (e.g. the sub-frame
+        // tail past the last renderable frame, or every append was refused). Report
+        // the span as covered so the fill cursor moves past it instead of spinning
+        // on the same fetch; a later pass retries it from a fresh cursor anyway.
+        this.emitRanges();
+        return end;
       }
+      reached = persistedEnd;
+      this.streamBlockedUntil = 0;
+      const blob = new Blob(inflight.received, { type: "video/mp4" });
+      const ok = await this.config.cache.putSegment(
+        this.config.groupKey,
+        this.config.pluginKey,
+        start,
+        persistedEnd,
+        blob,
+      );
+      if (this.disposed) return reached;
+      if (ok) this.recordCommitted(start, persistedEnd);
       this.emitRanges();
       return reached;
     } catch (e) {
@@ -594,8 +659,11 @@ export class TimelinePlayer {
         return reached;
       }
       if (this.disposed || gen !== this.fillGen) return reached;
+      // Arm the backoff and skip past the failed span for this pass; without both,
+      // the per-frame kickFill turns a failing server into a fetch storm.
+      this.streamBlockedUntil = Date.now() + STREAM_ERROR_BACKOFF_MS;
       this.events.onError?.(String(e));
-      return reached;
+      return end;
     }
   }
 
@@ -665,26 +733,51 @@ export class TimelinePlayer {
         await this.appendOne(sb, offset, data);
         return;
       } catch (e) {
-        // QuotaExceededError is thrown synchronously when the buffer is full. Evict the
-        // oldest data well behind the playhead and retry; this is the normal path during
-        // long playback, not an edge case.
+        // QuotaExceededError is thrown synchronously when the buffer is full. Evict
+        // and retry; this is the normal path during long playback, not an edge case.
         if (isQuotaExceeded(e) && attempt < 4) {
-          const evictEnd = this.currentPlaybackSeconds() - KEEP_BEHIND;
-          if (evictEnd > EPSILON && this.hasBufferedBefore(evictEnd)) {
-            try {
-              await this.removeRange(sb, 0, evictEnd);
-              continue;
-            } catch {
-              // fall through to give up
-            }
-          }
-          // Nothing evictable (everything is near the playhead): give up this append;
-          // it will be retried as the playhead advances and frees room.
+          if (await this.evictForQuota(sb, offset)) continue;
+          // Nothing evictable: give up this append; it will be retried as the
+          // playhead advances and frees room.
           return;
         }
         throw e;
       }
     }
+  }
+
+  // Free SourceBuffer room for an append at `offset`. Prefer the oldest data well
+  // behind the playhead; when nothing is buffered back there, fall back to evicting
+  // far AHEAD of both the playhead and the appending segment. The far-ahead data is
+  // committed in IndexedDB and re-appends when the playhead approaches, whereas
+  // refusing the append at the playhead would deadlock playback outright (the
+  // playhead can never advance to free room behind itself).
+  private async evictForQuota(sb: SourceBuffer, offset: number): Promise<boolean> {
+    const playhead = this.currentPlaybackSeconds();
+    const behindEnd = playhead - KEEP_BEHIND;
+    if (behindEnd > EPSILON && this.hasBufferedBefore(behindEnd)) {
+      try {
+        await this.removeRange(sb, 0, behindEnd);
+        this.emitRanges();
+        return true;
+      } catch {
+        // fall through to the far-ahead fallback
+      }
+    }
+    // PLAY_AHEAD past both the playhead and the appending segment keeps everything
+    // the player is about to need; segments are at most STREAM_PIECE long, so the
+    // append target itself can never be clipped.
+    const aheadStart = Math.max(playhead, offset) + PLAY_AHEAD;
+    if (this.bufferedEnd() > aheadStart + EPSILON) {
+      try {
+        await this.removeRange(sb, aheadStart, Number.POSITIVE_INFINITY);
+        this.emitRanges();
+        return true;
+      } catch {
+        // give up
+      }
+    }
+    return false;
   }
 
   private async appendOne(
@@ -773,7 +866,9 @@ export class TimelinePlayer {
       kind: "remove",
       start: 0,
       end: evictEnd,
-      settle: () => {},
+      // The green bar includes live buffered ranges, so refresh it once the
+      // eviction lands (committed parts stay green; only uncommitted ones recede).
+      settle: () => this.emitRanges(),
     });
     void this.pump();
   }
@@ -795,20 +890,75 @@ export class TimelinePlayer {
   ): Promise<void> {
     this.video.currentTime = this.clampToBufferedStart(target);
     await this.waitForSettledAfterSeek();
-    if (this.disposed || gen !== this.fillGen) return;
+    if (this.revealInvalidated(startPlaying, gen)) return;
     await this.waitForCurrentData();
-    if (this.disposed || gen !== this.fillGen) return;
+    if (this.revealInvalidated(startPlaying, gen)) return;
     if (startPlaying) {
       try {
         await this.video.play();
       } catch (e) {
-        if (!this.disposed && gen === this.fillGen) this.events.onError?.(String(e));
+        if (this.disposed || gen !== this.fillGen) return;
+        // pause() during the play() settle rejects it with AbortError — the user's
+        // pause already owns the state, so stay quiet. Any other rejection
+        // (autoplay policy etc.) means we are NOT playing: downshift so the UI
+        // doesn't sit in a frozen "playing" state while the fill loop runs ahead.
+        if (this.mode === "playing" && !isAbortError(e)) {
+          this.mode = "priming";
+          this.events.onPlaying?.(false);
+          this.events.onError?.(String(e));
+        }
         return;
       }
-      if (this.disposed || gen !== this.fillGen) return;
+      if (this.revealInvalidated(startPlaying, gen)) {
+        // pause() landed while play() was settling; undo the resume it would
+        // otherwise override (zombie playback with a paused UI).
+        this.video.pause();
+        return;
+      }
       this.startTicker(gen);
     }
     this.setDisplayMode("video", target);
+  }
+
+  // A reveal is stale once the player is disposed, the fill cursor moved on, or the
+  // play/pause mode it was started for no longer matches (pause() or play() landed
+  // between its awaits — the newer action owns the element and the display now).
+  private revealInvalidated(startPlaying: boolean, gen: number): boolean {
+    return (
+      this.disposed ||
+      gen !== this.fillGen ||
+      startPlaying !== (this.mode === "playing")
+    );
+  }
+
+  // Show the frame at `target` straight from the local cache while paused: when MSE
+  // doesn't already hold it, append the IndexedDB segment bracketing it, then let the
+  // pending reveal swap the <video> in. Falls back to the server-still path when the
+  // committed range turns out to be unusable (row evicted / append refused).
+  private async revealFromCache(target: number, gen: number): Promise<void> {
+    try {
+      if (!this.isTimeBuffered(target)) {
+        const seg = await this.config.cache.segmentAt(this.config.groupKey, target);
+        if (this.disposed || gen !== this.fillGen) return;
+        if (seg && seg.end > target + EPSILON) {
+          await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
+          if (this.disposed || gen !== this.fillGen) return;
+          this.emitRanges();
+        }
+      }
+    } catch {
+      // fall through to the still fallback below
+    }
+    if (this.disposed || gen !== this.fillGen) return;
+    if (this.isTimeBuffered(target)) {
+      void this.tryResolveReveal();
+    } else if (this.mode !== "playing") {
+      // Mode check: play() pressed mid-load re-targets pendingReveal at the same
+      // gen — clearing it here would strand playback waiting for a reveal that
+      // never comes. When playing, the fill loop streams the gap and reveals.
+      this.pendingReveal = null;
+      this.setDisplayMode("still", target, "hold");
+    }
   }
 
   private startTicker(gen: number): void {
@@ -839,6 +989,10 @@ export class TimelinePlayer {
           this.settleAtEnd();
           return;
         }
+        if (stalledTicks >= STALL_NUDGE_TICKS) {
+          stalledTicks = 0;
+          this.nudgeThroughStall(t);
+        }
       }
       this.enqueueEviction();
       this.kickFill();
@@ -851,6 +1005,42 @@ export class TimelinePlayer {
     if (this.rafId != null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
+    }
+  }
+
+  // Un-stick a stalled playhead. Three cases:
+  // - parked at a range end with the next range starting within a sub-frame seam gap
+  //   (coded frame removal / float jitter at a segment boundary): jump over the gap —
+  //   the element will not cross it on its own and would otherwise hang forever;
+  // - parked with ample data ahead in its own range (decoder hiccup, or a seek that
+  //   never settled): re-seek in place to re-prime the decoder;
+  // - parked at the live edge genuinely waiting for data: leave it alone.
+  private nudgeThroughStall(t: number): void {
+    const sb = this.sourceBuffer;
+    if (!sb || this.video.paused) return;
+    let containedEnd = t;
+    let nextStart = Infinity;
+    try {
+      const buffered = sb.buffered;
+      for (let i = 0; i < buffered.length; i++) {
+        const start = buffered.start(i);
+        const end = buffered.end(i);
+        if (start <= t + EPSILON && end > t + EPSILON) {
+          containedEnd = Math.max(containedEnd, end);
+        } else if (start > t + EPSILON) {
+          nextStart = Math.min(nextStart, start);
+        }
+      }
+    } catch {
+      return;
+    }
+    if (
+      containedEnd - t <= STALL_GAP_JUMP_MAX &&
+      nextStart - t <= STALL_GAP_JUMP_MAX
+    ) {
+      this.video.currentTime = nextStart;
+    } else if (containedEnd - t > STALL_GAP_JUMP_MAX) {
+      this.video.currentTime = t;
     }
   }
 
@@ -914,14 +1104,35 @@ export class TimelinePlayer {
   }
 
   private emitRanges(): void {
-    // Persistent green = IndexedDB-committed ranges (never shrinks under eviction). Plus
-    // the single in-flight segment's growing live edge.
-    const ranges = [...this.committedRanges];
+    if (this.disposed) return;
+    // The green bar = everything playable without re-fetching from the server:
+    // IndexedDB-committed ranges (never shrink under MSE eviction), the in-flight
+    // segment's growing live edge, and whatever currently sits in the MSE buffer.
+    // The live buffer matters twice: an aborted partial stream stays perfectly
+    // playable even though it was never committed, and when IndexedDB writes fail
+    // the buffer is the only cache there is — committed-only would under-report both.
+    const ranges = [...this.committedRanges, ...this.bufferedRanges()];
     const inflight = this.inflight;
     if (inflight && inflight.liveEnd > inflight.start + EPSILON) {
       ranges.push({ start: inflight.start, end: inflight.liveEnd });
     }
     this.events.onRanges?.(mergeRanges(ranges));
+  }
+
+  private bufferedRanges(): CacheRange[] {
+    const sb = this.sourceBuffer;
+    if (!sb) return [];
+    try {
+      const buffered = sb.buffered;
+      const ranges: CacheRange[] = [];
+      for (let i = 0; i < buffered.length; i++) {
+        ranges.push({ start: buffered.start(i), end: buffered.end(i) });
+      }
+      return ranges;
+    } catch {
+      // buffered throws once the SourceBuffer is detached (teardown).
+      return [];
+    }
   }
 
   // The end of the buffered range containing t (consult LIVE buffered — the UA may have
