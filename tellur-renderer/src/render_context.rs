@@ -172,7 +172,7 @@ impl fmt::Display for CacheMetrics {
         )?;
         writeln!(
             f,
-            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, rasterize {}, fill {}, readback {})",
+            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, rasterize {}, fill {}, temporal_avg {}, readback {})",
             self.gpu_preference,
             self.gpu_init_attempted,
             self.gpu_available,
@@ -182,6 +182,7 @@ impl fmt::Display for CacheMetrics {
             self.gpu.outlines,
             self.gpu.rasterizes,
             self.gpu.fills,
+            self.gpu.temporal_averages,
             self.gpu.readbacks,
         )?;
         if !self.per_type.is_empty() {
@@ -266,6 +267,7 @@ pub struct CachingRenderContext {
     gpu_preference: GpuPreference,
     gpu: Option<GpuRenderer>,
     gpu_init_attempted: bool,
+    motion_blur_enabled: bool,
     // Running total of every `ctx.render` call's inclusive duration.
     // A `render` invocation snapshots this on entry and re-reads it on
     // exit to derive how much time was spent inside nested child
@@ -296,6 +298,7 @@ impl CachingRenderContext {
             gpu_preference: GpuPreference::Auto,
             gpu: None,
             gpu_init_attempted: false,
+            motion_blur_enabled: true,
             total_render_time: Duration::ZERO,
         }
     }
@@ -307,6 +310,16 @@ impl CachingRenderContext {
 
     pub fn set_gpu_preference(&mut self, gpu_preference: GpuPreference) {
         self.gpu_preference = gpu_preference;
+    }
+
+    /// Toggles the [`RenderContext::motion_blur_enabled`] policy signal.
+    ///
+    /// Cache-safe in either direction: temporal effects average their child
+    /// frames at the IMAGE layer (never through a `ctx.render` cache slot),
+    /// so flipping the toggle changes which sub-frames get rendered but
+    /// never aliases a blurred result with an unblurred cache entry.
+    pub fn set_motion_blur_enabled(&mut self, enabled: bool) {
+        self.motion_blur_enabled = enabled;
     }
 
     fn gpu_backend_mut(&mut self) -> Option<&mut GpuRenderer> {
@@ -448,6 +461,10 @@ impl RenderContext for CachingRenderContext {
     fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
         self.gpu_backend_mut()
             .map(|gpu| gpu as &mut dyn GpuRasterBackend)
+    }
+
+    fn motion_blur_enabled(&self) -> bool {
+        self.motion_blur_enabled
     }
 
     fn render(

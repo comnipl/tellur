@@ -383,6 +383,9 @@ impl PreviewApp {
             q.insert("time".to_owned(), seconds.to_string());
             q.insert("width".to_owned(), resolution.width.to_string());
             q.insert("height".to_owned(), resolution.height.to_string());
+            if let Some(motion_blur) = query.get("motion_blur") {
+                q.insert("motion_blur".to_owned(), motion_blur.clone());
+            }
             if let Some(id) = &timeline_id {
                 q.insert("timeline".to_owned(), id.clone());
             }
@@ -441,6 +444,9 @@ impl PreviewApp {
             q.insert("format".to_owned(), "rgba".to_owned());
             q.insert("width".to_owned(), resolution.width.to_string());
             q.insert("height".to_owned(), resolution.height.to_string());
+            if let Some(motion_blur) = query.get("motion_blur") {
+                q.insert("motion_blur".to_owned(), motion_blur.clone());
+            }
             if let Some(id) = &timeline_id {
                 q.insert("timeline".to_owned(), id.clone());
             }
@@ -460,7 +466,9 @@ impl PreviewApp {
         timeline_id: &str,
         seconds: f32,
         resolution: Resolution,
+        motion_blur: bool,
     ) -> Result<VideoFrame, Box<dyn Error>> {
+        self.ctx.set_motion_blur_enabled(motion_blur);
         let before = self.ctx.metrics();
         let render_start = Instant::now();
         let image = self
@@ -559,6 +567,7 @@ impl PreviewApp {
         // instead of erroring with `timeline did not produce a frame`.
         let seconds = clamp_to_renderable(seconds, info.duration, fps);
         let resolution = request_resolution(query, self.resolution);
+        self.ctx.set_motion_blur_enabled(request_motion_blur(query));
 
         let before = self.ctx.metrics();
         let render_start = Instant::now();
@@ -609,6 +618,7 @@ struct VideoStreamSetup {
     resolution: Resolution,
     gop: u32,
     crf: u8,
+    motion_blur: bool,
     start_seconds: f32,
     cache_control: &'static str,
     realtime: bool,
@@ -729,6 +739,7 @@ fn handle_video_stream(
             resolution,
             gop,
             crf,
+            motion_blur: request_motion_blur(&query),
             start_seconds,
             cache_control: if cacheable {
                 "public, max-age=31536000, immutable"
@@ -961,7 +972,12 @@ fn handle_video_stream(
             let mut app = app
                 .lock()
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
-            let frame = app.render_video_rgba(&setup.timeline_id, seconds, setup.resolution)?;
+            let frame = app.render_video_rgba(
+                &setup.timeline_id,
+                seconds,
+                setup.resolution,
+                setup.motion_blur,
+            )?;
             if app.verbose {
                 println!(
                     "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
@@ -1126,6 +1142,14 @@ fn request_fps(query: &HashMap<String, String>, default_fps: u32) -> u32 {
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|fps| *fps > 0)
         .unwrap_or(default_fps.max(1))
+}
+
+/// The preview's motion-blur toggle; on unless the request says otherwise.
+fn request_motion_blur(query: &HashMap<String, String>) -> bool {
+    !matches!(
+        query.get("motion_blur").map(String::as_str),
+        Some("0") | Some("false")
+    )
 }
 
 fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> Resolution {

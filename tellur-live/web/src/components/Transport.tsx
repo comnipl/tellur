@@ -13,12 +13,14 @@ interface TransportProps {
   measuredFps: number;
   resolution: PreviewResolution;
   resolutionOptions: ResolutionOption[];
+  motionBlur: boolean;
   playing: boolean;
   onTogglePlay: () => void;
   onStep: (delta: number) => void;
   onRewind: () => void;
   onResolutionChange: (resolution: PreviewResolution) => void;
   onFpsChange: (fps: number) => void;
+  onMotionBlurChange: (motionBlur: boolean) => void;
 }
 
 const FPS_OPTIONS = [60, 30, 24, 15, 12];
@@ -31,12 +33,14 @@ export function Transport(props: TransportProps) {
     measuredFps,
     resolution,
     resolutionOptions,
+    motionBlur,
     playing,
     onTogglePlay,
     onStep,
     onRewind,
     onResolutionChange,
     onFpsChange,
+    onMotionBlurChange,
   } = props;
   const selectedResolutionKey = resolutionKey(resolution);
 
@@ -98,6 +102,25 @@ export function Transport(props: TransportProps) {
         </button>
       </div>
       <div className="transport__right">
+        <button
+          type="button"
+          className={
+            motionBlur
+              ? "transport__toggle transport__toggle--on"
+              : "transport__toggle"
+          }
+          aria-pressed={motionBlur}
+          aria-label="Motion Blur"
+          data-tooltip="Motion Blur"
+          // Blur after activation so focus doesn't stay on the button and
+          // swallow the global Space/arrow keyboard shortcuts.
+          onClick={(e) => {
+            onMotionBlurChange(!motionBlur);
+            e.currentTarget.blur();
+          }}
+        >
+          <MotionBlurIcon size={15} strokeWidth={1.6} />
+        </button>
         <label className="transport__control">
           <select
             value={fps}
@@ -147,4 +170,28 @@ export function Transport(props: TransportProps) {
 
 function resolutionKey(resolution: PreviewResolution): string {
   return `${resolution.width}x${resolution.height}`;
+}
+
+// Lucide has no motion-blur glyph, so this hand-rolled icon follows the same
+// conventions (24px viewBox, stroked shapes, round caps): a ball with speed
+// trails fading off behind it.
+function MotionBlurIcon(props: { size: number; strokeWidth: number }) {
+  return (
+    <svg
+      width={props.size}
+      height={props.size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={props.strokeWidth}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="15" cy="12" r="6" />
+      <path d="M4 7h3" />
+      <path d="M2 12h4" />
+      <path d="M4 17h3" />
+    </svg>
+  );
 }

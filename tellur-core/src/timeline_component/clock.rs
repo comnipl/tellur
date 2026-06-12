@@ -94,6 +94,25 @@ impl<'a> Clock<'a> {
         self.global
     }
 
+    /// Shifts BOTH time axes by `dt` seconds, evaluating the subtree as it
+    /// was (or will be) `dt` away from this frame. The window length and the
+    /// trigger table are untouched: the component still lives in the same
+    /// resolved slot, only the cursor moves.
+    ///
+    /// This is the sampling primitive for temporal effects: a motion-blur
+    /// shutter evaluates its child at several `shifted(-dt)` clocks and
+    /// averages the frames. Shifting `global` together with `local` keeps
+    /// [`Event`]-driven animation consistent with local-phase animation
+    /// under the shifted clock.
+    pub fn shifted(&self, dt: f32) -> Clock<'a> {
+        Clock {
+            global: TimelineTime::new(self.global.seconds() + dt),
+            local: LocalTime::new(self.local.seconds() + dt),
+            triggers: self.triggers,
+            window: self.window,
+        }
+    }
+
     /// The resolved LOCAL window as a [`Window`] over the local axis —
     /// `[0, length)` with the cursor at [`local`](Self::local) — or `None`
     /// for an open-ended placement (`.fill()`, a bare timeless point, the
