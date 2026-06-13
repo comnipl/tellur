@@ -368,6 +368,62 @@ mod tests {
         let _boxed: Box<dyn RasterComponent> =
             Background::builder().color(Color::rgb_u8(1, 2, 3)).into();
     }
+
+    fn sample_image() -> CpuRasterImage {
+        CpuRasterImage::new(
+            2,
+            1,
+            PixelFormat::Rgba8,
+            vec![255, 0, 0, 255, 0, 0, 255, 128],
+        )
+    }
+
+    fn sample_png_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        sample_image()
+            .export_png(&mut bytes)
+            .expect("encode sample PNG");
+        bytes
+    }
+
+    #[test]
+    fn decode_png_produces_rgba8_cpu_image() {
+        let image = CpuRasterImage::decode_png(&sample_png_bytes()).expect("decode PNG");
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.format, PixelFormat::Rgba8);
+        assert_eq!(image.pixels.as_ref(), &[255, 0, 0, 255, 0, 0, 255, 128]);
+    }
+
+    #[test]
+    fn load_png_reads_from_disk() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tellur-still-image-{}-{}.png",
+            std::process::id(),
+            nonce,
+        ));
+        std::fs::write(&path, sample_png_bytes()).expect("write sample PNG");
+        let image = StillImage::load(&path).expect("load still image");
+        std::fs::remove_file(&path).expect("remove sample PNG");
+
+        assert_eq!(image.image.width, 2);
+        assert_eq!(image.image.height, 1);
+        assert_eq!(image.image.pixels.as_ref(), sample_image().pixels.as_ref());
+    }
+
+    #[test]
+    fn still_image_is_a_raster_component() {
+        let component = StillImage::new(sample_image());
+        assert_eq!(component.layout(Constraints::UNBOUNDED), Vec2(2.0, 1.0));
+
+        let rendered = component.render(Vec2(2.0, 1.0), Resolution::new(2, 1), &mut PassThrough);
+        let cpu = rendered.into_cpu().expect("still image renders to CPU");
+        assert_eq!(cpu.pixels.as_ref(), sample_image().pixels.as_ref());
+    }
 }
 
 impl PartialEq for dyn RasterComponent {
@@ -757,66 +813,4 @@ fn unpremul(px: [f32; 4]) -> [u8; 4] {
         (px[2] * unalpha).round().clamp(0.0, 255.0) as u8,
         alpha as u8,
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::render_context::PassThrough;
-
-    fn sample_image() -> CpuRasterImage {
-        CpuRasterImage::new(
-            2,
-            1,
-            PixelFormat::Rgba8,
-            vec![255, 0, 0, 255, 0, 0, 255, 128],
-        )
-    }
-
-    fn sample_png_bytes() -> Vec<u8> {
-        let mut bytes = Vec::new();
-        sample_image()
-            .export_png(&mut bytes)
-            .expect("encode sample PNG");
-        bytes
-    }
-
-    #[test]
-    fn decode_png_produces_rgba8_cpu_image() {
-        let image = CpuRasterImage::decode_png(&sample_png_bytes()).expect("decode PNG");
-        assert_eq!(image.width, 2);
-        assert_eq!(image.height, 1);
-        assert_eq!(image.format, PixelFormat::Rgba8);
-        assert_eq!(image.pixels.as_ref(), &[255, 0, 0, 255, 0, 0, 255, 128],);
-    }
-
-    #[test]
-    fn load_png_reads_from_disk() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "tellur-still-image-{}-{}.png",
-            std::process::id(),
-            nonce,
-        ));
-        std::fs::write(&path, sample_png_bytes()).expect("write sample PNG");
-        let image = StillImage::load(&path).expect("load still image");
-        std::fs::remove_file(&path).expect("remove sample PNG");
-
-        assert_eq!(image.image.width, 2);
-        assert_eq!(image.image.height, 1);
-        assert_eq!(image.image.pixels.as_ref(), sample_image().pixels.as_ref());
-    }
-
-    #[test]
-    fn still_image_is_a_raster_component() {
-        let component = StillImage::new(sample_image());
-        assert_eq!(component.layout(Constraints::UNBOUNDED), Vec2(2.0, 1.0),);
-
-        let rendered = component.render(Vec2(2.0, 1.0), Resolution::new(2, 1), &mut PassThrough);
-        let cpu = rendered.into_cpu().expect("still image renders to CPU");
-        assert_eq!(cpu.pixels.as_ref(), sample_image().pixels.as_ref());
-    }
 }
