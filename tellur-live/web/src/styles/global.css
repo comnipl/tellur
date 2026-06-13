@@ -29,6 +29,7 @@
   --viewer-h: 448px;
   --scrubber-h: 18px;
   --transport-h: 46px;
+  --splitter-size: 6px;
   --tabs-h: 50px;
   --track-h: 28px;
   --footer-h: 34px;
@@ -260,8 +261,20 @@ select option {
 
 .workspace {
   display: grid;
-  grid-template-rows: minmax(0, min(var(--viewer-h), 61vh)) minmax(0, 1fr);
-  row-gap: 6px;
+  grid-template-rows:
+    minmax(
+      0,
+      min(
+        var(--workspace-preview-h, min(var(--viewer-h), 61vh)),
+        calc(100% - var(--splitter-size) - 190px)
+      )
+    )
+    var(--splitter-size)
+    minmax(0, 1fr);
+  grid-template-areas:
+    "preview"
+    "splitter"
+    "timeline";
   height: calc(100vh - var(--header-h));
   min-height: 0;
   padding: 1px 1px 5px 10px;
@@ -272,10 +285,47 @@ select option {
    fills the leftover space to its right. The timeline occupies the full-width
    second row of `.workspace`. */
 .workspace-top {
+  grid-area: preview;
   display: grid;
   grid-template-columns: min(var(--viewer-w), 100%) minmax(0, 1fr);
   column-gap: 6px;
   min-height: 0;
+}
+
+.workspace__splitter {
+  position: relative;
+  grid-area: splitter;
+  min-width: 0;
+  min-height: 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.workspace__splitter::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--border-panel);
+  transform: translateY(-50%);
+  transition: background 0.12s, height 0.12s;
+}
+
+.workspace__splitter:hover::before,
+.workspace__splitter:focus-visible::before,
+.workspace--resizing .workspace__splitter::before {
+  height: 2px;
+  background: #6b6b70;
+}
+
+.workspace__splitter:focus-visible {
+  outline: none;
+}
+
+.workspace--resizing {
+  user-select: none;
 }
 
 .viewer-panel {
@@ -686,6 +736,7 @@ select option {
 }
 
 .timeline-panel {
+  grid-area: timeline;
   display: grid;
   grid-template-rows: var(--tabs-h) minmax(0, 1fr) var(--footer-h);
   min-height: 0;
@@ -693,6 +744,64 @@ select option {
   background: var(--bg-panel);
   border: 1px solid var(--border-panel);
   border-radius: 8px;
+}
+
+@media (min-width: 761px) {
+  .workspace--portrait-preview {
+    grid-template-columns:
+      minmax(
+        280px,
+        min(
+          var(--workspace-preview-w, min(var(--viewer-w), 54vw)),
+          calc(100% - var(--splitter-size) - 320px)
+        )
+      )
+      var(--splitter-size)
+      minmax(0, 1fr);
+    grid-template-rows: minmax(140px, min(var(--viewer-h), 34vh)) minmax(0, 1fr);
+    grid-template-areas:
+      "viewer splitter inspector"
+      "viewer splitter timeline";
+    row-gap: 6px;
+  }
+
+  .workspace--portrait-preview .workspace-top {
+    display: contents;
+  }
+
+  .workspace--portrait-preview .viewer-panel {
+    grid-area: viewer;
+    width: auto;
+  }
+
+  .workspace--portrait-preview .workspace__splitter {
+    cursor: col-resize;
+  }
+
+  .workspace--portrait-preview .workspace__splitter::before {
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    height: auto;
+    transform: translateX(-50%);
+    transition: background 0.12s, width 0.12s;
+  }
+
+  .workspace--portrait-preview .workspace__splitter:hover::before,
+  .workspace--portrait-preview .workspace__splitter:focus-visible::before,
+  .workspace--portrait-preview.workspace--resizing .workspace__splitter::before {
+    width: 2px;
+    height: auto;
+  }
+
+  .workspace--portrait-preview .inspector {
+    grid-area: inspector;
+  }
+
+  .workspace--portrait-preview .timeline-panel {
+    grid-area: timeline;
+  }
 }
 
 .tabsrow {
@@ -1395,7 +1504,16 @@ select option {
   }
 
   .workspace {
-    grid-template-rows: minmax(0, 50vh) minmax(0, 1fr);
+    grid-template-rows:
+      minmax(
+        0,
+        min(
+          var(--workspace-preview-h, 50vh),
+          calc(100% - var(--splitter-size) - 190px)
+        )
+      )
+      var(--splitter-size)
+      minmax(0, 1fr);
   }
 
   .header__project-url {
