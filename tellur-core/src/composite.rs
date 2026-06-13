@@ -17,7 +17,7 @@
 //! through a 4-byte copy.
 
 use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, Resolution};
-use crate::render_context::RenderContext;
+use crate::render_context::{CompositeInput, RenderContext};
 
 /// Source-over composites `src` onto `dst` at pixel offset
 /// `(offset_x, offset_y)`. Both buffers hold 8-bit straight-alpha RGBA
@@ -103,6 +103,58 @@ pub(crate) fn composite_frame_over(
     RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buffer)
 }
 
+/// Source-over composites already-rendered timeline frames, bottom to top.
+///
+/// Timeline containers recurse into child timelines before they can composite,
+/// so they operate on `RasterImage`s instead of `RasterComponent`s. Prefer the
+/// same GPU composite primitive the raster `Layer` path uses, then fall back to
+/// the CPU kernel when no compatible GPU backend is available.
+pub(crate) fn composite_frames_over(
+    mut frames: Vec<RasterImage>,
+    target: Resolution,
+    ctx: &mut dyn RenderContext,
+) -> Option<RasterImage> {
+    match frames.len() {
+        0 => return None,
+        1 => {
+            let frame = frames.pop().expect("len checked");
+            if frame.width() == target.width && frame.height() == target.height {
+                return Some(frame);
+            }
+            frames.push(frame);
+        }
+        _ => {}
+    }
+
+    if ctx.prefers_gpu() {
+        let inputs: Vec<CompositeInput<'_>> = frames
+            .iter()
+            .map(|image| CompositeInput {
+                image,
+                offset_x: 0,
+                offset_y: 0,
+            })
+            .collect();
+        if let Some(gpu) = ctx.gpu_backend() {
+            if let Some(image) = gpu.composite(target, &inputs) {
+                return Some(image);
+            }
+        }
+    }
+
+    let mut buffer = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
+    for frame in frames {
+        let frame = ctx.readback(frame);
+        composite_at(&mut buffer, target, &frame, 0, 0);
+    }
+    Some(RasterImage::cpu(
+        target.width,
+        target.height,
+        PixelFormat::Rgba8,
+        buffer,
+    ))
+}
+
 /// Source-over blends `span_w` consecutive RGBA pixels of `src` onto
 /// `dst`. Both slices must be exactly `4 * span_w` bytes long; the
 /// caller guarantees that via slice indexing in [`composite_at`].
@@ -161,6 +213,121 @@ fn blend_row(dst: &mut [u8], src: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
+    use crate::geometry::Vec2;
+    use crate::raster::RasterComponent;
+    use crate::render_context::{DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput};
+    use crate::vector::VectorGraphic;
+
+    #[derive(Default)]
+    struct FakeGpu {
+        composite_calls: usize,
+        composite_inputs: Vec<usize>,
+        composite_succeeds: bool,
+    }
+
+    impl GpuRasterBackend for FakeGpu {
+        fn composite(
+            &mut self,
+            target: Resolution,
+            inputs: &[CompositeInput<'_>],
+        ) -> Option<RasterImage> {
+            self.composite_calls += 1;
+            self.composite_inputs.push(inputs.len());
+            assert!(inputs
+                .iter()
+                .all(|input| input.offset_x == 0 && input.offset_y == 0));
+            self.composite_succeeds.then(|| {
+                RasterImage::cpu(
+                    target.width,
+                    target.height,
+                    PixelFormat::Rgba8,
+                    vec![42u8; (target.width as usize) * (target.height as usize) * 4],
+                )
+            })
+        }
+
+        fn drop_shadow(&mut self, _input: DropShadowInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn outline(&mut self, _input: OutlineInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn rasterize(
+            &mut self,
+            _graphic: &VectorGraphic,
+            _target: Resolution,
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn solid_fill(&mut self, _target: Resolution, _color: Color) -> Option<RasterImage> {
+            None
+        }
+
+        fn temporal_average(
+            &mut self,
+            _target: Resolution,
+            _frames: &[&RasterImage],
+            _total: u32,
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn readback(&mut self, _image: RasterImage) -> Option<CpuRasterImage> {
+            None
+        }
+    }
+
+    struct FakeContext {
+        gpu: FakeGpu,
+        readbacks: usize,
+    }
+
+    impl FakeContext {
+        fn new(composite_succeeds: bool) -> Self {
+            Self {
+                gpu: FakeGpu {
+                    composite_succeeds,
+                    ..FakeGpu::default()
+                },
+                readbacks: 0,
+            }
+        }
+    }
+
+    impl RenderContext for FakeContext {
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn gpu_preference(&self) -> GpuPreference {
+            GpuPreference::PreferGpu
+        }
+
+        fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
+            Some(&mut self.gpu)
+        }
+
+        fn render(
+            &mut self,
+            _component: &dyn RasterComponent,
+            _size: Vec2,
+            _target: Resolution,
+        ) -> RasterImage {
+            panic!("composite tests do not render components")
+        }
+
+        fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
+            self.readbacks += 1;
+            match image {
+                RasterImage::Cpu(image) => image,
+                RasterImage::Gpu(_) => panic!("fake context cannot read back GPU surfaces"),
+            }
+        }
+    }
 
     fn image(width: u32, height: u32, pixels: Vec<u8>) -> CpuRasterImage {
         assert_eq!(pixels.len(), (width * height * 4) as usize);
@@ -264,5 +431,41 @@ mod tests {
         let expected = dst.clone();
         composite_at(&mut dst, Resolution::new(2, 2), &src, 5, 5);
         assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn composite_frames_uses_gpu_batch_without_readback() {
+        let frames = vec![
+            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
+            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
+        ];
+        let mut ctx = FakeContext::new(true);
+
+        let image = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
+            .expect("frames produce an output");
+        let image = image.into_cpu().expect("fake GPU returns CPU image");
+
+        assert_eq!(image.pixels.as_ref(), &[42, 42, 42, 42]);
+        assert_eq!(ctx.readbacks, 0);
+        assert_eq!(ctx.gpu.composite_calls, 1);
+        assert_eq!(ctx.gpu.composite_inputs, vec![2]);
+    }
+
+    #[test]
+    fn composite_frames_falls_back_to_cpu_when_gpu_declines() {
+        let frames = vec![
+            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
+            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
+        ];
+        let mut ctx = FakeContext::new(false);
+
+        let image = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
+            .expect("frames produce an output");
+        let image = image.into_cpu().expect("CPU fallback returns CPU image");
+
+        assert_eq!(image.pixels.as_ref(), &[0, 0, 255, 255]);
+        assert_eq!(ctx.readbacks, 2);
+        assert_eq!(ctx.gpu.composite_calls, 1);
+        assert_eq!(ctx.gpu.composite_inputs, vec![2]);
     }
 }
