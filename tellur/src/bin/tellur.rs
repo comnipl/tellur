@@ -17,7 +17,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as Process;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scaffold a new timeline project as a member of the current workspace.
+    /// Scaffold a new timeline project at a path.
     Create(CreateArgs),
     /// Build a timeline project's cdylib and serve its live preview.
     Live(LiveArgs),
@@ -49,8 +49,8 @@ enum Command {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Name of the new timeline project (a valid crate name).
-    name: String,
+    /// Path of the new timeline project. The crate name is the final component.
+    path: PathBuf,
     /// Display title for the timeline (defaults to the project name).
     #[arg(long)]
     title: Option<String>,
@@ -59,7 +59,7 @@ struct CreateArgs {
 #[derive(Args)]
 struct LiveArgs {
     /// Workspace member to preview. Defaults to the package containing the
-    /// current directory.
+    /// current directory. May also be a path to a timeline project.
     #[arg(short = 'p', long = "project")]
     project: Option<String>,
     /// Host address to bind the preview server to.
@@ -109,8 +109,10 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
     };
     let release = !args.debug;
 
-    let metadata = MetadataCommand::new().exec()?;
-    let package = resolve_project(&metadata, args.project.as_deref())?;
+    let cwd = env::current_dir()?;
+    let selector = live_project_selector(args.project.as_deref(), &cwd)?;
+    let metadata = live_metadata(&selector)?;
+    let package = resolve_live_project(&metadata, &selector)?;
 
     // Version dispatch (slow path): if the project pins a different `tellur`
     // version than this binary, the in-process host would mismatch the plugin's
@@ -153,7 +155,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
         // `None` builds the package's cdylib library, not an example.
         example: None,
         release,
-        manifest_path: None,
+        manifest_path: selector.manifest_path().cloned(),
         watch_paths: watch_paths(&package_dir, workspace_root),
         poll_interval: Duration::from_millis(250),
     };
@@ -176,6 +178,124 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
         verbose: args.verbose,
         auto_build,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LiveProjectSelector {
+    CurrentDirectory,
+    PackageName(String),
+    ManifestPath(PathBuf),
+}
+
+impl LiveProjectSelector {
+    fn manifest_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::ManifestPath(path) => Some(path),
+            Self::CurrentDirectory | Self::PackageName(_) => None,
+        }
+    }
+}
+
+fn live_project_selector(
+    project: Option<&str>,
+    cwd: &Path,
+) -> Result<LiveProjectSelector, Box<dyn Error>> {
+    let Some(project) = project else {
+        return Ok(LiveProjectSelector::CurrentDirectory);
+    };
+
+    if live_project_arg_is_path(project) {
+        return Ok(LiveProjectSelector::ManifestPath(project_manifest_path(
+            project, cwd,
+        )?));
+    }
+
+    Ok(LiveProjectSelector::PackageName(project.to_owned()))
+}
+
+fn live_project_arg_is_path(project: &str) -> bool {
+    let path = Path::new(project);
+    path.is_absolute()
+        || path == Path::new(".")
+        || path == Path::new("..")
+        || path == Path::new("Cargo.toml")
+        || path.components().count() > 1
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+}
+
+fn project_manifest_path(project: &str, cwd: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let project_path = Path::new(project);
+    let project_path = if project_path.is_absolute() {
+        project_path.to_path_buf()
+    } else {
+        cwd.join(project_path)
+    };
+    let project_path = normalize_path(&project_path);
+    let manifest_path = if project_path
+        .file_name()
+        .is_some_and(|name| name == std::ffi::OsStr::new("Cargo.toml"))
+    {
+        project_path
+    } else {
+        project_path.join("Cargo.toml")
+    };
+
+    if manifest_path.exists() {
+        return Ok(manifest_path);
+    }
+
+    Err(format!(
+        "`{project}` is not a Cargo project (expected {})",
+        manifest_path.display()
+    )
+    .into())
+}
+
+fn live_metadata(selector: &LiveProjectSelector) -> Result<Metadata, Box<dyn Error>> {
+    let mut command = MetadataCommand::new();
+    if let Some(manifest_path) = selector.manifest_path() {
+        command.manifest_path(manifest_path.clone());
+    }
+    Ok(command.exec()?)
+}
+
+fn resolve_live_project<'a>(
+    metadata: &'a Metadata,
+    selector: &LiveProjectSelector,
+) -> Result<&'a Package, Box<dyn Error>> {
+    match selector {
+        LiveProjectSelector::CurrentDirectory => resolve_project(metadata, None),
+        LiveProjectSelector::PackageName(name) => resolve_project(metadata, Some(name)),
+        LiveProjectSelector::ManifestPath(manifest_path) => {
+            resolve_project_by_manifest_path(metadata, manifest_path)
+        }
+    }
+}
+
+fn resolve_project_by_manifest_path<'a>(
+    metadata: &'a Metadata,
+    manifest_path: &Path,
+) -> Result<&'a Package, Box<dyn Error>> {
+    metadata
+        .packages
+        .iter()
+        .find(|package| same_path(package.manifest_path.as_std_path(), manifest_path))
+        .ok_or_else(|| {
+            format!(
+                "no package found for manifest path `{}`",
+                manifest_path.display()
+            )
+            .into()
+        })
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => normalize_path(left) == normalize_path(right),
+    }
 }
 
 /// Resolves the workspace member to preview: the named one, or — with no `name`
@@ -226,11 +346,13 @@ fn cdylib_target_name(package: &Package) -> Option<String> {
     package
         .targets
         .iter()
-        // Only the `lib` target produces the plugin `cdylib`; an `[[example]]`
-        // declared with `crate-type = ["cdylib"]` also carries `cdylib` in
-        // `crate_types` but has `kind = ["example"]`, so match on the lib kind.
-        .find(|target| target.is_lib() && target.crate_types.iter().any(|kind| kind == "cdylib"))
+        .find(|target| is_cdylib_library_target(&target.kind, &target.crate_types))
         .map(|target| target.name.clone())
+}
+
+fn is_cdylib_library_target(kind: &[String], crate_types: &[String]) -> bool {
+    let is_library_kind = kind.iter().any(|kind| kind == "lib" || kind == "cdylib");
+    is_library_kind && crate_types.iter().any(|kind| kind == "cdylib")
 }
 
 fn member_names(members: &[&Package]) -> String {
@@ -279,40 +401,87 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
 }
 
 fn create(args: CreateArgs) -> Result<(), Box<dyn Error>> {
-    validate_crate_name(&args.name)?;
-    let title = args.title.unwrap_or_else(|| args.name.clone());
+    let target = create_target(&args.path, &env::current_dir()?)?;
+    let title = args.title.unwrap_or_else(|| target.crate_name.clone());
 
-    let metadata = MetadataCommand::new().exec()?;
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let metadata = current_workspace_metadata()?;
+    let workspace_member = metadata
+        .as_ref()
+        .map(|metadata| workspace_member_path(metadata, &target.project_dir))
+        .transpose()?
+        .flatten();
 
-    let project_dir = env::current_dir()?.join(&args.name);
+    let project_dir = target.project_dir;
     if project_dir.exists() {
         return Err(format!("`{}` already exists", project_dir.display()).into());
     }
-    let member = relative_to(workspace_root, &project_dir).ok_or_else(|| {
-        format!(
-            "create the project inside the workspace at {}",
-            workspace_root.display()
-        )
-    })?;
 
     fs::create_dir_all(project_dir.join("src"))?;
-    fs::write(project_dir.join("Cargo.toml"), project_manifest(&args.name))?;
+    fs::write(
+        project_dir.join("Cargo.toml"),
+        project_manifest(&target.crate_name, workspace_member.is_some()),
+    )?;
     fs::write(project_dir.join("src/lib.rs"), starter_scene(&title))?;
 
-    // If `tellur` is itself a member of this workspace, point the new project at
-    // it by path; otherwise leave a version requirement for the user to pin.
-    let tellur_path = metadata
-        .packages
-        .iter()
-        .find(|package| package.name == "tellur")
-        .and_then(|package| package.manifest_path.parent())
-        .and_then(|dir| relative_to(workspace_root, dir.as_std_path()));
-    register_member(workspace_root, &member, tellur_path.as_deref())?;
+    if let (Some(metadata), Some(member)) = (metadata.as_ref(), workspace_member.as_deref()) {
+        let workspace_root = metadata.workspace_root.as_std_path();
+        // If `tellur` is itself a member of this workspace, point the new
+        // project at it by path; otherwise leave a version requirement for the
+        // user to pin.
+        let tellur_path = metadata
+            .packages
+            .iter()
+            .find(|package| package.name == "tellur")
+            .and_then(|package| package.manifest_path.parent())
+            .and_then(|dir| relative_to(workspace_root, dir.as_std_path()));
+        register_member(workspace_root, member, tellur_path.as_deref())?;
+    }
 
     println!("created {}", project_dir.display());
-    println!("  cd {} && tellur live", args.name);
+    println!("  cd {} && tellur live", project_dir.display());
     Ok(())
+}
+
+#[derive(Debug)]
+struct CreateTarget {
+    project_dir: PathBuf,
+    crate_name: String,
+}
+
+fn create_target(path: &Path, cwd: &Path) -> Result<CreateTarget, Box<dyn Error>> {
+    let crate_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("`{}` has no project directory name", path.display()))?
+        .to_owned();
+    validate_crate_name(&crate_name)?;
+
+    let project_dir = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    Ok(CreateTarget {
+        project_dir: normalize_path(&project_dir),
+        crate_name,
+    })
+}
+
+fn current_workspace_metadata() -> Result<Option<Metadata>, Box<dyn Error>> {
+    match MetadataCommand::new().no_deps().exec() {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if metadata_error_is_missing_manifest(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn metadata_error_is_missing_manifest(error: &cargo_metadata::Error) -> bool {
+    matches!(
+        error,
+        cargo_metadata::Error::CargoMetadata { stderr }
+            if stderr.contains("could not find `Cargo.toml`")
+    )
 }
 
 fn validate_crate_name(name: &str) -> Result<(), Box<dyn Error>> {
@@ -329,6 +498,26 @@ fn validate_crate_name(name: &str) -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| format!("`{name}` is not a valid crate name").into())
 }
 
+fn workspace_member_path(
+    metadata: &Metadata,
+    project_dir: &Path,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let Some(member) = relative_to(workspace_root, project_dir) else {
+        return Ok(None);
+    };
+    if !workspace_has_workspace_table(workspace_root)? {
+        return Ok(None);
+    }
+    Ok(Some(member))
+}
+
+fn workspace_has_workspace_table(workspace_root: &Path) -> Result<bool, Box<dyn Error>> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let doc = fs::read_to_string(&manifest_path)?.parse::<toml_edit::DocumentMut>()?;
+    Ok(doc["workspace"].is_table())
+}
+
 /// `target` expressed relative to `base` with `/` separators, or `None` when
 /// `target` is not inside `base`.
 fn relative_to(base: &Path, target: &Path) -> Option<String> {
@@ -341,7 +530,29 @@ fn relative_to(base: &Path, target: &Path) -> Option<String> {
     )
 }
 
-fn project_manifest(name: &str) -> String {
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn project_manifest(name: &str, workspace_dependency: bool) -> String {
+    let tellur_dependency = if workspace_dependency {
+        "{ workspace = true }".to_owned()
+    } else {
+        format!("\"{}\"", env!("CARGO_PKG_VERSION"))
+    };
+
     format!(
         "[package]\n\
          name = \"{name}\"\n\
@@ -353,7 +564,7 @@ fn project_manifest(name: &str) -> String {
          crate-type = [\"cdylib\"]\n\
          \n\
          [dependencies]\n\
-         tellur = {{ workspace = true }}\n"
+         tellur = {tellur_dependency}\n"
     )
 }
 
@@ -649,6 +860,173 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_project_selector_defaults_to_current_directory() {
+        assert_eq!(
+            live_project_selector(None, Path::new("/work/youtube")).unwrap(),
+            LiveProjectSelector::CurrentDirectory
+        );
+    }
+
+    #[test]
+    fn live_project_selector_keeps_plain_names_as_packages() {
+        assert_eq!(
+            live_project_selector(Some("timeline_project"), Path::new("/work/youtube")).unwrap(),
+            LiveProjectSelector::PackageName("timeline_project".to_owned())
+        );
+    }
+
+    #[test]
+    fn live_project_selector_treats_nested_project_as_manifest_path() {
+        let root = temp_test_dir("live-project-selector");
+        let project_dir = root
+            .join("movies")
+            .join("202606")
+            .join("shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            live_project_selector(
+                Some("movies/202606/shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"),
+                &root,
+            )
+            .unwrap(),
+            LiveProjectSelector::ManifestPath(project_dir.join("Cargo.toml"))
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_project_selector_accepts_manifest_path() {
+        let root = temp_test_dir("live-manifest-selector");
+        let manifest_path = root.join("Cargo.toml");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&manifest_path, "[package]\nname = \"demo\"\n").unwrap();
+
+        assert_eq!(
+            live_project_selector(Some("Cargo.toml"), &root).unwrap(),
+            LiveProjectSelector::ManifestPath(manifest_path)
+        );
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn live_project_selector_reports_missing_manifest_for_path() {
+        let root = temp_test_dir("live-missing-manifest-selector");
+
+        let error = live_project_selector(Some("movies/demo"), &root)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("expected"));
+        assert!(error.contains("movies/demo/Cargo.toml"));
+    }
+
+    #[test]
+    fn same_path_ignores_dot_components() {
+        assert!(same_path(
+            Path::new("/work/youtube/movies/demo/Cargo.toml"),
+            Path::new("/work/youtube/./movies/demo/Cargo.toml"),
+        ));
+    }
+
+    #[test]
+    fn cdylib_target_accepts_cdylib_only_lib_targets() {
+        assert!(is_cdylib_library_target(
+            &strings(["cdylib"]),
+            &strings(["cdylib"])
+        ));
+    }
+
+    #[test]
+    fn cdylib_target_accepts_mixed_lib_targets() {
+        assert!(is_cdylib_library_target(
+            &strings(["lib"]),
+            &strings(["lib", "cdylib"])
+        ));
+    }
+
+    #[test]
+    fn cdylib_target_rejects_cdylib_examples() {
+        assert!(!is_cdylib_library_target(
+            &strings(["example"]),
+            &strings(["cdylib"])
+        ));
+    }
+
+    #[test]
+    fn create_target_uses_final_path_component_as_crate_name() {
+        let target = create_target(
+            Path::new("movies/202606/shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"),
+            Path::new("/work/youtube"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            target.crate_name,
+            "shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"
+        );
+        assert_eq!(
+            target.project_dir,
+            PathBuf::from(
+                "/work/youtube/movies/202606/shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"
+            )
+        );
+    }
+
+    #[test]
+    fn create_target_rejects_invalid_final_component() {
+        let error = create_target(
+            Path::new("movies/202606/bad.name"),
+            Path::new("/work/youtube"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("not a valid crate name"));
+    }
+
+    #[test]
+    fn create_target_normalizes_parent_components_before_workspace_checks() {
+        let target =
+            create_target(Path::new("../youtube/movie"), Path::new("/work/tellur")).unwrap();
+
+        assert_eq!(target.project_dir, PathBuf::from("/work/youtube/movie"));
+        assert_eq!(target.crate_name, "movie");
+    }
+
+    #[test]
+    fn metadata_missing_manifest_error_enables_standalone_create() {
+        let error = cargo_metadata::Error::CargoMetadata {
+            stderr: "error: could not find `Cargo.toml` in `/tmp` or any parent directory\n"
+                .to_owned(),
+        };
+
+        assert!(metadata_error_is_missing_manifest(&error));
+    }
+
+    #[test]
+    fn project_manifest_uses_workspace_dependency_for_workspace_member() {
+        let manifest = project_manifest("demo", true);
+
+        assert!(manifest.contains("tellur = { workspace = true }"));
+    }
+
+    #[test]
+    fn project_manifest_uses_version_dependency_for_standalone_project() {
+        let manifest = project_manifest("demo", false);
+
+        assert!(manifest.contains(&format!("tellur = \"{}\"", env!("CARGO_PKG_VERSION"))));
+        assert!(!manifest.contains("workspace = true"));
+    }
+
+    #[test]
     fn parses_git_source_with_query_and_rev() {
         assert_eq!(
             parse_git_source("git+https://github.com/comnipl/tellur?rev=abc#deadbeef").unwrap(),
@@ -706,5 +1084,15 @@ mod tests {
         // A different toolchain or source must yield a different cache entry.
         assert_ne!(base, host_cache_key("0.4.0", "git:u#r", "rustc 1.96.0"));
         assert_ne!(base, host_cache_key("0.4.0", "path:/x", "rustc 1.95.0"));
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("tellur-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    fn strings<const N: usize>(items: [&str; N]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_owned()).collect()
     }
 }

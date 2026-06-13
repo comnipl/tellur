@@ -225,9 +225,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
               // video by firing its revealOnLoad after we switched to video.
               stillTokenRef.current++;
             } else if (cover === "hold") {
-              // The video shows the correct frame (pause / end / play): keep it on screen
-              // and reveal the still only when its fresh frame for this time decodes, so
-              // there is no stale-frame flash and the swap is seamless.
+              // The current display (parked video frame or trailing still) is the best
+              // stand-in (pause / end / play / paused scrub over cold frames): keep it
+              // up and reveal the still only when the fresh frame for this time
+              // decodes, so there is no stale-frame flash and the swap is seamless.
               requestStill(stillTime, true);
             } else if (cover === "blank") {
               // The video shows a DIFFERENT time (seek while playing into a cold region):
@@ -237,8 +238,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
               setImageVisible(true);
               requestStill(stillTime, false);
             } else {
-              // "trailing" (paused scrub / mount): keep whatever still is up for drag
-              // continuity and refine it to the fresh frame as each load completes.
+              // "trailing" (mount): show the still layer and refine it once it loads.
               setImageVisible(true);
               requestStill(stillTime, false);
             }
