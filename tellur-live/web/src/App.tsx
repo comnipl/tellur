@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { fetchInfo } from "./api";
 import { Header } from "./components/Header";
 import { Inspector, type SelectedNode } from "./components/Inspector";
@@ -42,6 +50,17 @@ const PREVIEW_RESOLUTION_OPTIONS = [
   { width: 360, height: 640, label: "360 × 640" },
   { width: 240, height: 426, label: "240 × 426" },
 ];
+const WIDE_WORKSPACE_QUERY = "(min-width: 761px)";
+const SPLITTER_KEY_STEP_PX = 24;
+const LANDSCAPE_PREVIEW_MIN_PX = 220;
+const LANDSCAPE_TIMELINE_MIN_PX = 190;
+const PORTRAIT_PREVIEW_MIN_PX = 280;
+const PORTRAIT_TIMELINE_MIN_PX = 320;
+
+type WorkspaceStyle = CSSProperties & {
+  "--workspace-preview-h"?: string;
+  "--workspace-preview-w"?: string;
+};
 
 export function App() {
   const [info, setInfo] = useState<ServerInfo | null>(null);
@@ -60,6 +79,16 @@ export function App() {
   // via `onSelect` and reads the highlight back from `selectedNode.id`.
   const [selectedNode, setSelectedNode] = useState<SelectedNode | null>(null);
   const [measuredFps, setMeasuredFps] = useState(0);
+  const [landscapePreviewHeight, setLandscapePreviewHeight] = useState<
+    number | null
+  >(null);
+  const [portraitPreviewWidth, setPortraitPreviewWidth] = useState<
+    number | null
+  >(null);
+  const [wideWorkspace, setWideWorkspace] = useState(() =>
+    mediaQueryMatches(WIDE_WORKSPACE_QUERY),
+  );
+  const [resizingWorkspace, setResizingWorkspace] = useState(false);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
   const userSelectedResolutionRef = useRef(false);
 
@@ -116,6 +145,16 @@ export function App() {
       if (timer) clearTimeout(timer);
       source?.close();
     };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const query = window.matchMedia(WIDE_WORKSPACE_QUERY);
+    const update = () => setWideWorkspace(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
   }, []);
 
   const timeline = info?.timelines[0] ?? null;
@@ -200,9 +239,20 @@ export function App() {
 
   const aspect = resolution.width / resolution.height;
   const isPortraitPreview = resolution.height > resolution.width;
-  const workspaceClassName = isPortraitPreview
-    ? "workspace workspace--portrait-preview"
-    : "workspace";
+  const workspaceClassName = [
+    "workspace",
+    isPortraitPreview ? "workspace--portrait-preview" : null,
+    resizingWorkspace ? "workspace--resizing" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const workspaceStyle: WorkspaceStyle = {};
+  if (landscapePreviewHeight !== null) {
+    workspaceStyle["--workspace-preview-h"] = `${landscapePreviewHeight}px`;
+  }
+  if (portraitPreviewWidth !== null) {
+    workspaceStyle["--workspace-preview-w"] = `${portraitPreviewWidth}px`;
+  }
   const displayTimeline = timeline ?? FALLBACK_TIMELINE;
   const timelineDuration = displayTimeline.duration;
   const resolutionOptions = previewResolutionOptions(resolution);
@@ -227,6 +277,110 @@ export function App() {
     );
   }, [timelineDuration]);
 
+  const usesPortraitWorkspace = isPortraitPreview && wideWorkspace;
+  const handleWorkspaceSplitPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const workspace = event.currentTarget.closest(".workspace");
+      if (!(workspace instanceof HTMLElement)) return;
+
+      event.preventDefault();
+
+      const portrait = isPortraitPreview && wideWorkspace;
+      const workspaceRect = workspace.getBoundingClientRect();
+      const splitterRect = event.currentTarget.getBoundingClientRect();
+      const pointerOffset = portrait
+        ? event.clientX - splitterRect.left
+        : event.clientY - splitterRect.top;
+      const previousBodyCursor = document.body.style.cursor;
+      document.body.style.cursor = portrait ? "col-resize" : "row-resize";
+      setResizingWorkspace(true);
+
+      const applyPointer = (clientX: number, clientY: number) => {
+        if (portrait) {
+          setPortraitPreviewWidth(
+            clampPortraitPreviewWidth(
+              clientX - workspaceRect.left - pointerOffset,
+              workspaceRect.width,
+              splitterRect.width,
+            ),
+          );
+        } else {
+          setLandscapePreviewHeight(
+            clampLandscapePreviewHeight(
+              clientY - workspaceRect.top - pointerOffset,
+              workspaceRect.height,
+              splitterRect.height,
+            ),
+          );
+        }
+      };
+
+      const handlePointerMove = (moveEvent: PointerEvent) => {
+        moveEvent.preventDefault();
+        applyPointer(moveEvent.clientX, moveEvent.clientY);
+      };
+
+      const stopResize = () => {
+        setResizingWorkspace(false);
+        document.body.style.cursor = previousBodyCursor;
+        window.removeEventListener("pointermove", handlePointerMove);
+        window.removeEventListener("pointerup", stopResize);
+        window.removeEventListener("pointercancel", stopResize);
+      };
+
+      applyPointer(event.clientX, event.clientY);
+      window.addEventListener("pointermove", handlePointerMove);
+      window.addEventListener("pointerup", stopResize);
+      window.addEventListener("pointercancel", stopResize);
+    },
+    [isPortraitPreview, wideWorkspace],
+  );
+
+  const handleWorkspaceSplitterKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      const portrait = isPortraitPreview && wideWorkspace;
+      const delta = splitterKeyDelta(event.key, portrait);
+      if (delta === 0) return;
+
+      const workspace = event.currentTarget.closest(".workspace");
+      if (!(workspace instanceof HTMLElement)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const workspaceRect = workspace.getBoundingClientRect();
+      const splitterRect = event.currentTarget.getBoundingClientRect();
+
+      if (portrait) {
+        const current =
+          portraitPreviewWidth ?? splitterRect.left - workspaceRect.left;
+        setPortraitPreviewWidth(
+          clampPortraitPreviewWidth(
+            current + delta,
+            workspaceRect.width,
+            splitterRect.width,
+          ),
+        );
+      } else {
+        const current =
+          landscapePreviewHeight ?? splitterRect.top - workspaceRect.top;
+        setLandscapePreviewHeight(
+          clampLandscapePreviewHeight(
+            current + delta,
+            workspaceRect.height,
+            splitterRect.height,
+          ),
+        );
+      }
+    },
+    [
+      isPortraitPreview,
+      landscapePreviewHeight,
+      portraitPreviewWidth,
+      wideWorkspace,
+    ],
+  );
+
   const url =
     typeof window !== "undefined" && window.location.origin
       ? window.location.origin
@@ -242,7 +396,7 @@ export function App() {
         }
         compileError={loadError ?? info?.compileError ?? null}
       />
-      <div className={workspaceClassName}>
+      <div className={workspaceClassName} style={workspaceStyle}>
         {/* The default layout keeps Preview + Details above the full-width
             Timeline. Portrait previews promote the viewer to a full-height
             left column through CSS. */}
@@ -281,6 +435,15 @@ export function App() {
           </section>
           <Inspector node={selectedNode} fps={fps} />
         </div>
+        <div
+          className="workspace__splitter"
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize Preview and Timeline"
+          aria-orientation={usesPortraitWorkspace ? "vertical" : "horizontal"}
+          onPointerDown={handleWorkspaceSplitPointerDown}
+          onKeyDown={handleWorkspaceSplitterKeyDown}
+        />
         <section className="timeline-panel">
           <TabsRow
             timeline={displayTimeline}
@@ -345,4 +508,48 @@ function sameResolution(
   b: PreviewResolution,
 ): boolean {
   return a.width === b.width && a.height === b.height;
+}
+
+function mediaQueryMatches(query: string): boolean {
+  return typeof window !== "undefined" ? window.matchMedia(query).matches : true;
+}
+
+function clampLandscapePreviewHeight(
+  value: number,
+  workspaceHeight: number,
+  splitterHeight: number,
+): number {
+  return clamp(
+    value,
+    LANDSCAPE_PREVIEW_MIN_PX,
+    workspaceHeight - splitterHeight - LANDSCAPE_TIMELINE_MIN_PX,
+  );
+}
+
+function clampPortraitPreviewWidth(
+  value: number,
+  workspaceWidth: number,
+  splitterWidth: number,
+): number {
+  return clamp(
+    value,
+    PORTRAIT_PREVIEW_MIN_PX,
+    workspaceWidth - splitterWidth - PORTRAIT_TIMELINE_MIN_PX,
+  );
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+function splitterKeyDelta(key: string, portrait: boolean): number {
+  if (portrait) {
+    if (key === "ArrowLeft") return -SPLITTER_KEY_STEP_PX;
+    if (key === "ArrowRight") return SPLITTER_KEY_STEP_PX;
+    return 0;
+  }
+
+  if (key === "ArrowUp") return -SPLITTER_KEY_STEP_PX;
+  if (key === "ArrowDown") return SPLITTER_KEY_STEP_PX;
+  return 0;
 }
