@@ -695,6 +695,34 @@ select option {
   border-radius: 8px;
 }
 
+@media (min-width: 761px) {
+  .workspace--portrait-preview {
+    grid-template-columns: minmax(280px, min(var(--viewer-w), 54vw)) minmax(0, 1fr);
+    grid-template-rows: minmax(140px, min(var(--viewer-h), 34vh)) minmax(0, 1fr);
+    grid-template-areas:
+      "viewer inspector"
+      "viewer timeline";
+    gap: 6px;
+  }
+
+  .workspace--portrait-preview .workspace-top {
+    display: contents;
+  }
+
+  .workspace--portrait-preview .viewer-panel {
+    grid-area: viewer;
+    width: auto;
+  }
+
+  .workspace--portrait-preview .inspector {
+    grid-area: inspector;
+  }
+
+  .workspace--portrait-preview .timeline-panel {
+    grid-area: timeline;
+  }
+}
+
 .tabsrow {
   display: grid;
   grid-template-columns: var(--side-w) minmax(0, 1fr);

@@ -199,6 +199,10 @@ export function App() {
   }, [preview.state.seconds, preview.state.playing]);
 
   const aspect = resolution.width / resolution.height;
+  const isPortraitPreview = resolution.height > resolution.width;
+  const workspaceClassName = isPortraitPreview
+    ? "workspace workspace--portrait-preview"
+    : "workspace";
   const displayTimeline = timeline ?? FALLBACK_TIMELINE;
   const timelineDuration = displayTimeline.duration;
   const resolutionOptions = previewResolutionOptions(resolution);
@@ -238,10 +242,10 @@ export function App() {
         }
         compileError={loadError ?? info?.compileError ?? null}
       />
-      <div className="workspace">
-        {/* Top row: preview (left, keeps its fixed viewer width) and the
-            Inspector (fills the leftover space to its right). The timeline
-            below stays full-width in the next row. */}
+      <div className={workspaceClassName}>
+        {/* The default layout keeps Preview + Details above the full-width
+            Timeline. Portrait previews promote the viewer to a full-height
+            left column through CSS. */}
         <div className="workspace-top">
           <section className="viewer-panel">
             <Preview
