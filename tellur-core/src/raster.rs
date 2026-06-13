@@ -1,7 +1,9 @@
 use std::any::Any;
 use std::fmt;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Cursor, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -101,7 +103,7 @@ impl From<GpuSurface> for RasterImage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CpuRasterImage {
     pub width: u32,
     pub height: u32,
@@ -366,6 +368,62 @@ mod tests {
         let _boxed: Box<dyn RasterComponent> =
             Background::builder().color(Color::rgb_u8(1, 2, 3)).into();
     }
+
+    fn sample_image() -> CpuRasterImage {
+        CpuRasterImage::new(
+            2,
+            1,
+            PixelFormat::Rgba8,
+            vec![255, 0, 0, 255, 0, 0, 255, 128],
+        )
+    }
+
+    fn sample_png_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        sample_image()
+            .export_png(&mut bytes)
+            .expect("encode sample PNG");
+        bytes
+    }
+
+    #[test]
+    fn decode_png_produces_rgba8_cpu_image() {
+        let image = CpuRasterImage::decode_png(&sample_png_bytes()).expect("decode PNG");
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.format, PixelFormat::Rgba8);
+        assert_eq!(image.pixels.as_ref(), &[255, 0, 0, 255, 0, 0, 255, 128]);
+    }
+
+    #[test]
+    fn load_png_reads_from_disk() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tellur-still-image-{}-{}.png",
+            std::process::id(),
+            nonce,
+        ));
+        std::fs::write(&path, sample_png_bytes()).expect("write sample PNG");
+        let image = StillImage::load(&path).expect("load still image");
+        std::fs::remove_file(&path).expect("remove sample PNG");
+
+        assert_eq!(image.image.width, 2);
+        assert_eq!(image.image.height, 1);
+        assert_eq!(image.image.pixels.as_ref(), sample_image().pixels.as_ref());
+    }
+
+    #[test]
+    fn still_image_is_a_raster_component() {
+        let component = StillImage::new(sample_image());
+        assert_eq!(component.layout(Constraints::UNBOUNDED), Vec2(2.0, 1.0));
+
+        let rendered = component.render(Vec2(2.0, 1.0), Resolution::new(2, 1), &mut PassThrough);
+        let cpu = rendered.into_cpu().expect("still image renders to CPU");
+        assert_eq!(cpu.pixels.as_ref(), sample_image().pixels.as_ref());
+    }
 }
 
 impl PartialEq for dyn RasterComponent {
@@ -405,6 +463,59 @@ impl CpuRasterImage {
         }
     }
 
+    /// Loads an image from disk, selecting a decoder from the file extension.
+    ///
+    /// PNG is supported today. Unsupported extensions return
+    /// [`ImageLoadError::UnsupportedFormat`] before opening the file, so callers
+    /// get a clear format error instead of a decode failure.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        let path = path.as_ref();
+        match image_extension(path).as_deref() {
+            Some("png") => Self::load_png(path),
+            extension => Err(ImageLoadError::UnsupportedFormat {
+                path: path.to_path_buf(),
+                extension: extension.map(str::to_owned),
+            }),
+        }
+    }
+
+    /// Loads a PNG image from disk into straight-alpha RGBA8 pixels.
+    pub fn load_png(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|source| ImageLoadError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::read_png(BufReader::new(file))
+    }
+
+    /// Decodes a PNG image from memory into straight-alpha RGBA8 pixels.
+    pub fn decode_png(bytes: &[u8]) -> Result<Self, ImageLoadError> {
+        Self::read_png(BufReader::new(Cursor::new(bytes)))
+    }
+
+    /// Decodes a PNG stream into straight-alpha RGBA8 pixels.
+    pub fn read_png<R: BufRead + Seek>(reader: R) -> Result<Self, ImageLoadError> {
+        let mut decoder = png::Decoder::new(reader);
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder.read_info()?;
+        let mut pixels = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .ok_or(ImageLoadError::ImageTooLarge)?
+        ];
+        let info = reader.next_frame(&mut pixels)?;
+        pixels.truncate(info.buffer_size());
+        png_to_rgba8(
+            info.width,
+            info.height,
+            info.color_type,
+            info.bit_depth,
+            pixels,
+        )
+    }
+
     /// Encodes the image as PNG and writes it to `writer`.
     ///
     /// Only `PixelFormat::Rgba8` is currently supported. HDR formats require
@@ -432,6 +543,21 @@ impl CpuRasterImage {
 }
 
 impl RasterImage {
+    /// Loads an image from disk as a CPU [`RasterImage`].
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::load(path).map(Self::Cpu)
+    }
+
+    /// Loads a PNG from disk as a CPU [`RasterImage`].
+    pub fn load_png(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::load_png(path).map(Self::Cpu)
+    }
+
+    /// Decodes PNG bytes as a CPU [`RasterImage`].
+    pub fn decode_png(bytes: &[u8]) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::decode_png(bytes).map(Self::Cpu)
+    }
+
     /// Encodes a CPU image as PNG and writes it to `writer`.
     ///
     /// GPU images must be read back through the active render context first.
@@ -443,4 +569,248 @@ impl RasterImage {
             }),
         }
     }
+}
+
+#[derive(Debug, Error)]
+pub enum ImageLoadError {
+    #[error("unsupported image format {extension:?} for path {path:?}; supported formats: png")]
+    UnsupportedFormat {
+        path: PathBuf,
+        extension: Option<String>,
+    },
+    #[error("failed to open image {path:?}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("decoded image is too large")]
+    ImageTooLarge,
+    #[error("unsupported PNG color type {color_type:?} with bit depth {bit_depth:?}")]
+    UnsupportedPngColor {
+        color_type: png::ColorType,
+        bit_depth: png::BitDepth,
+    },
+    #[error("decoded PNG buffer size mismatch: expected {expected} bytes, got {actual}")]
+    PngSizeMismatch { expected: usize, actual: usize },
+    #[error("PNG decode failed: {0}")]
+    PngDecode(#[from] png::DecodingError),
+}
+
+/// A loaded still image that participates in the raster component tree.
+///
+/// Its intrinsic layout size is the image's pixel dimensions expressed as
+/// logical units. Rendering resamples the image to the parent-chosen target
+/// resolution, so `Frame`, `Layer`, placement, timeline windows, and the render
+/// cache can treat it like any other [`RasterComponent`].
+#[crate::component(raster)]
+#[derive(Clone, PartialEq, Hash)]
+pub struct StillImage {
+    pub image: CpuRasterImage,
+}
+
+impl StillImage {
+    pub fn new(image: CpuRasterImage) -> Self {
+        Self { image }
+    }
+
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::load(path).map(Self::new)
+    }
+
+    pub fn load_png(path: impl AsRef<Path>) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::load_png(path).map(Self::new)
+    }
+
+    pub fn decode_png(bytes: &[u8]) -> Result<Self, ImageLoadError> {
+        CpuRasterImage::decode_png(bytes).map(Self::new)
+    }
+}
+
+impl RasterComponent for StillImage {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        constraints.constrain(Vec2(self.image.width as f32, self.image.height as f32))
+    }
+
+    fn render(&self, _size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        RasterImage::Cpu(resample_rgba8(&self.image, target))
+    }
+}
+
+fn image_extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+}
+
+fn png_to_rgba8(
+    width: u32,
+    height: u32,
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+    pixels: Vec<u8>,
+) -> Result<CpuRasterImage, ImageLoadError> {
+    if bit_depth != png::BitDepth::Eight {
+        return Err(ImageLoadError::UnsupportedPngColor {
+            color_type,
+            bit_depth,
+        });
+    }
+
+    let rgba = match color_type {
+        png::ColorType::Rgba => pixels,
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity(rgba_len(width, height)?);
+            for rgb in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+            rgba
+        }
+        png::ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity(rgba_len(width, height)?);
+            for gray in pixels {
+                rgba.extend_from_slice(&[gray, gray, gray, 255]);
+            }
+            rgba
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity(rgba_len(width, height)?);
+            for ga in pixels.chunks_exact(2) {
+                let gray = ga[0];
+                rgba.extend_from_slice(&[gray, gray, gray, ga[1]]);
+            }
+            rgba
+        }
+        png::ColorType::Indexed => {
+            return Err(ImageLoadError::UnsupportedPngColor {
+                color_type,
+                bit_depth,
+            });
+        }
+    };
+
+    let expected = rgba_len(width, height)?;
+    if rgba.len() != expected {
+        return Err(ImageLoadError::PngSizeMismatch {
+            expected,
+            actual: rgba.len(),
+        });
+    }
+
+    Ok(CpuRasterImage::new(width, height, PixelFormat::Rgba8, rgba))
+}
+
+fn rgba_len(width: u32, height: u32) -> Result<usize, ImageLoadError> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or(ImageLoadError::ImageTooLarge)
+}
+
+fn resample_rgba8(image: &CpuRasterImage, target: Resolution) -> CpuRasterImage {
+    assert_eq!(
+        image.format,
+        PixelFormat::Rgba8,
+        "StillImage only supports Rgba8 images",
+    );
+    assert_eq!(
+        image.pixels.len(),
+        rgba_len(image.width, image.height).expect("source image dimensions fit in memory"),
+        "StillImage source buffer must be tightly-packed RGBA8",
+    );
+
+    if image.width == target.width && image.height == target.height {
+        return image.clone();
+    }
+
+    let len = rgba_len(target.width, target.height).expect("target image dimensions fit in memory");
+    if target.width == 0 || target.height == 0 || image.width == 0 || image.height == 0 {
+        return CpuRasterImage::new(
+            target.width,
+            target.height,
+            PixelFormat::Rgba8,
+            vec![0; len],
+        );
+    }
+
+    let src = image.pixels.as_ref();
+    let mut out = vec![0u8; len];
+    for y in 0..target.height {
+        let (y0, y1, wy) = sample_axis(y, target.height, image.height);
+        for x in 0..target.width {
+            let (x0, x1, wx) = sample_axis(x, target.width, image.width);
+            let p00 = pixel(src, image.width, x0, y0);
+            let p10 = pixel(src, image.width, x1, y0);
+            let p01 = pixel(src, image.width, x0, y1);
+            let p11 = pixel(src, image.width, x1, y1);
+            let top = lerp_rgba8_premul(p00, p10, wx);
+            let bottom = lerp_rgba8_premul(p01, p11, wx);
+            let px = unpremul(lerp_premul(top, bottom, wy));
+            let offset = ((y as usize) * (target.width as usize) + (x as usize)) * 4;
+            out[offset..offset + 4].copy_from_slice(&px);
+        }
+    }
+
+    CpuRasterImage::new(target.width, target.height, PixelFormat::Rgba8, out)
+}
+
+fn sample_axis(dst: u32, dst_len: u32, src_len: u32) -> (u32, u32, f32) {
+    let pos = ((dst as f32 + 0.5) * src_len as f32 / dst_len as f32 - 0.5)
+        .clamp(0.0, src_len.saturating_sub(1) as f32);
+    let lo = pos.floor() as u32;
+    let hi = (lo + 1).min(src_len - 1);
+    (lo, hi, pos - lo as f32)
+}
+
+fn pixel(src: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+    let offset = ((y as usize) * (width as usize) + (x as usize)) * 4;
+    [
+        src[offset],
+        src[offset + 1],
+        src[offset + 2],
+        src[offset + 3],
+    ]
+}
+
+fn lerp_rgba8_premul(a: [u8; 4], b: [u8; 4], t: f32) -> [f32; 4] {
+    let a = premul(a);
+    let b = premul(b);
+    lerp_premul(a, b, t)
+}
+
+fn lerp_premul(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
+}
+
+fn premul(px: [u8; 4]) -> [f32; 4] {
+    let alpha = px[3] as f32 / 255.0;
+    [
+        px[0] as f32 * alpha,
+        px[1] as f32 * alpha,
+        px[2] as f32 * alpha,
+        px[3] as f32,
+    ]
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn unpremul(px: [f32; 4]) -> [u8; 4] {
+    let alpha = px[3].round().clamp(0.0, 255.0);
+    if alpha <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    let unalpha = 255.0 / px[3];
+    [
+        (px[0] * unalpha).round().clamp(0.0, 255.0) as u8,
+        (px[1] * unalpha).round().clamp(0.0, 255.0) as u8,
+        (px[2] * unalpha).round().clamp(0.0, 255.0) as u8,
+        alpha as u8,
+    ]
 }
