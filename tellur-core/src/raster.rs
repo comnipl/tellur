@@ -7,9 +7,11 @@ use std::sync::Arc;
 use bytes::Bytes;
 use thiserror::Error;
 
+use crate::color::Color;
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Vec2};
 use crate::render_context::{CachePolicy, RenderContext};
+use crate::Keyable;
 
 #[derive(Debug, Clone)]
 pub enum RasterImage {
@@ -257,6 +259,114 @@ pub trait RasterComponent: DynEq + DynHash {
 
 // Compile-time guarantee that `RasterComponent` is dyn-safe.
 const _: Option<&dyn RasterComponent> = None;
+
+/// A solid-color raster component that fills its assigned layout area.
+///
+/// `Background` has no intrinsic size of its own. Under finite loose
+/// constraints it takes the full available size; under unbounded constraints it
+/// collapses to the minimum allowed size. During rendering it fills every pixel
+/// in the requested target resolution with `color`.
+#[crate::component(raster)]
+#[derive(Keyable)]
+pub struct Background {
+    pub color: Color,
+}
+
+impl Background {
+    pub const fn new(color: Color) -> Self {
+        Self { color }
+    }
+}
+
+impl RasterComponent for Background {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        let size = Vec2(
+            finite_or_min(constraints.max.0, constraints.min.0),
+            finite_or_min(constraints.max.1, constraints.min.1),
+        );
+        constraints.constrain(size)
+    }
+
+    fn render(&self, _size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+        if ctx.prefers_gpu() {
+            if let Some(gpu) = ctx.gpu_backend() {
+                if let Some(image) = gpu.solid_fill(target, self.color) {
+                    return image;
+                }
+            }
+        }
+
+        let pixels = (target.width as usize) * (target.height as usize);
+        let mut buf = Vec::with_capacity(pixels * 4);
+        let [r, g, b, a] = color_rgba8(self.color);
+        for _ in 0..pixels {
+            buf.push(r);
+            buf.push(g);
+            buf.push(b);
+            buf.push(a);
+        }
+        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
+    }
+}
+
+fn finite_or_min(max: f32, min: f32) -> f32 {
+    if max.is_finite() {
+        max
+    } else {
+        min
+    }
+}
+
+fn color_rgba8(color: Color) -> [u8; 4] {
+    [
+        (color.r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (color.g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (color.b * 255.0).round().clamp(0.0, 255.0) as u8,
+        (color.a * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render_context::PassThrough;
+
+    #[test]
+    fn background_layout_fills_finite_constraints() {
+        let bg = Background::new(Color::rgb_u8(1, 2, 3));
+
+        assert_eq!(
+            bg.layout(Constraints::loose(Vec2(640.0, 360.0))),
+            Vec2(640.0, 360.0)
+        );
+        assert_eq!(
+            bg.layout(Constraints::tight(Vec2(320.0, 180.0))),
+            Vec2(320.0, 180.0)
+        );
+        assert_eq!(bg.layout(Constraints::UNBOUNDED), Vec2::ZERO);
+    }
+
+    #[test]
+    fn background_fills_every_target_pixel() {
+        let bg = Background::new(Color::rgba_u8(10, 20, 30, 128));
+        let mut ctx = PassThrough;
+        let image = bg.render(Vec2(3.0, 2.0), Resolution::new(3, 2), &mut ctx);
+        let cpu = image.as_cpu().expect("background renders CPU image");
+
+        assert_eq!(cpu.width, 3);
+        assert_eq!(cpu.height, 2);
+        assert_eq!(cpu.format, PixelFormat::Rgba8);
+        for pixel in cpu.pixels.chunks_exact(4) {
+            assert_eq!(pixel, [10, 20, 30, 128]);
+        }
+    }
+
+    #[test]
+    fn complete_background_builder_boxes_as_raster_component() {
+        let _boxed: Box<dyn RasterComponent> =
+            Background::builder().color(Color::rgb_u8(1, 2, 3)).into();
+    }
+}
 
 impl PartialEq for dyn RasterComponent {
     fn eq(&self, other: &Self) -> bool {

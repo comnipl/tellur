@@ -61,7 +61,7 @@ pub(super) mod raster {
     use crate::color::Color;
     use crate::geometry::{Constraints, Rect, Vec2};
     use crate::layer::composite_children;
-    use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+    use crate::raster::{Background, RasterComponent, RasterImage, Resolution};
     use crate::render_context::RenderContext;
     use crate::Keyable;
 
@@ -99,7 +99,7 @@ pub(super) mod raster {
             };
             match self.background {
                 Some(color) => {
-                    let bg = SolidRect { color };
+                    let bg = Background::new(color);
                     let placed: Vec<(Vec2, Vec2, &dyn RasterComponent)> = vec![
                         (Vec2::ZERO, size, &bg as &dyn RasterComponent),
                         (Vec2::ZERO, size, self.child.as_ref()),
@@ -113,47 +113,6 @@ pub(super) mod raster {
                     ctx,
                 ),
             }
-        }
-    }
-
-    /// Internal helper: a solid-color rectangle that fills any layout
-    /// size the parent assigns, rasterized by buffer-filling.
-    #[derive(PartialEq, Hash)]
-    struct SolidRect {
-        color: Color,
-    }
-
-    impl RasterComponent for SolidRect {
-        fn layout(&self, constraints: Constraints) -> Vec2 {
-            constraints.constrain(constraints.max)
-        }
-
-        fn render(
-            &self,
-            _size: Vec2,
-            target: Resolution,
-            ctx: &mut dyn RenderContext,
-        ) -> RasterImage {
-            if ctx.prefers_gpu() {
-                if let Some(gpu) = ctx.gpu_backend() {
-                    if let Some(image) = gpu.solid_fill(target, self.color) {
-                        return image;
-                    }
-                }
-            }
-            let pixels = (target.width as usize) * (target.height as usize);
-            let mut buf = Vec::with_capacity(pixels * 4);
-            let r = (self.color.r * 255.0).round().clamp(0.0, 255.0) as u8;
-            let g = (self.color.g * 255.0).round().clamp(0.0, 255.0) as u8;
-            let b = (self.color.b * 255.0).round().clamp(0.0, 255.0) as u8;
-            let a = (self.color.a * 255.0).round().clamp(0.0, 255.0) as u8;
-            for _ in 0..pixels {
-                buf.push(r);
-                buf.push(g);
-                buf.push(b);
-                buf.push(a);
-            }
-            RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
         }
     }
 }
