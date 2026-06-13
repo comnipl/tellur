@@ -17,7 +17,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command as Process;
 use std::time::Duration;
 
@@ -41,7 +41,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scaffold a new timeline project as a member of the current workspace.
+    /// Scaffold a new timeline project at a path.
     Create(CreateArgs),
     /// Build a timeline project's cdylib and serve its live preview.
     Live(LiveArgs),
@@ -49,8 +49,8 @@ enum Command {
 
 #[derive(Args)]
 struct CreateArgs {
-    /// Name of the new timeline project (a valid crate name).
-    name: String,
+    /// Path of the new timeline project. The crate name is the final component.
+    path: PathBuf,
     /// Display title for the timeline (defaults to the project name).
     #[arg(long)]
     title: Option<String>,
@@ -279,40 +279,87 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
 }
 
 fn create(args: CreateArgs) -> Result<(), Box<dyn Error>> {
-    validate_crate_name(&args.name)?;
-    let title = args.title.unwrap_or_else(|| args.name.clone());
+    let target = create_target(&args.path, &env::current_dir()?)?;
+    let title = args.title.unwrap_or_else(|| target.crate_name.clone());
 
-    let metadata = MetadataCommand::new().exec()?;
-    let workspace_root = metadata.workspace_root.as_std_path();
+    let metadata = current_workspace_metadata()?;
+    let workspace_member = metadata
+        .as_ref()
+        .map(|metadata| workspace_member_path(metadata, &target.project_dir))
+        .transpose()?
+        .flatten();
 
-    let project_dir = env::current_dir()?.join(&args.name);
+    let project_dir = target.project_dir;
     if project_dir.exists() {
         return Err(format!("`{}` already exists", project_dir.display()).into());
     }
-    let member = relative_to(workspace_root, &project_dir).ok_or_else(|| {
-        format!(
-            "create the project inside the workspace at {}",
-            workspace_root.display()
-        )
-    })?;
 
     fs::create_dir_all(project_dir.join("src"))?;
-    fs::write(project_dir.join("Cargo.toml"), project_manifest(&args.name))?;
+    fs::write(
+        project_dir.join("Cargo.toml"),
+        project_manifest(&target.crate_name, workspace_member.is_some()),
+    )?;
     fs::write(project_dir.join("src/lib.rs"), starter_scene(&title))?;
 
-    // If `tellur` is itself a member of this workspace, point the new project at
-    // it by path; otherwise leave a version requirement for the user to pin.
-    let tellur_path = metadata
-        .packages
-        .iter()
-        .find(|package| package.name == "tellur")
-        .and_then(|package| package.manifest_path.parent())
-        .and_then(|dir| relative_to(workspace_root, dir.as_std_path()));
-    register_member(workspace_root, &member, tellur_path.as_deref())?;
+    if let (Some(metadata), Some(member)) = (metadata.as_ref(), workspace_member.as_deref()) {
+        let workspace_root = metadata.workspace_root.as_std_path();
+        // If `tellur` is itself a member of this workspace, point the new
+        // project at it by path; otherwise leave a version requirement for the
+        // user to pin.
+        let tellur_path = metadata
+            .packages
+            .iter()
+            .find(|package| package.name == "tellur")
+            .and_then(|package| package.manifest_path.parent())
+            .and_then(|dir| relative_to(workspace_root, dir.as_std_path()));
+        register_member(workspace_root, member, tellur_path.as_deref())?;
+    }
 
     println!("created {}", project_dir.display());
-    println!("  cd {} && tellur live", args.name);
+    println!("  cd {} && tellur live", project_dir.display());
     Ok(())
+}
+
+#[derive(Debug)]
+struct CreateTarget {
+    project_dir: PathBuf,
+    crate_name: String,
+}
+
+fn create_target(path: &Path, cwd: &Path) -> Result<CreateTarget, Box<dyn Error>> {
+    let crate_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("`{}` has no project directory name", path.display()))?
+        .to_owned();
+    validate_crate_name(&crate_name)?;
+
+    let project_dir = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    Ok(CreateTarget {
+        project_dir: normalize_path(&project_dir),
+        crate_name,
+    })
+}
+
+fn current_workspace_metadata() -> Result<Option<Metadata>, Box<dyn Error>> {
+    match MetadataCommand::new().no_deps().exec() {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if metadata_error_is_missing_manifest(&error) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn metadata_error_is_missing_manifest(error: &cargo_metadata::Error) -> bool {
+    matches!(
+        error,
+        cargo_metadata::Error::CargoMetadata { stderr }
+            if stderr.contains("could not find `Cargo.toml`")
+    )
 }
 
 fn validate_crate_name(name: &str) -> Result<(), Box<dyn Error>> {
@@ -329,6 +376,26 @@ fn validate_crate_name(name: &str) -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| format!("`{name}` is not a valid crate name").into())
 }
 
+fn workspace_member_path(
+    metadata: &Metadata,
+    project_dir: &Path,
+) -> Result<Option<String>, Box<dyn Error>> {
+    let workspace_root = metadata.workspace_root.as_std_path();
+    let Some(member) = relative_to(workspace_root, project_dir) else {
+        return Ok(None);
+    };
+    if !workspace_has_workspace_table(workspace_root)? {
+        return Ok(None);
+    }
+    Ok(Some(member))
+}
+
+fn workspace_has_workspace_table(workspace_root: &Path) -> Result<bool, Box<dyn Error>> {
+    let manifest_path = workspace_root.join("Cargo.toml");
+    let doc = fs::read_to_string(&manifest_path)?.parse::<toml_edit::DocumentMut>()?;
+    Ok(doc["workspace"].is_table())
+}
+
 /// `target` expressed relative to `base` with `/` separators, or `None` when
 /// `target` is not inside `base`.
 fn relative_to(base: &Path, target: &Path) -> Option<String> {
@@ -341,7 +408,29 @@ fn relative_to(base: &Path, target: &Path) -> Option<String> {
     )
 }
 
-fn project_manifest(name: &str) -> String {
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn project_manifest(name: &str, workspace_dependency: bool) -> String {
+    let tellur_dependency = if workspace_dependency {
+        "{ workspace = true }".to_owned()
+    } else {
+        format!("\"{}\"", env!("CARGO_PKG_VERSION"))
+    };
+
     format!(
         "[package]\n\
          name = \"{name}\"\n\
@@ -353,7 +442,7 @@ fn project_manifest(name: &str) -> String {
          crate-type = [\"cdylib\"]\n\
          \n\
          [dependencies]\n\
-         tellur = {{ workspace = true }}\n"
+         tellur = {tellur_dependency}\n"
     )
 }
 
@@ -647,6 +736,72 @@ fn host_bin_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_target_uses_final_path_component_as_crate_name() {
+        let target = create_target(
+            Path::new("movies/202606/shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"),
+            Path::new("/work/youtube"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            target.crate_name,
+            "shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"
+        );
+        assert_eq!(
+            target.project_dir,
+            PathBuf::from(
+                "/work/youtube/movies/202606/shorts_why_does_sqrt_2_plus_sqrt_3_approximate_pi"
+            )
+        );
+    }
+
+    #[test]
+    fn create_target_rejects_invalid_final_component() {
+        let error = create_target(
+            Path::new("movies/202606/bad.name"),
+            Path::new("/work/youtube"),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("not a valid crate name"));
+    }
+
+    #[test]
+    fn create_target_normalizes_parent_components_before_workspace_checks() {
+        let target =
+            create_target(Path::new("../youtube/movie"), Path::new("/work/tellur")).unwrap();
+
+        assert_eq!(target.project_dir, PathBuf::from("/work/youtube/movie"));
+        assert_eq!(target.crate_name, "movie");
+    }
+
+    #[test]
+    fn metadata_missing_manifest_error_enables_standalone_create() {
+        let error = cargo_metadata::Error::CargoMetadata {
+            stderr: "error: could not find `Cargo.toml` in `/tmp` or any parent directory\n"
+                .to_owned(),
+        };
+
+        assert!(metadata_error_is_missing_manifest(&error));
+    }
+
+    #[test]
+    fn project_manifest_uses_workspace_dependency_for_workspace_member() {
+        let manifest = project_manifest("demo", true);
+
+        assert!(manifest.contains("tellur = { workspace = true }"));
+    }
+
+    #[test]
+    fn project_manifest_uses_version_dependency_for_standalone_project() {
+        let manifest = project_manifest("demo", false);
+
+        assert!(manifest.contains(&format!("tellur = \"{}\"", env!("CARGO_PKG_VERSION"))));
+        assert!(!manifest.contains("workspace = true"));
+    }
 
     #[test]
     fn parses_git_source_with_query_and_rev() {
