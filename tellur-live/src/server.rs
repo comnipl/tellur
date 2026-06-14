@@ -750,11 +750,17 @@ fn handle_video_stream(
         }
     };
 
-    // Render the timeline's audio once and stage it as a temp WAV so the stream
-    // can mux a real AAC track. `render_audio` returns a full-length buffer
-    // (silent if the tree has no audio sources); `None` only for legacy
-    // collections, where the stream falls back to a generated silent track. The
-    // guard removes the file when this function returns.
+    // The frame-quantized video length, used to BOUND the output below with `-t`
+    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
+    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
+    let video_seconds = total_frames as f32 / setup.fps as f32;
+
+    // Render only this stream's audio window and stage it as a temp WAV. Full
+    // timeline audio can be huge, and live preview requests many short cache
+    // segments, so every segment must mix only `[start, start + video_seconds)`.
+    // `None` only for legacy/custom collections that do not expose audio, where
+    // the stream falls back to a generated silent track. The guard removes the
+    // file when this function returns.
     let audio_wav = {
         let mut app = app
             .lock()
@@ -763,7 +769,15 @@ fn handle_video_stream(
         app.plugin
             .collection()
             .ok()
-            .and_then(|c| c.render_audio(&setup.timeline_id, AUDIO_RATE, AUDIO_CHANNELS))
+            .and_then(|c| {
+                c.render_audio_window(
+                    &setup.timeline_id,
+                    setup.start_seconds,
+                    video_seconds,
+                    AUDIO_RATE,
+                    AUDIO_CHANNELS,
+                )
+            })
             .and_then(|buf| write_temp_wav(&buf).ok())
             .map(TempFile)
     };
@@ -780,11 +794,6 @@ fn handle_video_stream(
          Connection: close\r\n\r\n",
         setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
-
-    // The frame-quantized video length, used to BOUND the output below with `-t`
-    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
-    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
-    let video_seconds = total_frames as f32 / setup.fps as f32;
 
     // FLAC block size aligned to ONE video frame's worth of audio samples, applied
     // to the encoder below (only when the sample rate divides evenly by fps — the
@@ -812,15 +821,12 @@ fn handle_video_stream(
         ])
         .args(["-r", &setup.fps.to_string()])
         .args(["-i", "-"]);
-    // Input 1: the audio track. A rendered WAV seeked to the stream's start when
-    // the timeline has audio; otherwise a generated silent track, so every
-    // stream has the same A/V structure the client's SourceBuffer expects.
+    // Input 1: the audio track. A rendered WAV already starts at the stream's
+    // timeline time; otherwise a generated silent track keeps every stream in
+    // the same A/V structure the client's SourceBuffer expects.
     match &audio_wav {
         Some(wav) => {
-            cmd.arg("-ss")
-                .arg(format!("{:.6}", setup.start_seconds))
-                .arg("-i")
-                .arg(&wav.0);
+            cmd.arg("-i").arg(&wav.0);
         }
         None => {
             cmd.args(["-f", "lavfi"]).arg("-i").arg(format!(

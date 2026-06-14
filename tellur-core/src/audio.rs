@@ -23,10 +23,11 @@ use std::io;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::Time as SymphoniaTime;
 
 use crate::timeline_component::AudioBuffer;
 
@@ -75,23 +76,65 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no decodable audio track"))?;
     let track_id = track.id;
+    let codec_params = track.codec_params.clone();
 
-    let rate = track.codec_params.sample_rate.ok_or_else(|| {
+    let rate = codec_params.sample_rate.ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidData, "audio track has no sample rate")
     })?;
+    let channel_hint = codec_params
+        .channels
+        .map(|channels| channels.count() as u16)
+        .unwrap_or(0);
 
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make(&codec_params, &DecoderOptions::default())
         .map_err(map_err)?;
 
-    // The trim is in SOURCE seconds; convert to a per-channel frame window once
-    // we know the rate. Channels are read from the first decoded buffer's spec
-    // (the codec-params channel map can be absent for some containers).
-    let mut channels: u16 = 0;
+    let (start_secs, end_secs) = trim
+        .map(|(start, end)| (start.max(0.0), end.max(0.0)))
+        .unwrap_or((0.0, f32::INFINITY));
+    if end_secs <= start_secs {
+        return Ok(AudioBuffer {
+            samples: Vec::new(),
+            rate,
+            channels: channel_hint.max(1),
+        });
+    }
+
+    let start_frame = seconds_to_frame(start_secs, rate);
+    let end_frame = end_secs
+        .is_finite()
+        .then(|| seconds_to_frame(end_secs, rate));
+    let mut cursor_frame = 0u64;
+    if start_secs > 0.0 {
+        if let Ok(seeked) = format.seek(
+            SeekMode::Accurate,
+            SeekTo::Time {
+                time: SymphoniaTime::from(start_secs),
+                track_id: Some(track_id),
+            },
+        ) {
+            decoder.reset();
+            if seeked.track_id == track_id {
+                if let Some(time_base) = codec_params.time_base {
+                    cursor_frame = time_to_frame(time_base.calc_time(seeked.actual_ts), rate);
+                }
+            }
+        }
+    }
+
+    // The trim is in SOURCE seconds; append only the requested source-frame
+    // window. A successful seek skips the leading packets for seekable formats;
+    // the frame window below keeps the fallback path correct for unseekable
+    // formats and trims codec/seek pre-roll precisely.
+    let mut channels: u16 = channel_hint;
     let mut samples: Vec<f32> = Vec::new();
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
 
     loop {
+        if end_frame.is_some_and(|end| cursor_frame >= end) {
+            break;
+        }
         let packet = match format.next_packet() {
             Ok(p) => p,
             // Clean EOF: symphonia signals end-of-stream as an IoError with the
@@ -114,7 +157,21 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
                     SampleBuffer::<f32>::new(decoded.capacity() as u64, spec)
                 });
                 buf.copy_interleaved_ref(decoded);
-                samples.extend_from_slice(buf.samples());
+                let decoded = buf.samples();
+                let ch = channels.max(1) as usize;
+                let decoded_frames = (decoded.len() / ch) as u64;
+                let chunk_start = cursor_frame;
+                let chunk_end = cursor_frame.saturating_add(decoded_frames);
+                if chunk_end > start_frame {
+                    let lo_frame = start_frame.max(chunk_start);
+                    let hi_frame = end_frame.map_or(chunk_end, |end| end.min(chunk_end));
+                    if hi_frame > lo_frame {
+                        let lo = ((lo_frame - chunk_start) as usize).saturating_mul(ch);
+                        let hi = ((hi_frame - chunk_start) as usize).saturating_mul(ch);
+                        samples.extend_from_slice(&decoded[lo..hi]);
+                    }
+                }
+                cursor_frame = chunk_end;
             }
             // A decode error on a single packet is recoverable — skip it.
             Err(SymphoniaError::DecodeError(_)) | Err(SymphoniaError::IoError(_)) => continue,
@@ -128,10 +185,6 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
         channels = 1;
     }
 
-    if let Some((start, end)) = trim {
-        crop_interleaved(&mut samples, rate, channels, start, end);
-    }
-
     Ok(AudioBuffer {
         samples,
         rate,
@@ -139,21 +192,13 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
     })
 }
 
-/// Crops `samples` in place to the SOURCE seconds `[start, end)` at `rate` /
-/// `channels`. Out-of-range bounds clamp to the buffer.
-fn crop_interleaved(samples: &mut Vec<f32>, rate: u32, channels: u16, start: f32, end: f32) {
-    let ch = channels.max(1) as usize;
-    let total_frames = samples.len() / ch;
-    let start_frame = ((start.max(0.0) * rate as f32).round() as usize).min(total_frames);
-    let end_frame = ((end.max(0.0) * rate as f32).round() as usize).min(total_frames);
-    if end_frame <= start_frame {
-        samples.clear();
-        return;
-    }
-    let lo = start_frame * ch;
-    let hi = end_frame * ch;
-    samples.copy_within(lo..hi, 0);
-    samples.truncate(hi - lo);
+fn seconds_to_frame(seconds: f32, rate: u32) -> u64 {
+    (seconds.max(0.0) * rate as f32).round().max(0.0) as u64
+}
+
+fn time_to_frame(time: SymphoniaTime, rate: u32) -> u64 {
+    let seconds = time.seconds as f64 + time.frac;
+    (seconds.max(0.0) * rate as f64).round() as u64
 }
 
 // ── Buffer transforms (rate / channel / gain / speed) ────────────────────────
@@ -291,15 +336,28 @@ impl AudioMix {
         self.channels
     }
 
+    /// The mix duration in seconds.
+    pub fn duration(&self) -> f32 {
+        let ch = self.channels.max(1) as usize;
+        let frames = self.samples.len() / ch;
+        frames as f32 / self.rate.max(1) as f32
+    }
+
     /// Sums an already-conformed (rate/channels/gain/speed-matched) interleaved
     /// buffer into the mix starting at `start_secs`, clamping each summed sample
-    /// to `[-1, 1]` so overlapping tracks never wrap. Frames past the mix end
-    /// are dropped (the resolved length is authoritative).
+    /// to `[-1, 1]` so overlapping tracks never wrap. Frames before the mix
+    /// start and past the mix end are dropped (the resolved length is
+    /// authoritative).
     pub fn add(&mut self, conformed: &[f32], start_secs: f32) {
         let ch = self.channels.max(1) as usize;
-        let start_frame = (start_secs.max(0.0) * self.rate as f32).round() as usize;
-        let base = start_frame * ch;
-        for (i, &s) in conformed.iter().enumerate() {
+        let start_frame = (start_secs * self.rate as f32).round() as isize;
+        let (base, source_offset) = if start_frame >= 0 {
+            (start_frame as usize * ch, 0)
+        } else {
+            let skipped_frames = (-start_frame) as usize;
+            (0, skipped_frames.saturating_mul(ch))
+        };
+        for (i, &s) in conformed.iter().skip(source_offset).enumerate() {
             let idx = base + i;
             if idx >= self.samples.len() {
                 break;
@@ -355,6 +413,16 @@ mod tests {
         let buf = mix.into_buffer();
         assert_eq!(buf.samples[0], 1.0);
         assert_eq!(buf.samples[1], 1.0);
+    }
+
+    #[test]
+    fn mix_add_clips_negative_start() {
+        let mut mix = AudioMix::new(1.0, 4, 1);
+
+        mix.add(&[0.1, 0.2, 0.3, 0.4], -0.5);
+
+        let buf = mix.into_buffer();
+        assert_eq!(buf.samples, vec![0.3, 0.4, 0.0, 0.0]);
     }
 
     #[test]

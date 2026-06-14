@@ -294,6 +294,26 @@ impl ResolvedTimeline {
         self.source().mix_into(&mut mix, 0.0, 1.0);
         mix.into_buffer()
     }
+
+    /// Eager mix-down for a timeline window.
+    ///
+    /// This uses the same tree walk as [`render_audio`](Self::render_audio), but
+    /// the mix target is only `duration` seconds long and the global timeline is
+    /// shifted left by `start`, so live-preview cache segments do not allocate or
+    /// write a full-timeline WAV for every requested segment.
+    pub fn render_audio_window(
+        &self,
+        start: f32,
+        duration: f32,
+        rate: u32,
+        channels: u16,
+    ) -> AudioBuffer {
+        let start = start.max(0.0);
+        let duration = duration.max(0.0);
+        let mut mix = crate::audio::AudioMix::new(duration, rate, channels);
+        self.source().mix_into(&mut mix, -start, 1.0);
+        mix.into_buffer()
+    }
 }
 
 impl std::fmt::Debug for ResolvedTimeline {

@@ -43,7 +43,11 @@ pub use tellur_core as __core;
 /// vtable slot and `GpuRasterBackend` gained `temporal_average`, so a `v2`
 /// plugin calling through a `v3` host context would hit the same class of
 /// vtable mismatch.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v3\0";
+///
+/// Bumped to `v4` for live-preview audio windows: `TimelineCollection` gained
+/// `render_audio_window`, so stale `v3` plugins must fail at `dlsym` instead of
+/// landing on the wrong vtable slot.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v4\0";
 
 /// The signature of the [`ENTRY_SYMBOL`] entry point a plugin exports.
 pub type EntryFn = unsafe extern "Rust" fn() -> Box<dyn TimelineCollection>;
@@ -88,6 +92,22 @@ pub trait TimelineCollection: Send {
     /// consistent A/V stream structure). Defaulted so collections migrate in
     /// stages, mirroring [`arrangement`](Self::arrangement).
     fn render_audio(&self, _id: &str, _rate: u32, _channels: u16) -> Option<AudioBuffer> {
+        None
+    }
+
+    /// Eager audio mix-down for `[start, start + duration)`, used by the live
+    /// preview when it encodes an individual cache segment. Custom collections
+    /// must implement this explicitly to preview audio; falling back to the
+    /// whole-track [`render_audio`](Self::render_audio) would reintroduce the
+    /// per-segment full-timeline work this API avoids.
+    fn render_audio_window(
+        &self,
+        _id: &str,
+        _start: f32,
+        _duration: f32,
+        _rate: u32,
+        _channels: u16,
+    ) -> Option<AudioBuffer> {
         None
     }
 }
@@ -188,6 +208,23 @@ impl TimelineCollection for SingleTimeline {
         // determinate track to mux.
         Some(self.resolved()?.render_audio(rate, channels))
     }
+
+    fn render_audio_window(
+        &self,
+        id: &str,
+        start: f32,
+        duration: f32,
+        rate: u32,
+        channels: u16,
+    ) -> Option<AudioBuffer> {
+        if id != self.id {
+            return None;
+        }
+        Some(
+            self.resolved()?
+                .render_audio_window(start, duration, rate, channels),
+        )
+    }
 }
 
 /// Adapts an old closure-based [`Timeline`] to the new [`TimelineComponent`]
@@ -276,14 +313,14 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
 macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v3(
+        pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
     };
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v3(
+        pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -307,7 +344,7 @@ macro_rules! export_timeline {
 macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v3(
+        pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -323,7 +360,7 @@ macro_rules! export_legacy_timeline {
 macro_rules! export_timeline_collection {
     ($builder:path) => {
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v3(
+        pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
