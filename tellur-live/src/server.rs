@@ -24,6 +24,11 @@ use crate::build_watch::{
 use crate::plugin::HotReloadPlugin;
 use tellur_plugin::TimelineInfo;
 
+/// Live preview re-encodes short MP4 segments repeatedly. Keeping the render
+/// cache below the renderer's export-oriented 1 GiB default avoids memory
+/// pressure and LRU churn making playback look stalled.
+const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     pub plugin_path: PathBuf,
@@ -54,7 +59,8 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
-        ctx: CachingRenderContext::new().with_gpu_preference(options.gpu_preference),
+        ctx: CachingRenderContext::with_capacity_bytes(LIVE_PREVIEW_CACHE_BYTES)
+            .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
         verbose: options.verbose,
