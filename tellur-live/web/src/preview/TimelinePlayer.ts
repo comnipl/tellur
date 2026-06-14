@@ -153,7 +153,7 @@ interface RemoveJob {
 }
 
 type QueuedOp =
-  | ({ kind: "append" } & AppendJob & { settle: () => void })
+  | ({ kind: "append" } & AppendJob & { settle: (ok: boolean) => void })
   | ({ kind: "remove" } & RemoveJob & { settle: () => void });
 
 // A single self-contained MSE-backed timeline player. Owns ONE MediaSource + ONE
@@ -364,7 +364,13 @@ export class TimelinePlayer {
     this.stopTicker();
     this.abortInflight();
     // Drop every queued op so awaiters don't hang and the pump exits.
-    for (const op of this.opQueue.splice(0)) op.settle();
+    for (const op of this.opQueue.splice(0)) {
+      if (op.kind === "append") {
+        op.settle(false);
+      } else {
+        op.settle();
+      }
+    }
     try {
       this.video.pause();
     } catch {
@@ -567,9 +573,13 @@ export class TimelinePlayer {
           (seg.end - seg.start >= MIN_SEGMENT_REUSE ||
             seg.end >= duration - EPSILON);
         if (seg && reusable && seg.end > cursor + EPSILON) {
-          await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
+          const appended = await this.appendSegment(
+            seg.start,
+            await blobToArrayBuffer(seg.blob),
+            gen,
+          );
           if (this.disposed || gen !== this.fillGen) return;
-          if (!this.isTimeBuffered(cursor)) {
+          if (!appended || !this.isTimeBuffered(cursor)) {
             // The append never landed (quota that even eviction couldn't relieve, or
             // an unparsable blob). Drop the range from the in-memory mirror and
             // stream it fresh — putSegment subsumes the stale row, so a bad blob
@@ -650,8 +660,9 @@ export class TimelinePlayer {
           value.byteOffset + value.byteLength,
         ) as ArrayBuffer;
         inflight.received.push(slice);
-        await this.appendSegment(start, slice.slice(0), gen);
+        const appended = await this.appendSegment(start, slice.slice(0), gen);
         if (this.disposed || gen !== this.fillGen) return reached;
+        if (!appended) throw new Error("SourceBuffer append failed");
         // The live green edge is the buffered end of THIS segment only — never bytes
         // received (which over-report before parse) and never the global buffered end
         // (contaminated by lookahead / eviction). buffered advances per GOP fragment.
@@ -695,19 +706,24 @@ export class TimelinePlayer {
         return reached;
       }
       if (this.disposed || gen !== this.fillGen) return reached;
-      // Arm the backoff and skip past the failed span for this pass; without both,
-      // the per-frame kickFill turns a failing server into a fetch storm.
+      // Arm the backoff and leave this span uncovered; without the backoff, the
+      // per-frame kickFill would turn a failing server or SourceBuffer into a
+      // fetch storm.
       this.streamBlockedUntil = Date.now() + STREAM_ERROR_BACKOFF_MS;
       this.events.onError?.(String(e));
-      return end;
+      return reached;
     }
   }
 
   // Enqueue an append for a segment slice and resolve once it has drained (backpressure
   // so the reader can't outrun the SourceBuffer). The op carries fillGen so a stale
   // cursor's slices are dropped by the pump rather than polluting buffered ranges.
-  private appendSegment(offset: number, data: ArrayBuffer, fillGen: number): Promise<void> {
-    return new Promise<void>((resolve) => {
+  private appendSegment(
+    offset: number,
+    data: ArrayBuffer,
+    fillGen: number,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
       this.opQueue.push({ kind: "append", offset, data, fillGen, settle: resolve });
       void this.pump();
     });
@@ -728,19 +744,24 @@ export class TimelinePlayer {
         if (!sb || this.mediaSource.readyState === "closed") break;
         const op = this.opQueue.shift()!;
         if (op.kind === "append" && op.fillGen !== this.fillGen) {
-          op.settle(); // stale cursor — drop, but settle so the awaiter continues
+          op.settle(false); // stale cursor — drop, but settle so the awaiter continues
           continue;
         }
+        let appended = false;
         try {
           if (op.kind === "append") {
-            await this.appendWithQuota(sb, op.offset, op.data);
+            appended = await this.appendWithQuota(sb, op.offset, op.data);
           } else {
             await this.removeRange(sb, op.start, op.end);
           }
         } catch (e) {
           if (isInvalidState(e)) {
             // MediaSource detached mid-op (teardown) — stop draining.
-            op.settle();
+            if (op.kind === "append") {
+              op.settle(false);
+            } else {
+              op.settle();
+            }
             break;
           }
           if (
@@ -752,7 +773,11 @@ export class TimelinePlayer {
             this.events.onError?.(String(e));
           }
         }
-        op.settle();
+        if (op.kind === "append") {
+          op.settle(appended);
+        } else {
+          op.settle();
+        }
       }
     } finally {
       this.pumping = false;
@@ -763,11 +788,10 @@ export class TimelinePlayer {
     sb: SourceBuffer,
     offset: number,
     data: ArrayBuffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.appendOne(sb, offset, data);
-        return;
+        return await this.appendOne(sb, offset, data);
       } catch (e) {
         // QuotaExceededError is thrown synchronously when the buffer is full. Evict
         // and retry; this is the normal path during long playback, not an edge case.
@@ -775,7 +799,7 @@ export class TimelinePlayer {
           if (await this.evictForQuota(sb, offset)) continue;
           // Nothing evictable: give up this append; it will be retried as the
           // playhead advances and frees room.
-          return;
+          return false;
         }
         throw e;
       }
@@ -820,11 +844,11 @@ export class TimelinePlayer {
     sb: SourceBuffer,
     offset: number,
     data: ArrayBuffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await waitForSourceBufferIdle(sb);
     // "ended" is fine here — setting timestampOffset / appendBuffer transitions the
     // MediaSource back to "open". Bail only when it's "closed" (detached on teardown).
-    if (this.disposed || this.mediaSource.readyState === "closed") return;
+    if (this.disposed || this.mediaSource.readyState === "closed") return false;
     if (offset !== this.lastAppliedOffset) {
       // Position this segment so buffered-time == timeline-time. Each segment is a
       // self-contained encode with its own IDR at `offset` (a frame-aligned time) and an
@@ -834,10 +858,10 @@ export class TimelinePlayer {
       sb.timestampOffset = offset;
       this.lastAppliedOffset = offset;
     }
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<boolean>((resolve, reject) => {
       const onEnd = () => {
         cleanup();
-        resolve();
+        resolve(true);
       };
       const onErr = () => {
         cleanup();
@@ -854,7 +878,7 @@ export class TimelinePlayer {
       // during real playback.
       const timer = setTimeout(() => {
         cleanup();
-        resolve();
+        resolve(false);
       }, SETTLE_TIMEOUT_MS);
       sb.addEventListener("updateend", onEnd);
       sb.addEventListener("error", onErr);
