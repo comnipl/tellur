@@ -1945,6 +1945,7 @@ dependencies = [
 name = "tellur-live"
 version = "0.1.0"
 dependencies = [
+ "png",
  "tellur-core",
  "tellur-plugin",
  "tellur-renderer",

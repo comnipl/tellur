@@ -520,7 +520,7 @@ impl PreviewApp {
 
         let encode_start = Instant::now();
         let mut body = Vec::new();
-        rendered.image.export_png(&mut body)?;
+        export_preview_png(&rendered.image, &mut body)?;
         let encode_time = encode_start.elapsed();
 
         let mut stats = rendered.stats;
@@ -1284,6 +1284,29 @@ fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> R
 
 fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
+}
+
+fn export_preview_png<W: Write>(image: &CpuRasterImage, writer: W) -> Result<(), Box<dyn Error>> {
+    if image.format != PixelFormat::Rgba8 {
+        return Err(format!("png frame requires Rgba8, got {:?}", image.format).into());
+    }
+
+    let expected = (image.width as usize) * (image.height as usize) * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "png frame size mismatch: expected {expected} bytes, got {}",
+            image.pixels.len()
+        )
+        .into());
+    }
+
+    let mut encoder = png::Encoder::new(writer, image.width, image.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fastest);
+    let mut png_writer = encoder.write_header()?;
+    png_writer.write_image_data(&image.pixels)?;
+    Ok(())
 }
 
 /// Clamps a requested frame time into the timeline's RENDERABLE range.
