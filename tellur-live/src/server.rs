@@ -1246,11 +1246,11 @@ fn request_fps(query: &HashMap<String, String>, default_fps: u32) -> u32 {
         .unwrap_or(default_fps.max(1))
 }
 
-/// The preview's motion-blur toggle; on unless the request says otherwise.
+/// The preview's motion-blur toggle; off unless the request explicitly opts in.
 fn request_motion_blur(query: &HashMap<String, String>) -> bool {
-    !matches!(
+    matches!(
         query.get("motion_blur").map(String::as_str),
-        Some("0") | Some("false")
+        Some("1") | Some("true")
     )
 }
 
@@ -1640,6 +1640,28 @@ mod tests {
         assert_eq!(clamp_to_renderable(0.005, 0.01, 60), 0.0);
         // A negative request floors at 0.0.
         assert_eq!(clamp_to_renderable(-2.0, 7.6, 60), 0.0);
+    }
+
+    #[test]
+    fn request_motion_blur_defaults_off() {
+        assert!(!request_motion_blur(&HashMap::new()));
+
+        let mut query = HashMap::new();
+        query.insert("motion_blur".to_owned(), "0".to_owned());
+        assert!(!request_motion_blur(&query));
+
+        query.insert("motion_blur".to_owned(), "false".to_owned());
+        assert!(!request_motion_blur(&query));
+    }
+
+    #[test]
+    fn request_motion_blur_is_explicitly_opt_in() {
+        let mut query = HashMap::new();
+        query.insert("motion_blur".to_owned(), "1".to_owned());
+        assert!(request_motion_blur(&query));
+
+        query.insert("motion_blur".to_owned(), "true".to_owned());
+        assert!(request_motion_blur(&query));
     }
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an
