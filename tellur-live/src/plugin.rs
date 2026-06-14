@@ -12,6 +12,8 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::os::raw::{c_char, c_int, c_void};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,6 +63,7 @@ impl From<std::io::Error> for PluginLoadError {
 struct SourceStamp {
     modified: SystemTime,
     len: u64,
+    changed: Option<(i64, i64)>,
     hash: u64,
 }
 
@@ -71,6 +74,10 @@ impl SourceStamp {
 
     fn same_content(self, other: Self) -> bool {
         self.len == other.len && self.hash == other.hash
+    }
+
+    fn same_file_state(self, modified: SystemTime, len: u64, changed: Option<(i64, i64)>) -> bool {
+        self.modified == modified && self.len == len && self.changed == changed
     }
 }
 
@@ -89,6 +96,7 @@ pub struct HotReloadPlugin {
     loaded: Option<LoadedPlugin>,
     retired_libraries: Vec<DynamicLibrary>,
     last_error: Option<String>,
+    failed_stamp: Option<SourceStamp>,
 }
 
 impl HotReloadPlugin {
@@ -98,6 +106,7 @@ impl HotReloadPlugin {
             loaded: None,
             retired_libraries: Vec::new(),
             last_error: None,
+            failed_stamp: None,
         }
     }
 
@@ -120,15 +129,35 @@ impl HotReloadPlugin {
     }
 
     pub fn reload_if_changed(&mut self) -> Result<bool, PluginLoadError> {
-        let stamp = source_stamp(&self.source_path)?;
-        let changed = self
-            .loaded
-            .as_ref()
-            .map(|loaded| !loaded.stamp.same_content(stamp))
-            .unwrap_or(true);
+        let metadata = fs::metadata(&self.source_path)?;
+        let modified = metadata.modified()?;
+        let len = metadata.len();
+        let changed = metadata_change_time(&metadata);
+        if let Some(loaded) = &self.loaded {
+            if loaded.stamp.same_file_state(modified, len, changed) {
+                return Ok(false);
+            }
+            if self
+                .failed_stamp
+                .is_some_and(|stamp| stamp.same_file_state(modified, len, changed))
+            {
+                return Ok(false);
+            }
+        }
 
-        if !changed {
-            return Ok(false);
+        let stamp = SourceStamp {
+            modified,
+            len,
+            changed,
+            hash: file_hash(&self.source_path)?,
+        };
+        if let Some(loaded) = self.loaded.as_mut() {
+            if loaded.stamp.same_content(stamp) {
+                loaded.stamp = stamp;
+                self.failed_stamp = None;
+                self.last_error = None;
+                return Ok(false);
+            }
         }
 
         match load_plugin(&self.source_path, stamp) {
@@ -138,10 +167,12 @@ impl HotReloadPlugin {
                     self.retired_libraries.push(previous.library);
                 }
                 self.last_error = None;
+                self.failed_stamp = None;
                 Ok(true)
             }
             Err(e) if self.loaded.is_some() => {
                 self.last_error = Some(e.to_string());
+                self.failed_stamp = Some(stamp);
                 Ok(false)
             }
             Err(e) => Err(e),
@@ -156,13 +187,17 @@ impl HotReloadPlugin {
     }
 }
 
-fn source_stamp(path: &Path) -> Result<SourceStamp, PluginLoadError> {
-    let metadata = fs::metadata(path)?;
-    Ok(SourceStamp {
-        modified: metadata.modified()?,
-        len: metadata.len(),
-        hash: file_hash(path)?,
-    })
+fn metadata_change_time(metadata: &fs::Metadata) -> Option<(i64, i64)> {
+    #[cfg(unix)]
+    {
+        Some((metadata.ctime(), metadata.ctime_nsec()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
 
 fn load_plugin(path: &Path, stamp: SourceStamp) -> Result<LoadedPlugin, PluginLoadError> {
