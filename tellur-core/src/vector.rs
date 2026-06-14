@@ -242,6 +242,7 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
 pub enum Node {
     Group(Group),
     SingleGroup(SingleGroup),
+    ClipGroup(ClipGroup),
     Path(Path),
 }
 
@@ -275,6 +276,13 @@ pub struct Group {
 pub struct SingleGroup {
     pub transform: Transform,
     pub opacity: f32,
+    pub child: Box<Node>,
+}
+
+#[derive(Debug, Clone, Keyable)]
+pub struct ClipGroup {
+    pub commands: Vec<PathCommand>,
+    pub transform: Transform,
     pub child: Box<Node>,
 }
 

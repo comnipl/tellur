@@ -102,6 +102,20 @@ impl Event {
         }
         clock.global().phase(trigger + a, trigger + b)
     }
+
+    /// Seconds elapsed since the trigger on the global timeline.
+    ///
+    /// Unfired events report `0.0`, and times before the trigger are clamped to
+    /// `0.0`. Unlike [`Event::phase`], this keeps counting after the event, so
+    /// components can run at a natural speed without choosing an end time up
+    /// front.
+    pub fn elapsed(&self, clock: &Clock<'_>) -> f32 {
+        let trigger = clock.trigger_of(*self).seconds();
+        if trigger.is_infinite() {
+            return 0.0;
+        }
+        (clock.global().seconds() - trigger).max(0.0)
+    }
 }
 
 impl Default for Event {

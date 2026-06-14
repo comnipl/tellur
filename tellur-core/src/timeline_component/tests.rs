@@ -297,6 +297,27 @@ fn fired_event_phase_tracks_the_global_clock() {
 }
 
 #[test]
+fn event_elapsed_tracks_the_global_clock() {
+    let e = Event::new();
+    let mut table = TriggerTable::new();
+    table.record(e, 2.0);
+
+    let before = Clock::new(TimelineTime::new(1.5), LocalTime::new(99.0), &table);
+    assert_eq!(e.elapsed(&before), 0.0);
+
+    let after = Clock::new(TimelineTime::new(2.25), LocalTime::new(0.0), &table);
+    assert_eq!(e.elapsed(&after), 0.25);
+}
+
+#[test]
+fn unfired_event_elapsed_is_zero() {
+    let e = Event::new();
+    let table = TriggerTable::new();
+    let clock = Clock::new(TimelineTime::new(3.0), LocalTime::new(3.0), &table);
+    assert_eq!(e.elapsed(&clock), 0.0);
+}
+
+#[test]
 fn triggered_resolve_records_start_time() {
     let e = Event::new();
     let triggered = Dot.trigger_at_start(e);

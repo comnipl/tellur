@@ -8,7 +8,9 @@ use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, 
 use tellur_core::render_context::{
     CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
 };
-use tellur_core::vector::{Node, Paint, Path as TellurPath, PathCommand, VectorGraphic};
+use tellur_core::vector::{
+    ClipGroup as TellurClipGroup, Node, Paint, Path as TellurPath, PathCommand, VectorGraphic,
+};
 use vello::kurbo::{Affine, BezPath, Rect as VelloRect, Stroke as VelloStroke};
 use wgpu::util::DeviceExt;
 
@@ -1050,7 +1052,7 @@ fn build_vello_scene(graphic: &VectorGraphic, target: Resolution) -> Option<vell
     };
     let clip = VelloRect::new(0.0, 0.0, target.width as f64, target.height as f64);
     let mut scene = vello::Scene::new();
-    encode_vello_node(&mut scene, &graphic.root, view, &clip)?;
+    encode_vello_node(&mut scene, &graphic.root, view, &clip, 1.0)?;
     Some(scene)
 }
 
@@ -1059,50 +1061,52 @@ fn encode_vello_node(
     node: &Node,
     transform: Transform,
     clip: &VelloRect,
+    opacity: f32,
 ) -> Option<()> {
     match node {
         Node::Group(group) => {
-            let opacity = group.opacity.clamp(0.0, 1.0);
+            let opacity = opacity * group.opacity.clamp(0.0, 1.0);
             if opacity <= 0.0 {
                 return Some(());
             }
             let transform = concat_transform(transform, group.transform);
-            if opacity < 1.0 {
-                scene.push_layer(
-                    vello::peniko::BlendMode::default(),
-                    opacity,
-                    Affine::IDENTITY,
-                    clip,
-                );
-            }
             for child in &group.children {
-                encode_vello_node(scene, child, transform, clip)?;
-            }
-            if opacity < 1.0 {
-                scene.pop_layer();
+                encode_vello_node(scene, child, transform, clip, opacity)?;
             }
         }
         Node::SingleGroup(group) => {
-            let opacity = group.opacity.clamp(0.0, 1.0);
+            let opacity = opacity * group.opacity.clamp(0.0, 1.0);
             if opacity <= 0.0 {
                 return Some(());
             }
             let transform = concat_transform(transform, group.transform);
-            if opacity < 1.0 {
-                scene.push_layer(
-                    vello::peniko::BlendMode::default(),
-                    opacity,
-                    Affine::IDENTITY,
-                    clip,
-                );
-            }
-            encode_vello_node(scene, &group.child, transform, clip)?;
-            if opacity < 1.0 {
-                scene.pop_layer();
-            }
+            encode_vello_node(scene, &group.child, transform, clip, opacity)?;
         }
-        Node::Path(path) => encode_vello_path(scene, path, transform)?,
+        Node::ClipGroup(group) => encode_vello_clip_group(scene, group, transform, clip, opacity)?,
+        Node::Path(path) => encode_vello_path(scene, path, transform, opacity)?,
     }
+    Some(())
+}
+
+fn encode_vello_clip_group(
+    scene: &mut vello::Scene,
+    group: &TellurClipGroup,
+    transform: Transform,
+    outer_clip: &VelloRect,
+    opacity: f32,
+) -> Option<()> {
+    let Some(clip_path) = build_vello_path(&group.commands) else {
+        return Some(());
+    };
+    let clip_transform = concat_transform(transform, group.transform);
+    scene.push_layer(
+        vello::peniko::BlendMode::default(),
+        1.0,
+        to_vello_affine(clip_transform),
+        &clip_path,
+    );
+    encode_vello_node(scene, &group.child, transform, outer_clip, opacity)?;
+    scene.pop_layer();
     Some(())
 }
 
@@ -1110,6 +1114,7 @@ fn encode_vello_path(
     scene: &mut vello::Scene,
     path: &TellurPath,
     transform: Transform,
+    opacity: f32,
 ) -> Option<()> {
     if path.fill.is_none() && path.stroke.is_none() {
         return Some(());
@@ -1121,7 +1126,7 @@ fn encode_vello_path(
     let transform = to_vello_affine(transform);
 
     if let Some(fill) = &path.fill {
-        if let Some(paint) = to_vello_color(&fill.paint) {
+        if let Some(paint) = to_vello_color(&fill.paint, opacity) {
             scene.fill(
                 vello::peniko::Fill::NonZero,
                 transform,
@@ -1134,7 +1139,7 @@ fn encode_vello_path(
 
     if let Some(stroke) = &path.stroke {
         if stroke.width > 0.0 {
-            if let Some(paint) = to_vello_color(&stroke.paint) {
+            if let Some(paint) = to_vello_color(&stroke.paint, opacity) {
                 scene.stroke(
                     &VelloStroke::new(stroke.width as f64),
                     transform,
@@ -1188,12 +1193,13 @@ fn to_vello_point(p: Vec2) -> (f64, f64) {
     (p.0 as f64, p.1 as f64)
 }
 
-fn to_vello_color(paint: &Paint) -> Option<vello::peniko::Color> {
+fn to_vello_color(paint: &Paint, opacity: f32) -> Option<vello::peniko::Color> {
     let Paint::Solid(color) = paint;
+    let color = color.multiply_alpha(opacity);
     if color.a <= 0.0 {
         return None;
     }
-    let [r, g, b, a] = color_u8(*color);
+    let [r, g, b, a] = color_u8(color);
     Some(vello::peniko::Color::rgba8(
         r as u8, g as u8, b as u8, a as u8,
     ))
@@ -1624,7 +1630,7 @@ mod tests {
     use tellur_core::render_context::{
         CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
     };
-    use tellur_core::vector::{Fill, Path, PathCommand};
+    use tellur_core::vector::{ClipGroup, Fill, Group, Path, PathCommand, Stroke};
 
     fn gpu_or_skip() -> Option<GpuRenderer> {
         match GpuRenderer::new() {
@@ -1858,6 +1864,225 @@ mod tests {
         let center = &rendered.pixels[center_idx..center_idx + 4];
 
         assert_eq!(center, &[80, 40, 20, 128]);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_applies_group_opacity_over_existing_content() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = vec![
+            PathCommand::MoveTo(Vec2(0.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 4.0)),
+            PathCommand::LineTo(Vec2(0.0, 4.0)),
+            PathCommand::Close,
+        ];
+        let path = |color| {
+            Node::Path(Path {
+                commands: rect.clone(),
+                fill: Some(Fill {
+                    paint: Paint::Solid(color),
+                }),
+                stroke: None,
+                transform: Transform::IDENTITY,
+            })
+        };
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(4.0, 4.0),
+            },
+            root: Node::Group(Group {
+                transform: Transform::IDENTITY,
+                opacity: 1.0,
+                children: vec![
+                    path(Color::rgba_u8(255, 255, 255, 255)),
+                    Node::single_group(
+                        Transform::IDENTITY,
+                        0.25,
+                        path(Color::rgba_u8(0, 0, 0, 255)),
+                    ),
+                ],
+            }),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+        let center_idx = (rendered.width as usize + 1) * 4;
+        let center = &rendered.pixels[center_idx..center_idx + 4];
+
+        assert!(center[0] > 150 && center[0] < 220, "{center:?}");
+        assert_eq!(center[3], 255);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_preserves_group_opacity_on_transparent_background() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = vec![
+            PathCommand::MoveTo(Vec2(0.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 4.0)),
+            PathCommand::LineTo(Vec2(0.0, 4.0)),
+            PathCommand::Close,
+        ];
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(4.0, 4.0),
+            },
+            root: Node::single_group(
+                Transform::IDENTITY,
+                0.25,
+                Node::Path(Path {
+                    commands: rect,
+                    fill: Some(Fill {
+                        paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+                    }),
+                    stroke: None,
+                    transform: Transform::IDENTITY,
+                }),
+            ),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+        let center_idx = (rendered.width as usize + 1) * 4;
+        let center = &rendered.pixels[center_idx..center_idx + 4];
+
+        assert!(center[3] > 50 && center[3] < 80, "{center:?}");
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_applies_group_opacity_with_view_box_scale() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = vec![
+            PathCommand::MoveTo(Vec2(0.0, 0.0)),
+            PathCommand::LineTo(Vec2(10.0, 0.0)),
+            PathCommand::LineTo(Vec2(10.0, 10.0)),
+            PathCommand::LineTo(Vec2(0.0, 10.0)),
+            PathCommand::Close,
+        ];
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(20.0, 20.0),
+            },
+            root: Node::Group(Group {
+                transform: Transform::IDENTITY,
+                opacity: 1.0,
+                children: vec![
+                    Node::Path(Path {
+                        commands: vec![
+                            PathCommand::MoveTo(Vec2(0.0, 0.0)),
+                            PathCommand::LineTo(Vec2(20.0, 0.0)),
+                            PathCommand::LineTo(Vec2(20.0, 20.0)),
+                            PathCommand::LineTo(Vec2(0.0, 20.0)),
+                            PathCommand::Close,
+                        ],
+                        fill: Some(Fill {
+                            paint: Paint::Solid(Color::rgba_u8(255, 255, 255, 255)),
+                        }),
+                        stroke: None,
+                        transform: Transform::IDENTITY,
+                    }),
+                    Node::single_group(
+                        Transform::IDENTITY,
+                        0.25,
+                        Node::Path(Path {
+                            commands: rect,
+                            fill: Some(Fill {
+                                paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+                            }),
+                            stroke: None,
+                            transform: Transform::IDENTITY,
+                        }),
+                    ),
+                ],
+            }),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(80, 80)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+        let center_idx = ((20 * rendered.width as usize) + 20) * 4;
+        let center = &rendered.pixels[center_idx..center_idx + 4];
+
+        assert!(center[0] > 150 && center[0] < 220, "{center:?}");
+        assert_eq!(center[3], 255);
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn rasterize_applies_opacity_to_clipped_child() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = vec![
+            PathCommand::MoveTo(Vec2(0.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 0.0)),
+            PathCommand::LineTo(Vec2(4.0, 4.0)),
+            PathCommand::LineTo(Vec2(0.0, 4.0)),
+            PathCommand::Close,
+        ];
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(4.0, 4.0),
+            },
+            root: Node::Group(Group {
+                transform: Transform::IDENTITY,
+                opacity: 1.0,
+                children: vec![
+                    Node::Path(Path {
+                        commands: rect.clone(),
+                        fill: Some(Fill {
+                            paint: Paint::Solid(Color::rgba_u8(255, 255, 255, 255)),
+                        }),
+                        stroke: None,
+                        transform: Transform::IDENTITY,
+                    }),
+                    Node::single_group(
+                        Transform::IDENTITY,
+                        0.25,
+                        Node::ClipGroup(ClipGroup {
+                            commands: rect.clone(),
+                            transform: Transform::IDENTITY,
+                            child: Box::new(Node::Path(Path {
+                                commands: vec![
+                                    PathCommand::MoveTo(Vec2(0.0, 2.0)),
+                                    PathCommand::LineTo(Vec2(4.0, 2.0)),
+                                ],
+                                fill: None,
+                                stroke: Some(Stroke {
+                                    paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+                                    width: 4.0,
+                                }),
+                                transform: Transform::IDENTITY,
+                            })),
+                        }),
+                    ),
+                ],
+            }),
+        };
+
+        let rendered =
+            GpuRasterBackend::rasterize(&mut gpu, &graphic, Resolution::new(4, 4)).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+        let center_idx = (rendered.width as usize + 1) * 4;
+        let center = &rendered.pixels[center_idx..center_idx + 4];
+
+        assert!(center[0] > 150 && center[0] < 220, "{center:?}");
+        assert_eq!(center[3], 255);
     }
 
     #[test]

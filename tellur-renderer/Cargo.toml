@@ -12,6 +12,14 @@ latex = ["tellur-core/latex"]
 name = "math_to_png"
 required-features = ["latex"]
 
+[[example]]
+name = "math_write_to_png"
+required-features = ["latex"]
+
+[[example]]
+name = "math_write_to_mp4"
+required-features = ["latex"]
+
 [dependencies]
 bytemuck = "1.25.0"
 bytes = "1.11.1"
