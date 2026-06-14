@@ -77,14 +77,13 @@ const STARVE_PROBE = 0.2;
 // codec or appended segments fail to parse. FLAC (not AAC) because AAC's per-encode
 // priming left an audible click at every fresh-encode cache seam; FLAC has zero
 // encoder delay so segments concatenate gaplessly. The three avc1 profiles cover
-// browsers that support different H.264 levels; video-only and bare fallbacks last.
+// browsers that support different H.264 levels; the bare MP4 fallback is last for
+// browsers that accept container-level probing without explicit codecs. Video-only
+// codec strings are intentionally omitted because the server always muxes audio.
 const MP4_MIME_TYPES = [
   'video/mp4; codecs="avc1.42E01E, flac"',
   'video/mp4; codecs="avc1.4D401E, flac"',
   'video/mp4; codecs="avc1.64001E, flac"',
-  'video/mp4; codecs="avc1.42E01E"',
-  'video/mp4; codecs="avc1.4D401E"',
-  'video/mp4; codecs="avc1.64001E"',
   "video/mp4",
 ];
 
@@ -226,9 +225,13 @@ export class TimelinePlayer {
     // Start filling only once BOTH the SourceBuffer is open AND the committed ranges are
     // loaded from IndexedDB. Otherwise, on a warm-cache reload, runFill would start with an
     // empty committedRanges mirror and re-stream a region that is already cached (req 7).
-    void Promise.all([this.ready, committed]).then(() => {
-      if (!this.disposed) this.kickFill();
-    });
+    void Promise.all([this.ready, committed])
+      .then(() => {
+        if (!this.disposed) this.kickFill();
+      })
+      .catch(() => {
+        // init() already surfaced the error; do not retry without a SourceBuffer.
+      });
   }
 
   // ---- public API -------------------------------------------------------------
@@ -432,6 +435,7 @@ export class TimelinePlayer {
       };
     } catch (e) {
       if (!this.disposed) this.events.onError?.(String(e));
+      throw e;
     }
   }
 
@@ -502,9 +506,13 @@ export class TimelinePlayer {
   private kickFill(): void {
     if (this.disposed) return;
     if (!this.sourceBuffer) {
-      void this.ready.then(() => {
-        if (!this.disposed) this.kickFill();
-      });
+      void this.ready
+        .then(() => {
+          if (!this.disposed) this.kickFill();
+        })
+        .catch(() => {
+          // init() already surfaced the error; do not retry without a SourceBuffer.
+        });
       return;
     }
     const gen = this.fillGen;
@@ -1380,7 +1388,7 @@ function selectMimeType(): string {
   for (const mimeType of MP4_MIME_TYPES) {
     if (MediaSource.isTypeSupported(mimeType)) return mimeType;
   }
-  return "video/mp4";
+  throw new Error("MP4 preview streams with FLAC audio are not supported");
 }
 
 function waitForSourceOpen(mediaSource: MediaSource): Promise<void> {
