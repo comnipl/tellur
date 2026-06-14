@@ -159,11 +159,41 @@ fn render_node(pixmap: &mut tiny_skia::Pixmap, node: &Node, parent_xform: tiny_s
                 );
             }
         }
+        Node::ClipGroup(group) => {
+            render_clipped_node(pixmap, group, parent_xform);
+        }
         Node::Path(path) => {
             let xform = parent_xform.pre_concat(to_skia_transform(&path.transform));
             render_path(pixmap, path, xform);
         }
     }
+}
+
+fn render_clipped_node(
+    pixmap: &mut tiny_skia::Pixmap,
+    group: &tellur_core::vector::ClipGroup,
+    parent_xform: tiny_skia::Transform,
+) {
+    let Some(clip_path) = build_skia_path(&group.commands) else {
+        return;
+    };
+    let clip_xform = parent_xform.pre_concat(to_skia_transform(&group.transform));
+    let Some(mut mask) = tiny_skia::Mask::new(pixmap.width(), pixmap.height()) else {
+        return;
+    };
+    mask.fill_path(&clip_path, tiny_skia::FillRule::Winding, true, clip_xform);
+
+    let mut layer = tiny_skia::Pixmap::new(pixmap.width(), pixmap.height())
+        .expect("pixmap dimensions must be non-zero");
+    render_node(&mut layer, &group.child, parent_xform);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        layer.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        tiny_skia::Transform::identity(),
+        Some(&mask),
+    );
 }
 
 fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Transform) {
