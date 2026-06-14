@@ -634,6 +634,7 @@ struct VideoStreamSetup {
     start_seconds: f32,
     cache_control: &'static str,
     realtime: bool,
+    verbose: bool,
 }
 
 struct VideoFrame {
@@ -709,6 +710,7 @@ fn handle_video_stream(
     mut stream: TcpStream,
     query: HashMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
+    let stream_start = Instant::now();
     let video_epoch = {
         let session = query
             .get("session")
@@ -724,6 +726,7 @@ fn handle_video_stream(
         )
     };
     let stream_epoch = video_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    let setup_start = Instant::now();
     let setup = {
         let mut app = app
             .lock()
@@ -775,8 +778,10 @@ fn handle_video_stream(
                 "no-store"
             },
             realtime: !cacheable,
+            verbose: app.verbose,
         }
     };
+    let setup_time = setup_start.elapsed();
     if video_epoch.load(Ordering::Acquire) != stream_epoch {
         return Ok(());
     }
@@ -792,6 +797,7 @@ fn handle_video_stream(
     // `None` only for legacy/custom collections that do not expose audio, where
     // the stream falls back to a generated silent track. The guard removes the
     // file when this function returns.
+    let audio_start = Instant::now();
     let audio_wav = {
         let mut app = app
             .lock()
@@ -811,6 +817,12 @@ fn handle_video_stream(
             })
             .and_then(|buf| write_temp_wav(&buf).ok())
             .map(TempFile)
+    };
+    let audio_time = audio_start.elapsed();
+    let audio_source = if audio_wav.is_some() {
+        "window_wav"
+    } else {
+        "anullsrc"
     };
     if video_epoch.load(Ordering::Acquire) != stream_epoch {
         return Ok(());
@@ -943,7 +955,9 @@ fn handle_video_stream(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let spawn_start = Instant::now();
     let mut child = cmd.spawn()?;
+    let ffmpeg_spawn_time = spawn_start.elapsed();
 
     let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
     let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
@@ -993,11 +1007,20 @@ fn handle_video_stream(
 
     let frame_step = 1.0 / setup.fps as f32;
     let frame_duration = Duration::from_secs_f32(frame_step);
+    let mut frames_rendered = 0u64;
+    let mut frames_written = 0u64;
+    let mut render_total = Duration::ZERO;
+    let mut stdin_write_total = Duration::ZERO;
+    let mut end_reason = "complete";
 
     for frame in 0..total_frames {
-        if !client_alive.load(Ordering::Relaxed)
-            || video_epoch.load(Ordering::Acquire) != stream_epoch
-        {
+        if !client_alive.load(Ordering::Relaxed) {
+            end_reason = "client_closed";
+            client_alive.store(false, Ordering::Relaxed);
+            break;
+        }
+        if video_epoch.load(Ordering::Acquire) != stream_epoch {
+            end_reason = "superseded";
             client_alive.store(false, Ordering::Relaxed);
             break;
         }
@@ -1040,17 +1063,25 @@ fn handle_video_stream(
                     frame.gpu_readbacks,
                 );
             }
+            render_total += frame.render_time;
+            frames_rendered += 1;
             frame.image
         };
 
         if video_epoch.load(Ordering::Acquire) != stream_epoch {
+            end_reason = "superseded";
             client_alive.store(false, Ordering::Relaxed);
             break;
         }
-        if stdin.write_all(&image.pixels).is_err() {
+        let write_start = Instant::now();
+        let write_result = stdin.write_all(&image.pixels);
+        stdin_write_total += write_start.elapsed();
+        if write_result.is_err() {
+            end_reason = "ffmpeg_stdin_closed";
             client_alive.store(false, Ordering::Relaxed);
             break;
         }
+        frames_written += 1;
         if setup.realtime {
             sleep_remainder(frame_duration, frame_start.elapsed());
         }
@@ -1061,8 +1092,32 @@ fn handle_video_stream(
         let _ = child.kill();
     }
     let _ = stdout_thread.join();
+    if !client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
+        end_reason = "client_closed";
+    }
     let stderr_text = stderr_thread.join().unwrap_or_default();
     let status = child.wait()?;
+    if setup.verbose {
+        println!(
+            "video-stream timeline={} start={:.3}s duration={:.3}s frames={}/{} written={} reason={} setup={:.2}ms audio={} audio_setup={:.2}ms ffmpeg_spawn={:.2}ms render_total={:.2}ms stdin_write={:.2}ms total={:.2}ms status={} stderr_bytes={}",
+            setup.timeline_id,
+            setup.start_seconds,
+            video_seconds,
+            frames_rendered,
+            total_frames,
+            frames_written,
+            end_reason,
+            ms(setup_time),
+            audio_source,
+            ms(audio_time),
+            ms(ffmpeg_spawn_time),
+            ms(render_total),
+            ms(stdin_write_total),
+            ms(stream_start.elapsed()),
+            status,
+            stderr_text.len(),
+        );
+    }
     if !status.success() && client_alive.load(Ordering::Relaxed) {
         return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
     }
