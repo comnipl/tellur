@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -73,12 +73,15 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         app.reload_plugin_if_changed()?;
     }
 
+    let video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let app = Arc::clone(&app);
+                let video_epochs = Arc::clone(&video_epochs);
                 thread::spawn(move || {
-                    if let Err(e) = handle_connection(app, stream) {
+                    if let Err(e) = handle_connection(app, video_epochs, stream) {
                         if !is_client_disconnect(e.as_ref()) {
                             eprintln!("request failed: {e}");
                         }
@@ -93,6 +96,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
 fn handle_connection(
     app: Arc<Mutex<PreviewApp>>,
+    video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     mut stream: TcpStream,
 ) -> Result<(), Box<dyn Error>> {
     let request = match read_request(&mut stream)? {
@@ -112,7 +116,9 @@ fn handle_connection(
 
     let path = request.path.clone();
     match path.as_str() {
-        "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
+        "/api/video.mp4" | "/api/video" => {
+            handle_video_stream(app, video_epochs, stream, request.query)
+        }
         "/api/events" => handle_event_stream(app, stream),
         "/api/info" | "/api/frame" | "/api/stream" | "/api/arrangement" => {
             let mut app = app
@@ -699,9 +705,25 @@ fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
 
 fn handle_video_stream(
     app: Arc<Mutex<PreviewApp>>,
+    video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     mut stream: TcpStream,
     query: HashMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
+    let video_epoch = {
+        let session = query
+            .get("session")
+            .cloned()
+            .unwrap_or_else(|| "default".to_owned());
+        let mut epochs = video_epochs
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "video epoch lock poisoned".into() })?;
+        Arc::clone(
+            epochs
+                .entry(session)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        )
+    };
+    let stream_epoch = video_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
     let setup = {
         let mut app = app
             .lock()
@@ -755,6 +777,9 @@ fn handle_video_stream(
             realtime: !cacheable,
         }
     };
+    if video_epoch.load(Ordering::Acquire) != stream_epoch {
+        return Ok(());
+    }
 
     // The frame-quantized video length, used to BOUND the output below with `-t`
     // (instead of `-shortest`; see that arg). This is also the loop's frame count.
@@ -787,6 +812,9 @@ fn handle_video_stream(
             .and_then(|buf| write_temp_wav(&buf).ok())
             .map(TempFile)
     };
+    if video_epoch.load(Ordering::Acquire) != stream_epoch {
+        return Ok(());
+    }
 
     write!(
         stream,
@@ -967,7 +995,10 @@ fn handle_video_stream(
     let frame_duration = Duration::from_secs_f32(frame_step);
 
     for frame in 0..total_frames {
-        if !client_alive.load(Ordering::Relaxed) {
+        if !client_alive.load(Ordering::Relaxed)
+            || video_epoch.load(Ordering::Acquire) != stream_epoch
+        {
+            client_alive.store(false, Ordering::Relaxed);
             break;
         }
 
@@ -1012,6 +1043,10 @@ fn handle_video_stream(
             frame.image
         };
 
+        if video_epoch.load(Ordering::Acquire) != stream_epoch {
+            client_alive.store(false, Ordering::Relaxed);
+            break;
+        }
         if stdin.write_all(&image.pixels).is_err() {
             client_alive.store(false, Ordering::Relaxed);
             break;

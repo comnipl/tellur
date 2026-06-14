@@ -124,6 +124,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     }
     let cancelled = false;
     const cache = cacheRef.current!;
+    const streamSession = createStreamSession();
 
     const buildVideoUrl = (start: number, end: number): string => {
       const segmentDuration =
@@ -139,6 +140,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         crf: CRF,
         duration: segmentDuration,
         cacheKey: pluginKey,
+        session: streamSession,
       });
     };
 
@@ -327,4 +329,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
 function clamp(value: number, duration: number): number {
   return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, duration));
+}
+
+function createStreamSession(): string {
+  const crypto = globalThis.crypto;
+  if (crypto && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
