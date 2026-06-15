@@ -13,6 +13,7 @@ import type {
 const EPSILON = 0.001;
 const CRF = 23;
 const STILL_REQUEST_DEBOUNCE_MS = 100;
+const PLAYBACK_PROXY_MAX_EDGE = 640;
 
 export interface PreviewState {
   seconds: number;
@@ -55,6 +56,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const duration = timeline?.duration ?? 0;
   const width = Math.max(1, Math.round(resolution.width));
   const height = Math.max(1, Math.round(resolution.height));
+  const playbackResolution = useMemo(
+    () => playbackProxyResolution({ width, height }),
+    [width, height],
+  );
+  const playbackWidth = playbackResolution.width;
+  const playbackHeight = playbackResolution.height;
   const gop = Math.max(1, Math.floor(fps / 4));
 
   const groupKey = useMemo(
@@ -62,14 +69,14 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       groupKeyOf({
         pluginKey,
         timelineId,
-        width,
-        height,
+        width: playbackWidth,
+        height: playbackHeight,
         fps,
         motionBlur,
         gop,
         crf: CRF,
       }),
-    [pluginKey, timelineId, width, height, fps, motionBlur, gop],
+    [pluginKey, timelineId, playbackWidth, playbackHeight, fps, motionBlur, gop],
   );
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -148,8 +155,8 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       return videoUrl({
         timelineId,
         time: start,
-        width,
-        height,
+        width: playbackWidth,
+        height: playbackHeight,
         fps,
         motionBlur,
         gop,
@@ -289,7 +296,20 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
       playerRef.current = null;
       void player?.dispose();
     };
-  }, [groupKey, pluginKey, timelineId, duration, width, height, fps, motionBlur, gop, setSeconds]);
+  }, [
+    groupKey,
+    pluginKey,
+    timelineId,
+    duration,
+    width,
+    height,
+    playbackWidth,
+    playbackHeight,
+    fps,
+    motionBlur,
+    gop,
+    setSeconds,
+  ]);
 
   // Revoke the last still URL on unmount.
   useEffect(
@@ -374,4 +394,18 @@ function createStreamSession(): string {
 
 function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === "AbortError";
+}
+
+function playbackProxyResolution(resolution: PreviewResolution): PreviewResolution {
+  const maxEdge = Math.max(resolution.width, resolution.height);
+  const scale =
+    maxEdge <= PLAYBACK_PROXY_MAX_EDGE ? 1 : PLAYBACK_PROXY_MAX_EDGE / maxEdge;
+  return {
+    width: evenDimension(resolution.width * scale),
+    height: evenDimension(resolution.height * scale),
+  };
+}
+
+function evenDimension(value: number): number {
+  return Math.max(2, Math.round(value / 2) * 2);
 }
