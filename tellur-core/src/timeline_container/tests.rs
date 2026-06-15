@@ -962,6 +962,36 @@ fn sequence_concatenates_audio() {
     let _ = std::fs::remove_file(&b);
 }
 
+#[test]
+fn render_audio_window_matches_full_mix_slice_and_pads_tail() {
+    let level = (0.5 * i16::MAX as f32) as i16;
+    let frames = TEST_RATE as usize;
+    let path = const_wav("window", TEST_RATE, frames, level);
+
+    let tl = Timeline::builder()
+        .child(AudioFile::builder().path(path.to_str().unwrap()))
+        .build();
+    let resolved = resolve_audio(tl).expect("media-backed");
+    let full = resolved.render_audio(TEST_RATE, 1);
+    let window = resolved.render_audio_window(0.25, 0.5, TEST_RATE, 1);
+
+    let start = (TEST_RATE / 4) as usize;
+    let end = start + (TEST_RATE / 2) as usize;
+    assert_eq!(window.samples.len(), end - start);
+    for (a, b) in window.samples.iter().zip(&full.samples[start..end]) {
+        assert!(
+            (a - b).abs() < 1e-6,
+            "window sample {a} should match full mix slice sample {b}"
+        );
+    }
+
+    let padded = resolved.render_audio_window(1.25, 0.25, TEST_RATE, 1);
+    assert_eq!(padded.samples.len(), (TEST_RATE / 4) as usize);
+    assert!(padded.samples.iter().all(|sample| *sample == 0.0));
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // (mix) `gain` scales the decoded samples linearly.
 #[test]
 fn gain_scales_audio() {

@@ -69,7 +69,7 @@ export function App() {
     DEFAULT_PREVIEW_RESOLUTION,
   );
   const [fps, setFps] = useState(30);
-  const [motionBlur, setMotionBlur] = useState(true);
+  const [motionBlur, setMotionBlur] = useState(false);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
     zoom: DEFAULT_TIMELINE_ZOOM,

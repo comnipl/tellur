@@ -55,6 +55,7 @@ export interface VideoRequestParams extends FrameRequestParams {
   gop: number;
   crf: number;
   duration?: number;
+  session?: string;
 }
 
 export function videoUrl(params: VideoRequestParams): string {
@@ -71,6 +72,9 @@ export function videoUrl(params: VideoRequestParams): string {
   });
   if (params.duration != null) {
     query.set("duration", params.duration.toFixed(4));
+  }
+  if (params.session) {
+    query.set("session", params.session);
   }
   return `/api/video.mp4?${query}`;
 }

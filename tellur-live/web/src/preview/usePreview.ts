@@ -12,6 +12,7 @@ import type {
 
 const EPSILON = 0.001;
 const CRF = 23;
+const STILL_REQUEST_DEBOUNCE_MS = 100;
 
 export interface PreviewState {
   seconds: number;
@@ -107,6 +108,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   // latest, and the object URL is revoked only after the next one is swapped in.
   const stillTokenRef = useRef(0);
   const stillUrlRef = useRef<string | null>(null);
+  const stillRequestRef = useRef<{
+    timer: ReturnType<typeof setTimeout> | null;
+    controller: AbortController | null;
+  }>({ timer: null, controller: null });
 
   const setSeconds = useCallback((value: number) => {
     secondsRef.current = value;
@@ -124,6 +129,18 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     }
     let cancelled = false;
     const cache = cacheRef.current!;
+    const streamSession = createStreamSession();
+    const cancelStillRequest = () => {
+      const pending = stillRequestRef.current;
+      if (pending.timer != null) {
+        clearTimeout(pending.timer);
+        pending.timer = null;
+      }
+      if (pending.controller) {
+        pending.controller.abort();
+        pending.controller = null;
+      }
+    };
 
     const buildVideoUrl = (start: number, end: number): string => {
       const segmentDuration =
@@ -139,6 +156,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         crf: CRF,
         duration: segmentDuration,
         cacheKey: pluginKey,
+        session: streamSession,
       });
     };
 
@@ -161,36 +179,51 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         cacheKey: pluginKey,
       });
       const token = ++stillTokenRef.current;
-      void fetch(url, { cache: "no-store" })
-        .then((response) => {
-          if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
-          return response.blob();
-        })
-        .then((blob) => {
-          if (token !== stillTokenRef.current || cancelled) return;
-          const objectUrl = URL.createObjectURL(blob);
-          // Decode in a throwaway Image first so a slow/broken frame never clobbers a
-          // newer one and we never flash a half-decoded image.
-          const image = new Image();
-          image.onload = () => {
+      cancelStillRequest();
+      const controller = new AbortController();
+      stillRequestRef.current.controller = controller;
+      stillRequestRef.current.timer = setTimeout(() => {
+        stillRequestRef.current.timer = null;
+        void fetch(url, { cache: "no-store", signal: controller.signal })
+          .then((response) => {
+            if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+            return response.blob();
+          })
+          .then((blob) => {
             if (token !== stillTokenRef.current || cancelled) {
-              URL.revokeObjectURL(objectUrl);
               return;
             }
-            const previous = stillUrlRef.current;
-            stillUrlRef.current = objectUrl;
-            setImageSrc(objectUrl);
-            // Reveal only now — the still matches the intended time, so swapping the held
-            // video frame for it is seamless (same frame, no flash).
-            if (revealOnLoad) setImageVisible(true);
-            if (previous && previous !== objectUrl) URL.revokeObjectURL(previous);
-          };
-          image.onerror = () => URL.revokeObjectURL(objectUrl);
-          image.src = objectUrl;
-        })
-        .catch(() => {
-          // A failed still leaves the held frame up; the player surfaces real errors.
-        });
+            const objectUrl = URL.createObjectURL(blob);
+            // Decode in a throwaway Image first so a slow/broken frame never clobbers a
+            // newer one and we never flash a half-decoded image.
+            const image = new Image();
+            image.onload = () => {
+              if (token !== stillTokenRef.current || cancelled) {
+                URL.revokeObjectURL(objectUrl);
+                return;
+              }
+              const previous = stillUrlRef.current;
+              stillUrlRef.current = objectUrl;
+              setImageSrc(objectUrl);
+              // Reveal only now — the still matches the intended time, so swapping the held
+              // video frame for it is seamless (same frame, no flash).
+              if (revealOnLoad) setImageVisible(true);
+              if (previous && previous !== objectUrl) URL.revokeObjectURL(previous);
+            };
+            image.onerror = () => URL.revokeObjectURL(objectUrl);
+            image.src = objectUrl;
+          })
+          .catch((e) => {
+            if (!isAbortError(e)) {
+              // A failed still leaves the held frame up; the player surfaces real errors.
+            }
+          })
+          .finally(() => {
+            if (stillRequestRef.current.controller === controller) {
+              stillRequestRef.current.controller = null;
+            }
+          });
+      }, STILL_REQUEST_DEBOUNCE_MS);
     };
 
     void cache.activatePlugin(pluginKey).then(() => {
@@ -224,6 +257,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
               // (e.g. the still requested as play() began) can't re-cover the now-running
               // video by firing its revealOnLoad after we switched to video.
               stillTokenRef.current++;
+              cancelStillRequest();
             } else if (cover === "hold") {
               // The current display (parked video frame or trailing still) is the best
               // stand-in (pause / end / play / paused scrub over cold frames): keep it
@@ -250,11 +284,23 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
     return () => {
       cancelled = true;
+      cancelStillRequest();
       const player = playerRef.current;
       playerRef.current = null;
       void player?.dispose();
     };
-  }, [groupKey, pluginKey, timelineId, duration, width, height, fps, motionBlur, gop, setSeconds]);
+  }, [
+    groupKey,
+    pluginKey,
+    timelineId,
+    duration,
+    width,
+    height,
+    fps,
+    motionBlur,
+    gop,
+    setSeconds,
+  ]);
 
   // Revoke the last still URL on unmount.
   useEffect(
@@ -327,4 +373,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
 function clamp(value: number, duration: number): number {
   return Math.max(0, Math.min(Number.isFinite(value) ? value : 0, duration));
+}
+
+function createStreamSession(): string {
+  const crypto = globalThis.crypto;
+  if (crypto && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
 }

@@ -194,12 +194,34 @@ impl TimelineComponent for AudioFile {
     }
 
     fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
-        // Decode the whole (trimmed) source, conform it to the mix's fixed
-        // rate / channel layout (applying gain + the placement speed), and sum
-        // it in at the resolved start. Decode failure ⇒ contribute silence.
-        if let Ok(buf) = audio::decode_file(&self.path, self.trim) {
+        // Decode only the source span that can land inside the current mix
+        // window, conform it to the mix's fixed rate / channel layout, and sum
+        // it in at the visible destination start. Decode failure ⇒ silence.
+        let speed = if speed.is_finite() && speed > 0.0 {
+            speed
+        } else {
+            1.0
+        };
+        let mix_duration = mix.duration();
+        let visible_start = start_secs.max(0.0);
+        if visible_start >= mix_duration {
+            return;
+        }
+        let source_offset = ((visible_start - start_secs) * speed).max(0.0);
+        let source_window = (mix_duration - visible_start).max(0.0) * speed;
+        let trim_start = self.trim.map(|(start, _)| start).unwrap_or(0.0);
+        let trim_end = self.trim.map(|(_, end)| end);
+        let decode_start = trim_start + source_offset;
+        let decode_end = trim_end
+            .map(|end| (decode_start + source_window).min(end))
+            .unwrap_or(decode_start + source_window);
+        if decode_end <= decode_start {
+            return;
+        }
+
+        if let Ok(buf) = audio::decode_file(&self.path, Some((decode_start, decode_end))) {
             let conformed = audio::conform(buf, mix.rate(), mix.channels(), self.gain, speed);
-            mix.add(&conformed, start_secs);
+            mix.add(&conformed, visible_start);
         }
     }
 

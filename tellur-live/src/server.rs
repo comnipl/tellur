@@ -5,7 +5,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -23,6 +23,11 @@ use crate::build_watch::{
 };
 use crate::plugin::HotReloadPlugin;
 use tellur_plugin::TimelineInfo;
+
+/// Live preview re-encodes short MP4 segments repeatedly. Keeping the render
+/// cache below the renderer's export-oriented 1 GiB default avoids memory
+/// pressure and LRU churn making playback look stalled.
+const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -54,7 +59,8 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
-        ctx: CachingRenderContext::new().with_gpu_preference(options.gpu_preference),
+        ctx: CachingRenderContext::with_capacity_bytes(LIVE_PREVIEW_CACHE_BYTES)
+            .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
         verbose: options.verbose,
@@ -67,12 +73,15 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         app.reload_plugin_if_changed()?;
     }
 
+    let video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let app = Arc::clone(&app);
+                let video_epochs = Arc::clone(&video_epochs);
                 thread::spawn(move || {
-                    if let Err(e) = handle_connection(app, stream) {
+                    if let Err(e) = handle_connection(app, video_epochs, stream) {
                         if !is_client_disconnect(e.as_ref()) {
                             eprintln!("request failed: {e}");
                         }
@@ -87,6 +96,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
 fn handle_connection(
     app: Arc<Mutex<PreviewApp>>,
+    video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     mut stream: TcpStream,
 ) -> Result<(), Box<dyn Error>> {
     let request = match read_request(&mut stream)? {
@@ -106,7 +116,9 @@ fn handle_connection(
 
     let path = request.path.clone();
     match path.as_str() {
-        "/api/video.mp4" | "/api/video" => handle_video_stream(app, stream, request.query),
+        "/api/video.mp4" | "/api/video" => {
+            handle_video_stream(app, video_epochs, stream, request.query)
+        }
         "/api/events" => handle_event_stream(app, stream),
         "/api/info" | "/api/frame" | "/api/stream" | "/api/arrangement" => {
             let mut app = app
@@ -487,6 +499,7 @@ impl PreviewApp {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
         }
         let after = self.ctx.metrics();
+        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
 
         Ok(VideoFrame {
             image,
@@ -495,6 +508,9 @@ impl PreviewApp {
             cache_misses: after.misses.saturating_sub(before.misses),
             bytes_cached: after.bytes_cached,
             gpu_available: after.gpu_available,
+            gpu_init_attempted: after.gpu_init_attempted,
+            gpu_init_error,
+            gpu_preference: format!("{:?}", after.gpu_preference),
             gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
             gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
         })
@@ -508,7 +524,7 @@ impl PreviewApp {
 
         let encode_start = Instant::now();
         let mut body = Vec::new();
-        rendered.image.export_png(&mut body)?;
+        export_preview_png(&rendered.image, &mut body)?;
         let encode_time = encode_start.elapsed();
 
         let mut stats = rendered.stats;
@@ -584,6 +600,7 @@ impl PreviewApp {
         let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         let after = self.ctx.metrics();
+        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
 
         Ok(RenderedImage {
             image,
@@ -600,6 +617,9 @@ impl PreviewApp {
                 cache_misses: after.misses.saturating_sub(before.misses),
                 bytes_cached: after.bytes_cached,
                 gpu_available: after.gpu_available,
+                gpu_init_attempted: after.gpu_init_attempted,
+                gpu_init_error,
+                gpu_preference: format!("{:?}", after.gpu_preference),
                 gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
                 gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
             },
@@ -622,6 +642,7 @@ struct VideoStreamSetup {
     start_seconds: f32,
     cache_control: &'static str,
     realtime: bool,
+    verbose: bool,
 }
 
 struct VideoFrame {
@@ -631,6 +652,9 @@ struct VideoFrame {
     cache_misses: u64,
     bytes_cached: usize,
     gpu_available: bool,
+    gpu_init_attempted: bool,
+    gpu_init_error: Option<String>,
+    gpu_preference: String,
     gpu_ops: u64,
     gpu_readbacks: u64,
 }
@@ -693,9 +717,27 @@ fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
 
 fn handle_video_stream(
     app: Arc<Mutex<PreviewApp>>,
+    video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
     mut stream: TcpStream,
     query: HashMap<String, String>,
 ) -> Result<(), Box<dyn Error>> {
+    let stream_start = Instant::now();
+    let video_epoch = {
+        let session = query
+            .get("session")
+            .cloned()
+            .unwrap_or_else(|| "default".to_owned());
+        let mut epochs = video_epochs
+            .lock()
+            .map_err(|_| -> Box<dyn Error> { "video epoch lock poisoned".into() })?;
+        Arc::clone(
+            epochs
+                .entry(session)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0))),
+        )
+    };
+    let stream_epoch = video_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+    let setup_start = Instant::now();
     let setup = {
         let mut app = app
             .lock()
@@ -747,14 +789,26 @@ fn handle_video_stream(
                 "no-store"
             },
             realtime: !cacheable,
+            verbose: app.verbose,
         }
     };
+    let setup_time = setup_start.elapsed();
+    if video_epoch.load(Ordering::Acquire) != stream_epoch {
+        return Ok(());
+    }
 
-    // Render the timeline's audio once and stage it as a temp WAV so the stream
-    // can mux a real AAC track. `render_audio` returns a full-length buffer
-    // (silent if the tree has no audio sources); `None` only for legacy
-    // collections, where the stream falls back to a generated silent track. The
-    // guard removes the file when this function returns.
+    // The frame-quantized video length, used to BOUND the output below with `-t`
+    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
+    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
+    let video_seconds = total_frames as f32 / setup.fps as f32;
+
+    // Render only this stream's audio window and stage it as a temp WAV. Full
+    // timeline audio can be huge, and live preview requests many short cache
+    // segments, so every segment must mix only `[start, start + video_seconds)`.
+    // `None` only for legacy/custom collections that do not expose audio, where
+    // the stream falls back to a generated silent track. The guard removes the
+    // file when this function returns.
+    let audio_start = Instant::now();
     let audio_wav = {
         let mut app = app
             .lock()
@@ -763,10 +817,27 @@ fn handle_video_stream(
         app.plugin
             .collection()
             .ok()
-            .and_then(|c| c.render_audio(&setup.timeline_id, AUDIO_RATE, AUDIO_CHANNELS))
+            .and_then(|c| {
+                c.render_audio_window(
+                    &setup.timeline_id,
+                    setup.start_seconds,
+                    video_seconds,
+                    AUDIO_RATE,
+                    AUDIO_CHANNELS,
+                )
+            })
             .and_then(|buf| write_temp_wav(&buf).ok())
             .map(TempFile)
     };
+    let audio_time = audio_start.elapsed();
+    let audio_source = if audio_wav.is_some() {
+        "window_wav"
+    } else {
+        "anullsrc"
+    };
+    if video_epoch.load(Ordering::Acquire) != stream_epoch {
+        return Ok(());
+    }
 
     write!(
         stream,
@@ -780,11 +851,6 @@ fn handle_video_stream(
          Connection: close\r\n\r\n",
         setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
     )?;
-
-    // The frame-quantized video length, used to BOUND the output below with `-t`
-    // (instead of `-shortest`; see that arg). This is also the loop's frame count.
-    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
-    let video_seconds = total_frames as f32 / setup.fps as f32;
 
     // FLAC block size aligned to ONE video frame's worth of audio samples, applied
     // to the encoder below (only when the sample rate divides evenly by fps — the
@@ -812,15 +878,12 @@ fn handle_video_stream(
         ])
         .args(["-r", &setup.fps.to_string()])
         .args(["-i", "-"]);
-    // Input 1: the audio track. A rendered WAV seeked to the stream's start when
-    // the timeline has audio; otherwise a generated silent track, so every
-    // stream has the same A/V structure the client's SourceBuffer expects.
+    // Input 1: the audio track. A rendered WAV already starts at the stream's
+    // timeline time; otherwise a generated silent track keeps every stream in
+    // the same A/V structure the client's SourceBuffer expects.
     match &audio_wav {
         Some(wav) => {
-            cmd.arg("-ss")
-                .arg(format!("{:.6}", setup.start_seconds))
-                .arg("-i")
-                .arg(&wav.0);
+            cmd.arg("-i").arg(&wav.0);
         }
         None => {
             cmd.args(["-f", "lavfi"]).arg("-i").arg(format!(
@@ -903,7 +966,9 @@ fn handle_video_stream(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let spawn_start = Instant::now();
     let mut child = cmd.spawn()?;
+    let ffmpeg_spawn_time = spawn_start.elapsed();
 
     let mut stdin = child.stdin.take().ok_or("ffmpeg stdin was not piped")?;
     let mut stdout = child.stdout.take().ok_or("ffmpeg stdout was not piped")?;
@@ -953,9 +1018,21 @@ fn handle_video_stream(
 
     let frame_step = 1.0 / setup.fps as f32;
     let frame_duration = Duration::from_secs_f32(frame_step);
+    let mut frames_rendered = 0u64;
+    let mut frames_written = 0u64;
+    let mut render_total = Duration::ZERO;
+    let mut stdin_write_total = Duration::ZERO;
+    let mut end_reason = "complete";
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {
+            end_reason = "client_closed";
+            client_alive.store(false, Ordering::Relaxed);
+            break;
+        }
+        if video_epoch.load(Ordering::Acquire) != stream_epoch {
+            end_reason = "superseded";
+            client_alive.store(false, Ordering::Relaxed);
             break;
         }
 
@@ -980,7 +1057,7 @@ fn handle_video_stream(
             )?;
             if app.verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -992,18 +1069,33 @@ fn handle_video_stream(
                     frame.cache_hits,
                     frame.cache_misses,
                     format_bytes(frame.bytes_cached as u64),
+                    frame.gpu_preference,
+                    frame.gpu_init_attempted,
+                    frame.gpu_init_error.as_deref().unwrap_or("-"),
                     frame.gpu_available,
                     frame.gpu_ops,
                     frame.gpu_readbacks,
                 );
             }
+            render_total += frame.render_time;
+            frames_rendered += 1;
             frame.image
         };
 
-        if stdin.write_all(&image.pixels).is_err() {
+        if video_epoch.load(Ordering::Acquire) != stream_epoch {
+            end_reason = "superseded";
             client_alive.store(false, Ordering::Relaxed);
             break;
         }
+        let write_start = Instant::now();
+        let write_result = stdin.write_all(&image.pixels);
+        stdin_write_total += write_start.elapsed();
+        if write_result.is_err() {
+            end_reason = "ffmpeg_stdin_closed";
+            client_alive.store(false, Ordering::Relaxed);
+            break;
+        }
+        frames_written += 1;
         if setup.realtime {
             sleep_remainder(frame_duration, frame_start.elapsed());
         }
@@ -1014,8 +1106,32 @@ fn handle_video_stream(
         let _ = child.kill();
     }
     let _ = stdout_thread.join();
+    if !client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
+        end_reason = "client_closed";
+    }
     let stderr_text = stderr_thread.join().unwrap_or_default();
     let status = child.wait()?;
+    if setup.verbose {
+        println!(
+            "video-stream timeline={} start={:.3}s duration={:.3}s frames={}/{} written={} reason={} setup={:.2}ms audio={} audio_setup={:.2}ms ffmpeg_spawn={:.2}ms render_total={:.2}ms stdin_write={:.2}ms total={:.2}ms status={} stderr_bytes={}",
+            setup.timeline_id,
+            setup.start_seconds,
+            video_seconds,
+            frames_rendered,
+            total_frames,
+            frames_written,
+            end_reason,
+            ms(setup_time),
+            audio_source,
+            ms(audio_time),
+            ms(ffmpeg_spawn_time),
+            ms(render_total),
+            ms(stdin_write_total),
+            ms(stream_start.elapsed()),
+            status,
+            stderr_text.len(),
+        );
+    }
     if !status.success() && client_alive.load(Ordering::Relaxed) {
         return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
     }
@@ -1046,6 +1162,9 @@ struct FrameRenderStats {
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
+    gpu_preference: String,
+    gpu_init_attempted: bool,
+    gpu_init_error: Option<String>,
     gpu_available: bool,
     gpu_ops: u64,
     gpu_readbacks: u64,
@@ -1053,7 +1172,7 @@ struct FrameRenderStats {
 
 impl FrameRenderStats {
     fn headers(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut headers = vec![
             ("X-Tellur-Render-Ms", format!("{:.2}", ms(self.render_time))),
             ("X-Tellur-Encode-Ms", format!("{:.2}", ms(self.encode_time))),
             ("X-Tellur-Total-Ms", format!("{:.2}", ms(self.total_time))),
@@ -1067,10 +1186,19 @@ impl FrameRenderStats {
             ("X-Tellur-Cache-Hits", self.cache_hits.to_string()),
             ("X-Tellur-Cache-Misses", self.cache_misses.to_string()),
             ("X-Tellur-GPU-Available", self.gpu_available.to_string()),
+            (
+                "X-Tellur-GPU-Init-Attempted",
+                self.gpu_init_attempted.to_string(),
+            ),
+            ("X-Tellur-GPU-Preference", self.gpu_preference.clone()),
             ("X-Tellur-GPU-Active", (self.gpu_ops > 0).to_string()),
             ("X-Tellur-GPU-Ops", self.gpu_ops.to_string()),
             ("X-Tellur-GPU-Readbacks", self.gpu_readbacks.to_string()),
-        ]
+        ];
+        if let Some(error) = &self.gpu_init_error {
+            headers.push(("X-Tellur-GPU-Init-Error", sanitize_header_value(error)));
+        }
+        headers
     }
 }
 
@@ -1098,7 +1226,7 @@ impl FrameFormat {
 
 fn log_frame_stats(stats: &FrameRenderStats) {
     println!(
-        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
         stats.timeline_id,
         stats.seconds,
         stats.resolution.width,
@@ -1111,6 +1239,9 @@ fn log_frame_stats(stats: &FrameRenderStats) {
         stats.cache_hits,
         stats.cache_misses,
         format_bytes(stats.bytes_cached as u64),
+        stats.gpu_preference,
+        stats.gpu_init_attempted,
+        stats.gpu_init_error.as_deref().unwrap_or("-"),
         stats.gpu_available,
         stats.gpu_ops,
         stats.gpu_readbacks,
@@ -1144,11 +1275,11 @@ fn request_fps(query: &HashMap<String, String>, default_fps: u32) -> u32 {
         .unwrap_or(default_fps.max(1))
 }
 
-/// The preview's motion-blur toggle; on unless the request says otherwise.
+/// The preview's motion-blur toggle; off unless the request explicitly opts in.
 fn request_motion_blur(query: &HashMap<String, String>) -> bool {
-    !matches!(
+    matches!(
         query.get("motion_blur").map(String::as_str),
-        Some("0") | Some("false")
+        Some("1") | Some("true")
     )
 }
 
@@ -1182,6 +1313,29 @@ fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> R
 
 fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
+}
+
+fn export_preview_png<W: Write>(image: &CpuRasterImage, writer: W) -> Result<(), Box<dyn Error>> {
+    if image.format != PixelFormat::Rgba8 {
+        return Err(format!("png frame requires Rgba8, got {:?}", image.format).into());
+    }
+
+    let expected = (image.width as usize) * (image.height as usize) * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "png frame size mismatch: expected {expected} bytes, got {}",
+            image.pixels.len()
+        )
+        .into());
+    }
+
+    let mut encoder = png::Encoder::new(writer, image.width, image.height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fastest);
+    let mut png_writer = encoder.write_header()?;
+    png_writer.write_image_data(&image.pixels)?;
+    Ok(())
 }
 
 /// Clamps a requested frame time into the timeline's RENDERABLE range.
@@ -1348,6 +1502,13 @@ fn format_bytes(b: u64) -> String {
     } else {
         format!("{b} B")
     }
+}
+
+fn sanitize_header_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn info_json(
@@ -1538,6 +1699,28 @@ mod tests {
         assert_eq!(clamp_to_renderable(0.005, 0.01, 60), 0.0);
         // A negative request floors at 0.0.
         assert_eq!(clamp_to_renderable(-2.0, 7.6, 60), 0.0);
+    }
+
+    #[test]
+    fn request_motion_blur_defaults_off() {
+        assert!(!request_motion_blur(&HashMap::new()));
+
+        let mut query = HashMap::new();
+        query.insert("motion_blur".to_owned(), "0".to_owned());
+        assert!(!request_motion_blur(&query));
+
+        query.insert("motion_blur".to_owned(), "false".to_owned());
+        assert!(!request_motion_blur(&query));
+    }
+
+    #[test]
+    fn request_motion_blur_is_explicitly_opt_in() {
+        let mut query = HashMap::new();
+        query.insert("motion_blur".to_owned(), "1".to_owned());
+        assert!(request_motion_blur(&query));
+
+        query.insert("motion_blur".to_owned(), "true".to_owned());
+        assert!(request_motion_blur(&query));
     }
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an

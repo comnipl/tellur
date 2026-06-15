@@ -267,6 +267,7 @@ pub struct CachingRenderContext {
     gpu_preference: GpuPreference,
     gpu: Option<GpuRenderer>,
     gpu_init_attempted: bool,
+    gpu_init_error: Option<String>,
     motion_blur_enabled: bool,
     // Running total of every `ctx.render` call's inclusive duration.
     // A `render` invocation snapshots this on entry and re-reads it on
@@ -298,6 +299,7 @@ impl CachingRenderContext {
             gpu_preference: GpuPreference::Auto,
             gpu: None,
             gpu_init_attempted: false,
+            gpu_init_error: None,
             motion_blur_enabled: true,
             total_render_time: Duration::ZERO,
         }
@@ -330,7 +332,15 @@ impl CachingRenderContext {
             return None;
         }
         self.gpu_init_attempted = true;
-        self.gpu = GpuRenderer::new().ok();
+        match GpuRenderer::new() {
+            Ok(gpu) => {
+                self.gpu_init_error = None;
+                self.gpu = Some(gpu);
+            }
+            Err(err) => {
+                self.gpu_init_error = Some(err);
+            }
+        }
         self.gpu.as_mut()
     }
 
@@ -342,6 +352,12 @@ impl CachingRenderContext {
     /// Configured maximum capacity in bytes.
     pub fn capacity_bytes(&self) -> usize {
         self.cap_bytes
+    }
+
+    /// The last GPU initialization error, when backend creation was attempted
+    /// but no renderer is available.
+    pub fn gpu_init_error(&self) -> Option<&str> {
+        self.gpu_init_error.as_deref()
     }
 
     /// A snapshot of the cumulative cache counters. The per-type table

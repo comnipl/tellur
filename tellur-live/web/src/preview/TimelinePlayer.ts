@@ -15,11 +15,11 @@ const PLAY_AHEAD = 10;
 // Buffered history kept behind the playhead before eviction frees it. The persistent
 // green bar comes from IndexedDB, so evicting MSE never shrinks it.
 const KEEP_BEHIND = 6;
-// Max seconds streamed (and cached) per /api/video.mp4 request. The fill loop streams
-// FORWARD from the playhead in pieces of at most this length, so an interrupted fetch
-// (seek away) wastes at most this much, and a completed piece is a self-contained,
-// frame-aligned cached segment.
-const STREAM_PIECE = 3;
+// Max seconds streamed (and cached) per paused/priming /api/video.mp4 request. Active
+// playback uses a much larger cap so ordinary short previews stream as one request, while
+// long timelines still retain a bounded memory/cache footprint.
+const PRIME_STREAM_PIECE = 3;
+const PLAY_STREAM_PIECE = 30;
 // Minimum length for a cached segment row to be worth re-appending from IndexedDB.
 // Shorter rows (shards from the old lookahead-clamped frontier) are streamed over in
 // full pieces instead — putSegment's subsume then deletes them, so a fragmented store
@@ -77,14 +77,13 @@ const STARVE_PROBE = 0.2;
 // codec or appended segments fail to parse. FLAC (not AAC) because AAC's per-encode
 // priming left an audible click at every fresh-encode cache seam; FLAC has zero
 // encoder delay so segments concatenate gaplessly. The three avc1 profiles cover
-// browsers that support different H.264 levels; video-only and bare fallbacks last.
+// browsers that support different H.264 levels; the bare MP4 fallback is last for
+// browsers that accept container-level probing without explicit codecs. Video-only
+// codec strings are intentionally omitted because the server always muxes audio.
 const MP4_MIME_TYPES = [
   'video/mp4; codecs="avc1.42E01E, flac"',
   'video/mp4; codecs="avc1.4D401E, flac"',
   'video/mp4; codecs="avc1.64001E, flac"',
-  'video/mp4; codecs="avc1.42E01E"',
-  'video/mp4; codecs="avc1.4D401E"',
-  'video/mp4; codecs="avc1.64001E"',
   "video/mp4",
 ];
 
@@ -153,7 +152,7 @@ interface RemoveJob {
 }
 
 type QueuedOp =
-  | ({ kind: "append" } & AppendJob & { settle: () => void })
+  | ({ kind: "append" } & AppendJob & { settle: (ok: boolean) => void })
   | ({ kind: "remove" } & RemoveJob & { settle: () => void });
 
 // A single self-contained MSE-backed timeline player. Owns ONE MediaSource + ONE
@@ -226,9 +225,13 @@ export class TimelinePlayer {
     // Start filling only once BOTH the SourceBuffer is open AND the committed ranges are
     // loaded from IndexedDB. Otherwise, on a warm-cache reload, runFill would start with an
     // empty committedRanges mirror and re-stream a region that is already cached (req 7).
-    void Promise.all([this.ready, committed]).then(() => {
-      if (!this.disposed) this.kickFill();
-    });
+    void Promise.all([this.ready, committed])
+      .then(() => {
+        if (!this.disposed) this.kickFill();
+      })
+      .catch(() => {
+        // init() already surfaced the error; do not retry without a SourceBuffer.
+      });
   }
 
   // ---- public API -------------------------------------------------------------
@@ -347,12 +350,17 @@ export class TimelinePlayer {
     // The video is parked on the correct frame: hold it and swap to the still only once a
     // fresh still for THIS time decodes, so pausing never flashes a stale frame.
     this.setDisplayMode("still", this.position, "hold");
-    // Deliberately do NOT bump fillGen or abort the in-flight stream. The piece being
-    // streamed when the user paused must finish and persist so the just-played region is
-    // cached without waste (req 7) — bumping fillGen would make streamSegment bail before
-    // putSegment. The fill loop re-reads `mode` each iteration, so it transparently
-    // downshifts to the priming look-ahead; the cursor stays put so fetched-ahead work is
-    // retained. (If the loop already idled, kickFill restarts it in priming mode.)
+    // Let short priming pieces finish and persist, but stop a long playback stream
+    // when the user pauses. Otherwise pausing near the start of a long timeline would keep
+    // the server encoding far past the now-still playhead.
+    if (
+      this.inflight &&
+      this.inflight.end - this.inflight.start > PRIME_STREAM_PIECE + EPSILON
+    ) {
+      this.abortInflight();
+    }
+    // The fill loop re-reads `mode` each iteration, so it transparently downshifts to
+    // priming look-ahead. If it already idled, kickFill restarts it in priming mode.
     this.kickFill();
   }
 
@@ -364,7 +372,13 @@ export class TimelinePlayer {
     this.stopTicker();
     this.abortInflight();
     // Drop every queued op so awaiters don't hang and the pump exits.
-    for (const op of this.opQueue.splice(0)) op.settle();
+    for (const op of this.opQueue.splice(0)) {
+      if (op.kind === "append") {
+        op.settle(false);
+      } else {
+        op.settle();
+      }
+    }
     try {
       this.video.pause();
     } catch {
@@ -426,6 +440,7 @@ export class TimelinePlayer {
       };
     } catch (e) {
       if (!this.disposed) this.events.onError?.(String(e));
+      throw e;
     }
   }
 
@@ -496,9 +511,13 @@ export class TimelinePlayer {
   private kickFill(): void {
     if (this.disposed) return;
     if (!this.sourceBuffer) {
-      void this.ready.then(() => {
-        if (!this.disposed) this.kickFill();
-      });
+      void this.ready
+        .then(() => {
+          if (!this.disposed) this.kickFill();
+        })
+        .catch(() => {
+          // init() already surfaced the error; do not retry without a SourceBuffer.
+        });
       return;
     }
     const gen = this.fillGen;
@@ -567,9 +586,13 @@ export class TimelinePlayer {
           (seg.end - seg.start >= MIN_SEGMENT_REUSE ||
             seg.end >= duration - EPSILON);
         if (seg && reusable && seg.end > cursor + EPSILON) {
-          await this.appendSegment(seg.start, await blobToArrayBuffer(seg.blob), gen);
+          const appended = await this.appendSegment(
+            seg.start,
+            await blobToArrayBuffer(seg.blob),
+            gen,
+          );
           if (this.disposed || gen !== this.fillGen) return;
-          if (!this.isTimeBuffered(cursor)) {
+          if (!appended || !this.isTimeBuffered(cursor)) {
             // The append never landed (quota that even eviction couldn't relieve, or
             // an unparsable blob). Drop the range from the in-memory mirror and
             // stream it fresh — putSegment subsumes the stale row, so a bad blob
@@ -588,20 +611,23 @@ export class TimelinePlayer {
       }
 
       // Cache miss: stream FORWARD from the cursor (frame-aligned), bounded by the next
-      // committed cache range (in-memory) and STREAM_PIECE. Deliberately NOT bounded by
-      // targetEnd: the lookahead only gates WHEN to stream (the window check above), never
-      // the piece size. Clamping the piece to the moving lookahead edge degenerates the
-      // frontier into per-tick frame-sized requests once it catches up — each one a fresh
-      // server encode and a one-frame IndexedDB row — grinding forward caching far below
-      // realtime and fragmenting the store.
+      // committed cache range (in-memory). While playing, request a large continuous
+      // stream toward that boundary/tail, capped by PLAY_STREAM_PIECE; while priming,
+      // keep small bounded pieces so paused scrubs do not waste long encodes.
+      // Deliberately NOT bounded by targetEnd: the lookahead only gates WHEN to stream,
+      // never the piece size. Clamping to the moving lookahead edge degenerates the
+      // frontier into per-tick frame-sized requests once it catches up.
       // While the post-failure backoff is armed, end this pass instead of fetching —
       // the ticker re-kicks the fill every frame, so the retry happens as soon as the
       // backoff expires.
       if (Date.now() < this.streamBlockedUntil) return;
       const start = this.frameAlign(cursor);
+      const maxEnd =
+        start +
+        (this.mode === "playing" ? PLAY_STREAM_PIECE : PRIME_STREAM_PIECE);
       const end = Math.min(
         this.nextCachedStart(cursor),
-        start + STREAM_PIECE,
+        maxEnd,
         duration,
       );
       if (end <= start + EPSILON) {
@@ -617,8 +643,9 @@ export class TimelinePlayer {
   // Stream a segment FORWARD from `start` to `end`, appending each slice as it arrives and
   // persisting the WHOLE piece on natural EOF. A partial (aborted) fetch is NOT persisted
   // — a truncated fMP4 isn't a self-contained segment and could overlap a neighbour — so a
-  // cached segment is always frame-aligned and gap-free; STREAM_PIECE keeps the dropped
-  // amount small. Returns how far it actually reached (frame-aligned buffered end).
+  // cached segment is always frame-aligned and gap-free. Paused priming bounds the dropped
+  // amount; active playback aborts its long stream on seek/pause. Returns how far it
+  // actually reached (frame-aligned buffered end).
   private async streamSegment(start: number, end: number, gen: number): Promise<number> {
     const controller = new AbortController();
     const inflight: InFlight = {
@@ -650,8 +677,9 @@ export class TimelinePlayer {
           value.byteOffset + value.byteLength,
         ) as ArrayBuffer;
         inflight.received.push(slice);
-        await this.appendSegment(start, slice.slice(0), gen);
+        const appended = await this.appendSegment(start, slice.slice(0), gen);
         if (this.disposed || gen !== this.fillGen) return reached;
+        if (!appended) throw new Error("SourceBuffer append failed");
         // The live green edge is the buffered end of THIS segment only — never bytes
         // received (which over-report before parse) and never the global buffered end
         // (contaminated by lookahead / eviction). buffered advances per GOP fragment.
@@ -690,24 +718,29 @@ export class TimelinePlayer {
       if (this.inflight === inflight) this.inflight = null;
       if (isAbortError(e)) {
         // Intentional interruption (seek/pause/dispose): drop the partial and recede the
-        // live edge. The bounded STREAM_PIECE keeps the re-streamed amount small.
+        // live edge. Stream spans are bounded so the re-streamed amount stays finite.
         this.emitRanges();
         return reached;
       }
       if (this.disposed || gen !== this.fillGen) return reached;
-      // Arm the backoff and skip past the failed span for this pass; without both,
-      // the per-frame kickFill turns a failing server into a fetch storm.
+      // Arm the backoff and leave this span uncovered; without the backoff, the
+      // per-frame kickFill would turn a failing server or SourceBuffer into a
+      // fetch storm.
       this.streamBlockedUntil = Date.now() + STREAM_ERROR_BACKOFF_MS;
       this.events.onError?.(String(e));
-      return end;
+      return reached;
     }
   }
 
   // Enqueue an append for a segment slice and resolve once it has drained (backpressure
   // so the reader can't outrun the SourceBuffer). The op carries fillGen so a stale
   // cursor's slices are dropped by the pump rather than polluting buffered ranges.
-  private appendSegment(offset: number, data: ArrayBuffer, fillGen: number): Promise<void> {
-    return new Promise<void>((resolve) => {
+  private appendSegment(
+    offset: number,
+    data: ArrayBuffer,
+    fillGen: number,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
       this.opQueue.push({ kind: "append", offset, data, fillGen, settle: resolve });
       void this.pump();
     });
@@ -728,19 +761,24 @@ export class TimelinePlayer {
         if (!sb || this.mediaSource.readyState === "closed") break;
         const op = this.opQueue.shift()!;
         if (op.kind === "append" && op.fillGen !== this.fillGen) {
-          op.settle(); // stale cursor — drop, but settle so the awaiter continues
+          op.settle(false); // stale cursor — drop, but settle so the awaiter continues
           continue;
         }
+        let appended = false;
         try {
           if (op.kind === "append") {
-            await this.appendWithQuota(sb, op.offset, op.data);
+            appended = await this.appendWithQuota(sb, op.offset, op.data);
           } else {
             await this.removeRange(sb, op.start, op.end);
           }
         } catch (e) {
           if (isInvalidState(e)) {
             // MediaSource detached mid-op (teardown) — stop draining.
-            op.settle();
+            if (op.kind === "append") {
+              op.settle(false);
+            } else {
+              op.settle();
+            }
             break;
           }
           if (
@@ -752,7 +790,11 @@ export class TimelinePlayer {
             this.events.onError?.(String(e));
           }
         }
-        op.settle();
+        if (op.kind === "append") {
+          op.settle(appended);
+        } else {
+          op.settle();
+        }
       }
     } finally {
       this.pumping = false;
@@ -763,11 +805,10 @@ export class TimelinePlayer {
     sb: SourceBuffer,
     offset: number,
     data: ArrayBuffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (let attempt = 0; ; attempt++) {
       try {
-        await this.appendOne(sb, offset, data);
-        return;
+        return await this.appendOne(sb, offset, data);
       } catch (e) {
         // QuotaExceededError is thrown synchronously when the buffer is full. Evict
         // and retry; this is the normal path during long playback, not an edge case.
@@ -775,7 +816,7 @@ export class TimelinePlayer {
           if (await this.evictForQuota(sb, offset)) continue;
           // Nothing evictable: give up this append; it will be retried as the
           // playhead advances and frees room.
-          return;
+          return false;
         }
         throw e;
       }
@@ -801,9 +842,13 @@ export class TimelinePlayer {
       }
     }
     // PLAY_AHEAD past both the playhead and the appending segment keeps everything
-    // the player is about to need; segments are at most STREAM_PIECE long, so the
-    // append target itself can never be clipped.
-    const aheadStart = Math.max(playhead, offset) + PLAY_AHEAD;
+    // the player is about to need; include the active stream's nominal end as well so
+    // quota eviction never splits the row that will be persisted when it reaches EOF.
+    const inflightEnd =
+      this.inflight && this.inflight.start <= offset + EPSILON
+        ? this.inflight.end
+        : offset;
+    const aheadStart = Math.max(playhead, offset, inflightEnd) + PLAY_AHEAD;
     if (this.bufferedEnd() > aheadStart + EPSILON) {
       try {
         await this.removeRange(sb, aheadStart, Number.POSITIVE_INFINITY);
@@ -820,11 +865,11 @@ export class TimelinePlayer {
     sb: SourceBuffer,
     offset: number,
     data: ArrayBuffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await waitForSourceBufferIdle(sb);
     // "ended" is fine here — setting timestampOffset / appendBuffer transitions the
     // MediaSource back to "open". Bail only when it's "closed" (detached on teardown).
-    if (this.disposed || this.mediaSource.readyState === "closed") return;
+    if (this.disposed || this.mediaSource.readyState === "closed") return false;
     if (offset !== this.lastAppliedOffset) {
       // Position this segment so buffered-time == timeline-time. Each segment is a
       // self-contained encode with its own IDR at `offset` (a frame-aligned time) and an
@@ -834,10 +879,10 @@ export class TimelinePlayer {
       sb.timestampOffset = offset;
       this.lastAppliedOffset = offset;
     }
-    await new Promise<void>((resolve, reject) => {
+    return await new Promise<boolean>((resolve, reject) => {
       const onEnd = () => {
         cleanup();
-        resolve();
+        resolve(true);
       };
       const onErr = () => {
         cleanup();
@@ -854,7 +899,7 @@ export class TimelinePlayer {
       // during real playback.
       const timer = setTimeout(() => {
         cleanup();
-        resolve();
+        resolve(false);
       }, SETTLE_TIMEOUT_MS);
       sb.addEventListener("updateend", onEnd);
       sb.addEventListener("error", onErr);
@@ -1182,16 +1227,11 @@ export class TimelinePlayer {
   private emitRanges(): void {
     if (this.disposed) return;
     // The green bar = everything playable without re-fetching from the server:
-    // IndexedDB-committed ranges (never shrink under MSE eviction), the in-flight
-    // segment's growing live edge, and whatever currently sits in the MSE buffer.
-    // The live buffer matters twice: an aborted partial stream stays perfectly
-    // playable even though it was never committed, and when IndexedDB writes fail
-    // the buffer is the only cache there is — committed-only would under-report both.
+    // IndexedDB-committed ranges (never shrink under MSE eviction) and whatever
+    // currently sits in the MSE buffer. The live buffer matters twice: an aborted
+    // partial stream stays playable even though it was never committed, and when
+    // IndexedDB writes fail the buffer is the only cache there is.
     const ranges = [...this.committedRanges, ...this.bufferedRanges()];
-    const inflight = this.inflight;
-    if (inflight && inflight.liveEnd > inflight.start + EPSILON) {
-      ranges.push({ start: inflight.start, end: inflight.liveEnd });
-    }
     this.events.onRanges?.(mergeRanges(ranges));
   }
 
@@ -1254,19 +1294,21 @@ export class TimelinePlayer {
     return t;
   }
 
-  // The buffered end of the in-flight segment [start,end] — clamped to its nominal end,
-  // scoped to the range containing `start` so lookahead/eviction of OTHER segments never
-  // moves the live green edge.
+  // The buffered end of the in-flight segment [start,end] — clamped to its nominal end
+  // and scoped to ranges overlapping that segment. The segment start may already be
+  // evicted behind the playhead before EOF, so this must not require a range containing
+  // `start`.
   private liveEndOf(start: number, end: number): number {
     const sb = this.sourceBuffer;
     if (!sb) return start;
     const buffered = sb.buffered;
+    let liveEnd = start;
     for (let i = 0; i < buffered.length; i++) {
-      if (buffered.start(i) <= start + EPSILON && buffered.end(i) > start + EPSILON) {
-        return Math.min(end, buffered.end(i));
+      if (buffered.end(i) > start + EPSILON && buffered.start(i) < end - EPSILON) {
+        liveEnd = Math.max(liveEnd, Math.min(end, buffered.end(i)));
       }
     }
-    return start;
+    return liveEnd;
   }
 
   private bufferedEnd(): number {
@@ -1356,7 +1398,7 @@ function selectMimeType(): string {
   for (const mimeType of MP4_MIME_TYPES) {
     if (MediaSource.isTypeSupported(mimeType)) return mimeType;
   }
-  return "video/mp4";
+  throw new Error("MP4 preview streams with FLAC audio are not supported");
 }
 
 function waitForSourceOpen(mediaSource: MediaSource): Promise<void> {
