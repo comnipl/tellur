@@ -499,6 +499,7 @@ impl PreviewApp {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
         }
         let after = self.ctx.metrics();
+        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
 
         Ok(VideoFrame {
             image,
@@ -507,6 +508,9 @@ impl PreviewApp {
             cache_misses: after.misses.saturating_sub(before.misses),
             bytes_cached: after.bytes_cached,
             gpu_available: after.gpu_available,
+            gpu_init_attempted: after.gpu_init_attempted,
+            gpu_init_error,
+            gpu_preference: format!("{:?}", after.gpu_preference),
             gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
             gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
         })
@@ -596,6 +600,7 @@ impl PreviewApp {
         let image = self.ctx.readback(image);
         let render_time = render_start.elapsed();
         let after = self.ctx.metrics();
+        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
 
         Ok(RenderedImage {
             image,
@@ -612,6 +617,9 @@ impl PreviewApp {
                 cache_misses: after.misses.saturating_sub(before.misses),
                 bytes_cached: after.bytes_cached,
                 gpu_available: after.gpu_available,
+                gpu_init_attempted: after.gpu_init_attempted,
+                gpu_init_error,
+                gpu_preference: format!("{:?}", after.gpu_preference),
                 gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
                 gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
             },
@@ -644,6 +652,9 @@ struct VideoFrame {
     cache_misses: u64,
     bytes_cached: usize,
     gpu_available: bool,
+    gpu_init_attempted: bool,
+    gpu_init_error: Option<String>,
+    gpu_preference: String,
     gpu_ops: u64,
     gpu_readbacks: u64,
 }
@@ -1046,7 +1057,7 @@ fn handle_video_stream(
             )?;
             if app.verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -1058,6 +1069,9 @@ fn handle_video_stream(
                     frame.cache_hits,
                     frame.cache_misses,
                     format_bytes(frame.bytes_cached as u64),
+                    frame.gpu_preference,
+                    frame.gpu_init_attempted,
+                    frame.gpu_init_error.as_deref().unwrap_or("-"),
                     frame.gpu_available,
                     frame.gpu_ops,
                     frame.gpu_readbacks,
@@ -1148,6 +1162,9 @@ struct FrameRenderStats {
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
+    gpu_preference: String,
+    gpu_init_attempted: bool,
+    gpu_init_error: Option<String>,
     gpu_available: bool,
     gpu_ops: u64,
     gpu_readbacks: u64,
@@ -1155,7 +1172,7 @@ struct FrameRenderStats {
 
 impl FrameRenderStats {
     fn headers(&self) -> Vec<(&'static str, String)> {
-        vec![
+        let mut headers = vec![
             ("X-Tellur-Render-Ms", format!("{:.2}", ms(self.render_time))),
             ("X-Tellur-Encode-Ms", format!("{:.2}", ms(self.encode_time))),
             ("X-Tellur-Total-Ms", format!("{:.2}", ms(self.total_time))),
@@ -1169,10 +1186,19 @@ impl FrameRenderStats {
             ("X-Tellur-Cache-Hits", self.cache_hits.to_string()),
             ("X-Tellur-Cache-Misses", self.cache_misses.to_string()),
             ("X-Tellur-GPU-Available", self.gpu_available.to_string()),
+            (
+                "X-Tellur-GPU-Init-Attempted",
+                self.gpu_init_attempted.to_string(),
+            ),
+            ("X-Tellur-GPU-Preference", self.gpu_preference.clone()),
             ("X-Tellur-GPU-Active", (self.gpu_ops > 0).to_string()),
             ("X-Tellur-GPU-Ops", self.gpu_ops.to_string()),
             ("X-Tellur-GPU-Readbacks", self.gpu_readbacks.to_string()),
-        ]
+        ];
+        if let Some(error) = &self.gpu_init_error {
+            headers.push(("X-Tellur-GPU-Init-Error", sanitize_header_value(error)));
+        }
+        headers
     }
 }
 
@@ -1200,7 +1226,7 @@ impl FrameFormat {
 
 fn log_frame_stats(stats: &FrameRenderStats) {
     println!(
-        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
         stats.timeline_id,
         stats.seconds,
         stats.resolution.width,
@@ -1213,6 +1239,9 @@ fn log_frame_stats(stats: &FrameRenderStats) {
         stats.cache_hits,
         stats.cache_misses,
         format_bytes(stats.bytes_cached as u64),
+        stats.gpu_preference,
+        stats.gpu_init_attempted,
+        stats.gpu_init_error.as_deref().unwrap_or("-"),
         stats.gpu_available,
         stats.gpu_ops,
         stats.gpu_readbacks,
@@ -1473,6 +1502,13 @@ fn format_bytes(b: u64) -> String {
     } else {
         format!("{b} B")
     }
+}
+
+fn sanitize_header_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn info_json(
