@@ -57,6 +57,10 @@ const STALL_GAP_JUMP_MAX = 0.25;
 // this long. The ticker kicks the fill loop every animation frame, so without a
 // backoff a persistently failing server gets hammered ~60 times per second.
 const STREAM_ERROR_BACKOFF_MS = 1000;
+// A single SourceBuffer append failure can be caused by an aborted stream leaving a
+// partial MP4 box in the parser. Reset and retry silently first; surface it only if
+// the stream keeps failing after recovery.
+const APPEND_FAILURES_BEFORE_ERROR = 3;
 // Buffered lead required past the playhead before playback STARTS (the reveal), and
 // the larger lead required before it RESUMES after starving mid-clip. Without a lead,
 // a stream that encodes at ~1x realtime glues the playhead to the live edge and
@@ -153,7 +157,8 @@ interface RemoveJob {
 
 type QueuedOp =
   | ({ kind: "append" } & AppendJob & { settle: (ok: boolean) => void })
-  | ({ kind: "remove" } & RemoveJob & { settle: () => void });
+  | ({ kind: "remove" } & RemoveJob & { settle: () => void })
+  | { kind: "reset"; settle: () => void };
 
 // A single self-contained MSE-backed timeline player. Owns ONE MediaSource + ONE
 // SourceBuffer attached to the supplied <video>, a single cursor-driven fill loop,
@@ -191,6 +196,8 @@ export class TimelinePlayer {
   // The timestampOffset currently applied to the SourceBuffer, so we only re-set it when
   // a different segment is appended.
   private lastAppliedOffset: number | null = null;
+  private parserResetQueued = false;
+  private appendFailureCount = 0;
 
   private fillActiveGen = -1;
   private lastEvictedTo = 0;
@@ -659,11 +666,12 @@ export class TimelinePlayer {
     this.inflight = inflight;
     const url = this.config.videoUrl(start, end);
     let reached = start;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
     try {
       const response = await fetch(url, { cache: "no-store", signal: controller.signal });
       if (this.disposed || gen !== this.fillGen) return reached;
       if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
-      const reader = response.body?.getReader();
+      reader = response.body?.getReader() ?? null;
       if (!reader) throw new Error("video stream has no body");
       for (;;) {
         const { done, value } = await reader.read();
@@ -679,7 +687,8 @@ export class TimelinePlayer {
         inflight.received.push(slice);
         const appended = await this.appendSegment(start, slice.slice(0), gen);
         if (this.disposed || gen !== this.fillGen) return reached;
-        if (!appended) throw new Error("SourceBuffer append failed");
+        if (!appended) throw new SourceBufferAppendError();
+        this.noteAppendSuccess();
         // The live green edge is the buffered end of THIS segment only — never bytes
         // received (which over-report before parse) and never the global buffered end
         // (contaminated by lookahead / eviction). buffered advances per GOP fragment.
@@ -727,8 +736,32 @@ export class TimelinePlayer {
       // per-frame kickFill would turn a failing server or SourceBuffer into a
       // fetch storm.
       this.streamBlockedUntil = Date.now() + STREAM_ERROR_BACKOFF_MS;
-      this.events.onError?.(String(e));
+      if (inflight.received.length > 0) this.enqueueParserReset();
+      try {
+        controller.abort();
+      } catch {
+        // ignore
+      }
+      try {
+        await reader?.cancel();
+      } catch {
+        // ignore
+      }
+      if (isSourceBufferAppendError(e)) {
+        this.appendFailureCount++;
+        if (this.appendFailureCount >= APPEND_FAILURES_BEFORE_ERROR) {
+          this.events.onError?.(String(e));
+        }
+      } else {
+        this.events.onError?.(String(e));
+      }
       return reached;
+    } finally {
+      try {
+        reader?.releaseLock();
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -768,8 +801,10 @@ export class TimelinePlayer {
         try {
           if (op.kind === "append") {
             appended = await this.appendWithQuota(sb, op.offset, op.data);
-          } else {
+          } else if (op.kind === "remove") {
             await this.removeRange(sb, op.start, op.end);
+          } else {
+            await this.resetSourceBufferParser(sb);
           }
         } catch (e) {
           if (isInvalidState(e)) {
@@ -777,21 +812,29 @@ export class TimelinePlayer {
             if (op.kind === "append") {
               op.settle(false);
             } else {
+              if (op.kind === "reset") this.parserResetQueued = false;
               op.settle();
             }
             break;
+          }
+          if (op.kind === "append" && isSourceBufferAppendError(e)) {
+            await this.resetSourceBufferParser(sb).catch(() => {});
           }
           if (
             op.kind === "append" &&
             !this.disposed &&
             op.fillGen === this.fillGen &&
-            !isAbortError(e)
+            !isAbortError(e) &&
+            !isSourceBufferAppendError(e)
           ) {
             this.events.onError?.(String(e));
           }
         }
         if (op.kind === "append") {
           op.settle(appended);
+        } else if (op.kind === "reset") {
+          this.parserResetQueued = false;
+          op.settle();
         } else {
           op.settle();
         }
@@ -886,7 +929,7 @@ export class TimelinePlayer {
       };
       const onErr = () => {
         cleanup();
-        reject(new Error("SourceBuffer append failed"));
+        reject(new SourceBufferAppendError());
       };
       const cleanup = () => {
         sb.removeEventListener("updateend", onEnd);
@@ -912,6 +955,35 @@ export class TimelinePlayer {
         reject(e);
       }
     });
+  }
+
+  private enqueueParserReset(): void {
+    if (this.disposed || this.parserResetQueued || !this.sourceBuffer) return;
+    this.parserResetQueued = true;
+    this.opQueue.push({
+      kind: "reset",
+      settle: () => {
+        this.parserResetQueued = false;
+      },
+    });
+    void this.pump();
+  }
+
+  private async resetSourceBufferParser(sb: SourceBuffer): Promise<void> {
+    await waitForSourceBufferIdle(sb);
+    this.lastAppliedOffset = null;
+    if (this.disposed || this.mediaSource.readyState !== "open") return;
+    try {
+      sb.abort();
+    } catch (e) {
+      if (!isInvalidState(e)) throw e;
+    }
+  }
+
+  private noteAppendSuccess(): void {
+    if (this.appendFailureCount === 0) return;
+    this.appendFailureCount = 0;
+    this.events.onError?.(null);
   }
 
   private async removeRange(sb: SourceBuffer, start: number, end: number): Promise<void> {
@@ -1331,6 +1403,10 @@ export class TimelinePlayer {
     const inflight = this.inflight;
     if (!inflight) return;
     this.inflight = null;
+    // Aborting a fetch can leave the SourceBuffer parser holding a partial MP4 box
+    // from the last accepted chunk. Reset the parser before the next stream's init
+    // segment is appended, while keeping already-buffered complete frames intact.
+    this.enqueueParserReset();
     try {
       inflight.controller.abort();
     } catch {
@@ -1460,6 +1536,17 @@ function mergeRanges(ranges: CacheRange[]): CacheRange[] {
 
 function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === "AbortError";
+}
+
+class SourceBufferAppendError extends Error {
+  constructor() {
+    super("SourceBuffer append failed");
+    this.name = "SourceBufferAppendError";
+  }
+}
+
+function isSourceBufferAppendError(e: unknown): boolean {
+  return e instanceof SourceBufferAppendError;
 }
 
 function isQuotaExceeded(e: unknown): boolean {
