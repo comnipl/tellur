@@ -116,6 +116,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
     let plugin_path = plugin_path
         .or_else(|| build_example.as_deref().map(infer_plugin_path))
         .ok_or_else(usage)?;
+    let project_name = build_package
+        .clone()
+        .or_else(|| infer_example_name(&plugin_path))
+        .unwrap_or_else(|| "Project Name".to_owned());
     let auto_build = if auto_build_requested {
         let example = build_example
             .or_else(|| infer_example_name(&plugin_path))
@@ -141,6 +145,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
 
     Ok(ServerOptions {
         plugin_path,
+        project_name,
         bind: bind.unwrap_or_else(|| format!("{host}:{port}")),
         resolution,
         fps,

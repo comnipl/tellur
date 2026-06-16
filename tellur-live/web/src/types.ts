@@ -38,6 +38,7 @@ export interface PreviewResolution {
 }
 
 export interface ServerInfo {
+  projectName: string;
   width: number;
   height: number;
   fps: number;
