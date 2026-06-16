@@ -189,9 +189,12 @@ select option {
 }
 
 .header__project-name {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-primary);
   font-weight: 700;
+  text-overflow: ellipsis;
 }
 
 .header__project-divider {

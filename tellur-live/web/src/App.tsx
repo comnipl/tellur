@@ -389,7 +389,7 @@ export function App() {
   return (
     <div className="app">
       <Header
-        projectName="Project Name"
+        projectName={info?.projectName ?? "Project Name"}
         url={url}
         compileStatus={
           loadError ? "disconnected" : info?.compileStatus ?? "compiled"
