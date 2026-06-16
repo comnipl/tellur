@@ -181,14 +181,12 @@ fn make_outline(
     let alpha_scale = color.a.clamp(0.0, 1.0);
 
     let mut out = Vec::with_capacity(out_w * out_h * 4);
-    for i in 0..dilated.len() {
+    for alpha in &dilated {
         // Paint the full dilated silhouette behind the child instead of
         // subtracting the original alpha. The later child composite covers
         // opaque interiors, while antialiased child edges blend against
         // outline color rather than the background.
-        let a = ((dilated[i] as f32) * alpha_scale)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+        let a = ((*alpha as f32) * alpha_scale).round().clamp(0.0, 255.0) as u8;
         out.push(r);
         out.push(g);
         out.push(b);
