@@ -51,17 +51,6 @@ impl RasterComponent for Outline {
         let sy = target.height as f32 / paint.size.1;
         let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
 
-        // Render the child through the context so its output is memoized
-        // independently of the outline — matches the shadow component's
-        // strategy for static subtrees.
-        let child_px_w = (child_paint.size.0 * sx).round().max(1.0) as u32;
-        let child_px_h = (child_paint.size.1 * sy).round().max(1.0) as u32;
-        let child_image = ctx.render(
-            self.child.as_ref(),
-            size,
-            Resolution::new(child_px_w, child_px_h),
-        );
-
         // Dilate the child alpha by `width` logical units and subtract
         // the original alpha so only the ring outside the child
         // remains. The dilation radius is computed independently along
@@ -71,6 +60,16 @@ impl RasterComponent for Outline {
         // past the buffer edge and get clipped.
         let width_px_x = (self.width.max(0.0) * sx).round() as u32;
         let width_px_y = (self.width.max(0.0) * sy).round() as u32;
+        let child_px_w = inner_axis_pixels(target.width, width_px_x);
+        let child_px_h = inner_axis_pixels(target.height, width_px_y);
+        // Render the child through the context so its output is memoized
+        // independently of the outline — matches the shadow component's
+        // strategy for static subtrees.
+        let child_image = ctx.render(
+            self.child.as_ref(),
+            size,
+            Resolution::new(child_px_w, child_px_h),
+        );
 
         let pad_lu_x = width_px_x as f32 / sx;
         let pad_lu_y = width_px_y as f32 / sy;
@@ -131,6 +130,10 @@ fn blank_image(target: Resolution) -> RasterImage {
     )
 }
 
+fn inner_axis_pixels(target: u32, pad: u32) -> u32 {
+    target.saturating_sub(pad.saturating_mul(2)).max(1)
+}
+
 fn make_outline(
     image: &CpuRasterImage,
     width_px_x: u32,
@@ -155,13 +158,13 @@ fn make_outline(
         }
     }
 
-    // Dilate the alpha by an elliptical structuring element so the
-    // outline tracks the shape's curvature. A separable square SE is
-    // cheaper but visibly flattens curved tips (the top/bottom of a
-    // circle becomes a horizontal cap); the ellipse keeps the contour
-    // following the original shape, even when sx ≠ sy.
+    // Dilate the alpha by an antialiased elliptical structuring
+    // element so the outline tracks the shape's curvature. A separable
+    // square SE is cheaper but visibly flattens curved tips (the
+    // top/bottom of a circle becomes a horizontal cap); the ellipse
+    // keeps the contour following the original shape, even when sx ≠ sy.
     let dilated = if pad_x > 0 || pad_y > 0 {
-        dilate_ellipse(&alpha, out_w, out_h, pad_x, pad_y)
+        dilate_ellipse_antialiased(&alpha, out_w, out_h, pad_x, pad_y)
     } else {
         alpha.clone()
     };
@@ -189,13 +192,15 @@ fn make_outline(
 
 /// Morphological dilation by an axis-aligned ellipse with semi-axes
 /// `rx` and `ry` (in pixels). For each output pixel, the result is the
-/// max of all source pixels `(x+dx, y+dy)` whose offset satisfies
-/// `(dx/rx)^2 + (dy/ry)^2 <= 1`.
+/// max of nearby source alpha, weighted by a 1px linear coverage ramp at
+/// the ellipse boundary. The ramp keeps a 1:1 render (notably 1080p
+/// when logical units map directly to pixels) from exposing a jagged
+/// binary dilation edge.
 ///
 /// Not separable: the ellipse SE has to be applied as a 2-D
 /// neighborhood. Cost is O(W·H·|SE|) ≈ O(W·H·π·rx·ry), which is fine
 /// here because the outline is memoized on a per-subtree basis.
-fn dilate_ellipse(src: &[u8], w: usize, h: usize, rx: usize, ry: usize) -> Vec<u8> {
+fn dilate_ellipse_antialiased(src: &[u8], w: usize, h: usize, rx: usize, ry: usize) -> Vec<u8> {
     let mut dst = vec![0u8; w * h];
     if w == 0 || h == 0 || (rx == 0 && ry == 0) {
         dst.copy_from_slice(src);
@@ -203,13 +208,12 @@ fn dilate_ellipse(src: &[u8], w: usize, h: usize, rx: usize, ry: usize) -> Vec<u
     }
     let rx_i = rx as i64;
     let ry_i = ry as i64;
-    let rx2 = (rx_i * rx_i).max(1);
-    let ry2 = (ry_i * ry_i).max(1);
-    let mut offsets: Vec<(i64, i64)> = Vec::new();
-    for dy in -ry_i..=ry_i {
-        for dx in -rx_i..=rx_i {
-            if dx * dx * ry2 + dy * dy * rx2 <= rx2 * ry2 {
-                offsets.push((dx, dy));
+    let mut offsets: Vec<(i64, i64, f32)> = Vec::new();
+    for dy in -(ry_i + 1)..=(ry_i + 1) {
+        for dx in -(rx_i + 1)..=(rx_i + 1) {
+            let coverage = ellipse_coverage(dx, dy, rx, ry);
+            if coverage > 0.0 {
+                offsets.push((dx, dy, coverage));
             }
         }
     }
@@ -218,11 +222,12 @@ fn dilate_ellipse(src: &[u8], w: usize, h: usize, rx: usize, ry: usize) -> Vec<u
     for y in 0..h {
         for x in 0..w {
             let mut m: u8 = 0;
-            for &(dx, dy) in &offsets {
+            for &(dx, dy, coverage) in &offsets {
                 let nx = x as i64 + dx;
                 let ny = y as i64 + dy;
                 if nx >= 0 && nx < w_i && ny >= 0 && ny < h_i {
-                    let v = src[(ny as usize) * w + (nx as usize)];
+                    let src_alpha = src[(ny as usize) * w + (nx as usize)] as f32;
+                    let v = (src_alpha * coverage).round().clamp(0.0, 255.0) as u8;
                     if v > m {
                         m = v;
                     }
@@ -232,4 +237,77 @@ fn dilate_ellipse(src: &[u8], w: usize, h: usize, rx: usize, ry: usize) -> Vec<u
         }
     }
     dst
+}
+
+fn ellipse_coverage(dx: i64, dy: i64, rx: usize, ry: usize) -> f32 {
+    match (rx, ry) {
+        (0, 0) => {
+            if dx == 0 && dy == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        (0, ry) => {
+            if dx != 0 {
+                return 0.0;
+            }
+            let edge_distance = dy.unsigned_abs() as f32 - ry as f32;
+            (0.5 - edge_distance).clamp(0.0, 1.0)
+        }
+        (rx, 0) => {
+            if dy != 0 {
+                return 0.0;
+            }
+            let edge_distance = dx.unsigned_abs() as f32 - rx as f32;
+            (0.5 - edge_distance).clamp(0.0, 1.0)
+        }
+        (rx, ry) => {
+            let dx_f = dx as f32;
+            let dy_f = dy as f32;
+            let center_distance = (dx_f * dx_f + dy_f * dy_f).sqrt();
+            if center_distance == 0.0 {
+                return 1.0;
+            }
+
+            let nx = dx_f / rx as f32;
+            let ny = dy_f / ry as f32;
+            let normalized = (nx * nx + ny * ny).sqrt();
+            let radius_along_ray = center_distance / normalized;
+            let edge_distance = center_distance - radius_along_ray;
+            (0.5 - edge_distance).clamp(0.0, 1.0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opaque_pixel() -> CpuRasterImage {
+        CpuRasterImage::new(1, 1, PixelFormat::Rgba8, vec![9, 8, 7, 255])
+    }
+
+    fn alpha_at(image: &CpuRasterImage, x: usize, y: usize) -> u8 {
+        image.pixels[(y * image.width as usize + x) * 4 + 3]
+    }
+
+    #[test]
+    fn inner_axis_pixels_keeps_padding_in_lockstep_with_target() {
+        assert_eq!(inner_axis_pixels(101, 5), 91);
+        assert_eq!(inner_axis_pixels(8, 5), 1);
+    }
+
+    #[test]
+    fn outline_antialiases_outer_ellipse_edge() {
+        let outline = make_outline(&opaque_pixel(), 2, 2, Color::rgba_u8(1, 2, 3, 255));
+
+        assert_eq!(outline.width, 5);
+        assert_eq!(outline.height, 5);
+        assert_eq!(alpha_at(&outline, 2, 2), 0);
+        assert_eq!(alpha_at(&outline, 0, 0), 0);
+        assert!(alpha_at(&outline, 2, 0) > 0);
+        assert!(alpha_at(&outline, 2, 0) < 255);
+        assert_eq!(alpha_at(&outline, 2, 1), 255);
+    }
 }

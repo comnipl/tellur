@@ -1449,6 +1449,43 @@ struct Params {
 @group(0) @binding(1) var<storage, read> alpha: array<u32>;
 @group(0) @binding(2) var<storage, read> params: Params;
 
+fn line_coverage(delta: i32, radius: u32) -> f32 {
+    let edge_distance = f32(abs(delta)) - f32(radius);
+    return clamp(0.5 - edge_distance, 0.0, 1.0);
+}
+
+fn ellipse_coverage(dx: i32, dy: i32, rx: u32, ry: u32) -> f32 {
+    if (rx == 0u && ry == 0u) {
+        return select(0.0, 1.0, dx == 0 && dy == 0);
+    }
+    if (rx == 0u) {
+        if (dx != 0) {
+            return 0.0;
+        }
+        return line_coverage(dy, ry);
+    }
+    if (ry == 0u) {
+        if (dy != 0) {
+            return 0.0;
+        }
+        return line_coverage(dx, rx);
+    }
+
+    let dx_f = f32(dx);
+    let dy_f = f32(dy);
+    let center_distance = sqrt(dx_f * dx_f + dy_f * dy_f);
+    if (center_distance == 0.0) {
+        return 1.0;
+    }
+
+    let nx = dx_f / f32(rx);
+    let ny = dy_f / f32(ry);
+    let normalized = sqrt(nx * nx + ny * ny);
+    let radius_along_ray = center_distance / normalized;
+    let edge_distance = center_distance - radius_along_ray;
+    return clamp(0.5 - edge_distance, 0.0, 1.0);
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = id.x;
@@ -1459,34 +1496,33 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let rx = i32(params.radius_x);
     let ry = i32(params.radius_y);
-    let rx2 = max(rx * rx, 1);
-    let ry2 = max(ry * ry, 1);
-    let limit = rx2 * ry2;
-    var m = 0u;
-    var oy = -ry;
+    var m = 0.0;
+    var oy = -(ry + 1);
     loop {
-        var ox = -rx;
+        var ox = -(rx + 1);
         loop {
-            if (ox * ox * ry2 + oy * oy * rx2 <= limit) {
+            let coverage = ellipse_coverage(ox, oy, params.radius_x, params.radius_y);
+            if (coverage > 0.0) {
                 let sx = i32(x) + ox;
                 let sy = i32(y) + oy;
                 if (sx >= 0 && sy >= 0 && sx < i32(params.src_w) && sy < i32(params.src_h)) {
-                    m = max(m, alpha[u32(sy) * params.src_w + u32(sx)]);
+                    m = max(m, f32(alpha[u32(sy) * params.src_w + u32(sx)]) * coverage);
                 }
             }
-            if (ox >= rx) {
+            if (ox >= rx + 1) {
                 break;
             }
             ox = ox + 1;
         }
-        if (oy >= ry) {
+        if (oy >= ry + 1) {
             break;
         }
         oy = oy + 1;
     }
 
+    let dilated = u32(round(clamp(m, 0.0, 255.0)));
     let orig = alpha[y * params.src_w + x];
-    let ring = select(0u, m - orig, m > orig);
+    let ring = select(0u, dilated - orig, dilated > orig);
     let a = (ring * params.a + 127u) / 255u;
     if (a == 0u) {
         return;
@@ -1782,9 +1818,9 @@ mod tests {
         assert_eq!(
             rendered.pixels.as_ref(),
             &[
-                0, 0, 0, 0, 1, 2, 3, 255, 0, 0, 0, 0, //
-                1, 2, 3, 255, 9, 8, 7, 255, 1, 2, 3, 255, //
-                0, 0, 0, 0, 1, 2, 3, 255, 0, 0, 0, 0,
+                1, 2, 3, 22, 1, 2, 3, 128, 1, 2, 3, 22, //
+                1, 2, 3, 128, 9, 8, 7, 255, 1, 2, 3, 128, //
+                1, 2, 3, 22, 1, 2, 3, 128, 1, 2, 3, 22,
             ]
         );
     }
