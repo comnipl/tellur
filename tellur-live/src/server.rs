@@ -32,6 +32,7 @@ const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
     pub plugin_path: PathBuf,
+    pub project_name: String,
     pub bind: String,
     pub resolution: Resolution,
     pub fps: u32,
@@ -59,6 +60,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
+        project_name: options.project_name,
         ctx: CachingRenderContext::with_capacity_bytes(LIVE_PREVIEW_CACHE_BYTES)
             .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
@@ -214,6 +216,7 @@ fn is_client_disconnect(error: &(dyn Error + 'static)) -> bool {
 
 struct PreviewApp {
     plugin: HotReloadPlugin,
+    project_name: String,
     ctx: CachingRenderContext,
     resolution: Resolution,
     fps: u32,
@@ -272,6 +275,7 @@ impl PreviewApp {
         let timelines = self.plugin.collection()?.timelines();
         let compile = self.compile_state.snapshot();
         Ok(info_json(
+            &self.project_name,
             self.resolution,
             self.fps,
             &timelines,
@@ -1512,6 +1516,7 @@ fn sanitize_header_value(value: &str) -> String {
 }
 
 fn info_json(
+    project_name: &str,
     resolution: Resolution,
     fps: u32,
     timelines: &[TimelineInfo],
@@ -1545,7 +1550,8 @@ fn info_json(
         None => "null".to_owned(),
     };
     format!(
-        "{{\"width\":{},\"height\":{},\"fps\":{},\"lastError\":{},\"cacheKey\":\"{}\",\"compileStatus\":\"{}\",\"compileError\":{},\"timelines\":[{}]}}",
+        "{{\"projectName\":\"{}\",\"width\":{},\"height\":{},\"fps\":{},\"lastError\":{},\"cacheKey\":\"{}\",\"compileStatus\":\"{}\",\"compileError\":{},\"timelines\":[{}]}}",
+        json_escape(project_name),
         resolution.width,
         resolution.height,
         fps,
@@ -1721,6 +1727,30 @@ mod tests {
 
         query.insert("motion_blur".to_owned(), "true".to_owned());
         assert!(request_motion_blur(&query));
+    }
+
+    #[test]
+    fn info_json_includes_the_project_name() {
+        let timelines = vec![TimelineInfo {
+            id: "main".to_owned(),
+            title: "Main".to_owned(),
+            duration: 4.0,
+            error: None,
+        }];
+        let json = info_json(
+            "demo \"crate\"",
+            Resolution::new(1280, 720),
+            30,
+            &timelines,
+            None,
+            "cache-key",
+            &CompileSnapshot::compiled(),
+        );
+
+        assert_eq!(
+            json,
+            "{\"projectName\":\"demo \\\"crate\\\"\",\"width\":1280,\"height\":720,\"fps\":30,\"lastError\":null,\"cacheKey\":\"cache-key\",\"compileStatus\":\"compiled\",\"compileError\":null,\"timelines\":[{\"id\":\"main\",\"title\":\"Main\",\"duration\":4,\"error\":null}]}"
+        );
     }
 
     // Round-trips the `.sketch/01` B.4 arrangement shape at a small scale: an

@@ -36,7 +36,9 @@ export function Header({
         Tellur
       </span>
       <span className="header__project">
-        <span className="header__project-name">{projectName}</span>
+        <span className="header__project-name" title={projectName}>
+          {projectName}
+        </span>
         <span className="header__project-divider">—</span>
         <span className="header__project-url">{url}</span>
         <span

@@ -171,6 +171,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
 
     serve(ServerOptions {
         plugin_path,
+        project_name: package.name.clone(),
         bind: format!("{}:{}", args.host, args.port),
         resolution,
         fps: args.fps,
