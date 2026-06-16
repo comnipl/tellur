@@ -91,8 +91,8 @@ struct CopyAlphaParams {
     src_h: u32,
     out_w: u32,
     out_h: u32,
-    pad_x: u32,
-    pad_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     _pad0: u32,
     _pad1: u32,
 }
@@ -365,16 +365,16 @@ impl GpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         src: &GpuBufferImage,
         alpha: &GpuBufferImage,
-        pad_x: u32,
-        pad_y: u32,
+        offset_x: i32,
+        offset_y: i32,
     ) {
         let params = CopyAlphaParams {
             src_w: src.width,
             src_h: src.height,
             out_w: alpha.width,
             out_h: alpha.height,
-            pad_x,
-            pad_y,
+            offset_x,
+            offset_y,
             _pad0: 0,
             _pad1: 0,
         };
@@ -729,7 +729,7 @@ impl GpuRasterBackend for GpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tellur-gpu-drop-shadow"),
             });
-        self.copy_alpha(&mut encoder, &child, &alpha_a, pad, pad);
+        self.copy_alpha(&mut encoder, &child, &alpha_a, pad as i32, pad as i32);
         self.blur_alpha(&mut encoder, &alpha_a, &alpha_b, input.blur_radius);
         self.composite_shadow_alpha(
             &mut encoder,
@@ -757,9 +757,7 @@ impl GpuRasterBackend for GpuRenderer {
         if child.format != PixelFormat::Rgba8 {
             return None;
         }
-        let outline_w = child.width.checked_add(input.radius_x.checked_mul(2)?)?;
-        let outline_h = child.height.checked_add(input.radius_y.checked_mul(2)?)?;
-        let alpha = self.alpha_image(outline_w, outline_h);
+        let alpha = self.alpha_image(input.target.width, input.target.height);
         let target = self.empty_image(input.target);
 
         let mut encoder = self
@@ -767,12 +765,18 @@ impl GpuRasterBackend for GpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tellur-gpu-outline"),
             });
-        self.copy_alpha(&mut encoder, &child, &alpha, input.radius_x, input.radius_y);
+        self.copy_alpha(
+            &mut encoder,
+            &child,
+            &alpha,
+            input.child_offset_x,
+            input.child_offset_y,
+        );
         self.composite_outline_alpha(
             &mut encoder,
             &target,
             &alpha,
-            (input.outline_offset_x, input.outline_offset_y),
+            (0, 0),
             (input.radius_x, input.radius_y),
             input.color,
         );
@@ -1303,8 +1307,8 @@ struct Params {
     src_h: u32,
     out_w: u32,
     out_h: u32,
-    pad_x: u32,
-    pad_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     pad0: u32,
     pad1: u32,
 }
@@ -1321,12 +1325,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let out_idx = y * params.out_w + x;
-    if (x < params.pad_x || y < params.pad_y) {
+    let sx_i = i32(x) - params.offset_x;
+    let sy_i = i32(y) - params.offset_y;
+    if (sx_i < 0 || sy_i < 0) {
         alpha[out_idx] = 0u;
         return;
     }
-    let sx = x - params.pad_x;
-    let sy = y - params.pad_y;
+    let sx = u32(sx_i);
+    let sy = u32(sy_i);
     if (sx >= params.src_w || sy >= params.src_h) {
         alpha[out_idx] = 0u;
         return;
@@ -1449,6 +1455,43 @@ struct Params {
 @group(0) @binding(1) var<storage, read> alpha: array<u32>;
 @group(0) @binding(2) var<storage, read> params: Params;
 
+fn line_coverage(delta: i32, radius: u32) -> f32 {
+    let edge_distance = f32(abs(delta)) - f32(radius);
+    return clamp(0.5 - edge_distance, 0.0, 1.0);
+}
+
+fn ellipse_coverage(dx: i32, dy: i32, rx: u32, ry: u32) -> f32 {
+    if (rx == 0u && ry == 0u) {
+        return select(0.0, 1.0, dx == 0 && dy == 0);
+    }
+    if (rx == 0u) {
+        if (dx != 0) {
+            return 0.0;
+        }
+        return line_coverage(dy, ry);
+    }
+    if (ry == 0u) {
+        if (dy != 0) {
+            return 0.0;
+        }
+        return line_coverage(dx, rx);
+    }
+
+    let dx_f = f32(dx);
+    let dy_f = f32(dy);
+    let center_distance = sqrt(dx_f * dx_f + dy_f * dy_f);
+    if (center_distance == 0.0) {
+        return 1.0;
+    }
+
+    let nx = dx_f / f32(rx);
+    let ny = dy_f / f32(ry);
+    let normalized = sqrt(nx * nx + ny * ny);
+    let radius_along_ray = center_distance / normalized;
+    let edge_distance = center_distance - radius_along_ray;
+    return clamp(0.5 - edge_distance, 0.0, 1.0);
+}
+
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let x = id.x;
@@ -1459,35 +1502,32 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let rx = i32(params.radius_x);
     let ry = i32(params.radius_y);
-    let rx2 = max(rx * rx, 1);
-    let ry2 = max(ry * ry, 1);
-    let limit = rx2 * ry2;
-    var m = 0u;
-    var oy = -ry;
+    var m = 0.0;
+    var oy = -(ry + 1);
     loop {
-        var ox = -rx;
+        var ox = -(rx + 1);
         loop {
-            if (ox * ox * ry2 + oy * oy * rx2 <= limit) {
+            let coverage = ellipse_coverage(ox, oy, params.radius_x, params.radius_y);
+            if (coverage > 0.0) {
                 let sx = i32(x) + ox;
                 let sy = i32(y) + oy;
                 if (sx >= 0 && sy >= 0 && sx < i32(params.src_w) && sy < i32(params.src_h)) {
-                    m = max(m, alpha[u32(sy) * params.src_w + u32(sx)]);
+                    m = max(m, f32(alpha[u32(sy) * params.src_w + u32(sx)]) * coverage);
                 }
             }
-            if (ox >= rx) {
+            if (ox >= rx + 1) {
                 break;
             }
             ox = ox + 1;
         }
-        if (oy >= ry) {
+        if (oy >= ry + 1) {
             break;
         }
         oy = oy + 1;
     }
 
-    let orig = alpha[y * params.src_w + x];
-    let ring = select(0u, m - orig, m > orig);
-    let a = (ring * params.a + 127u) / 255u;
+    let dilated = u32(round(clamp(m, 0.0, 255.0)));
+    let a = (dilated * params.a + 127u) / 255u;
     if (a == 0u) {
         return;
     }
@@ -1769,8 +1809,6 @@ mod tests {
             target: Resolution::new(3, 3),
             child_offset_x: 1,
             child_offset_y: 1,
-            outline_offset_x: 0,
-            outline_offset_y: 0,
             radius_x: 1,
             radius_y: 1,
             color: Color::rgba_u8(1, 2, 3, 255),
@@ -1782,9 +1820,9 @@ mod tests {
         assert_eq!(
             rendered.pixels.as_ref(),
             &[
-                0, 0, 0, 0, 1, 2, 3, 255, 0, 0, 0, 0, //
-                1, 2, 3, 255, 9, 8, 7, 255, 1, 2, 3, 255, //
-                0, 0, 0, 0, 1, 2, 3, 255, 0, 0, 0, 0,
+                1, 2, 3, 22, 1, 2, 3, 128, 1, 2, 3, 22, //
+                1, 2, 3, 128, 9, 8, 7, 255, 1, 2, 3, 128, //
+                1, 2, 3, 22, 1, 2, 3, 128, 1, 2, 3, 22,
             ]
         );
     }
