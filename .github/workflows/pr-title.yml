@@ -13,7 +13,9 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^(feat|fix|refactor|ci|test|chore|docs|perf|style|build|revert)(\((core|renderer|deps)\))?!?: [a-z].+'
+          allowed_scopes="tellur, core, live, macros, plugin, renderer, deps"
+          scope_pattern='(tellur|core|live|macros|plugin|renderer|deps)'
+          pattern="^(feat|fix|refactor|ci|test|chore|docs|perf|style|build|revert)(\\(${scope_pattern}\\))?!?: [a-z].+"
           if [[ "$PR_TITLE" =~ $pattern ]]; then
             echo "✓ $PR_TITLE"
           else
@@ -23,7 +25,7 @@ jobs:
             echo "Got:      $PR_TITLE"
             echo ""
             echo "Allowed types: feat, fix, refactor, ci, test, chore, docs, perf, style, build, revert"
-            echo "Allowed scopes (optional): core, renderer, deps"
+            echo "Allowed scopes (optional): $allowed_scopes"
             echo "Description must start with a lowercase letter."
             exit 1
           fi
