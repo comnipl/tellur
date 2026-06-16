@@ -155,8 +155,6 @@ pub struct OutlineInput<'a> {
     pub target: Resolution,
     pub child_offset_x: i32,
     pub child_offset_y: i32,
-    pub outline_offset_x: i32,
-    pub outline_offset_y: i32,
     pub radius_x: u32,
     pub radius_y: u32,
     pub color: Color,

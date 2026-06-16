@@ -91,8 +91,8 @@ struct CopyAlphaParams {
     src_h: u32,
     out_w: u32,
     out_h: u32,
-    pad_x: u32,
-    pad_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     _pad0: u32,
     _pad1: u32,
 }
@@ -365,16 +365,16 @@ impl GpuRenderer {
         encoder: &mut wgpu::CommandEncoder,
         src: &GpuBufferImage,
         alpha: &GpuBufferImage,
-        pad_x: u32,
-        pad_y: u32,
+        offset_x: i32,
+        offset_y: i32,
     ) {
         let params = CopyAlphaParams {
             src_w: src.width,
             src_h: src.height,
             out_w: alpha.width,
             out_h: alpha.height,
-            pad_x,
-            pad_y,
+            offset_x,
+            offset_y,
             _pad0: 0,
             _pad1: 0,
         };
@@ -729,7 +729,7 @@ impl GpuRasterBackend for GpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tellur-gpu-drop-shadow"),
             });
-        self.copy_alpha(&mut encoder, &child, &alpha_a, pad, pad);
+        self.copy_alpha(&mut encoder, &child, &alpha_a, pad as i32, pad as i32);
         self.blur_alpha(&mut encoder, &alpha_a, &alpha_b, input.blur_radius);
         self.composite_shadow_alpha(
             &mut encoder,
@@ -757,9 +757,7 @@ impl GpuRasterBackend for GpuRenderer {
         if child.format != PixelFormat::Rgba8 {
             return None;
         }
-        let outline_w = child.width.checked_add(input.radius_x.checked_mul(2)?)?;
-        let outline_h = child.height.checked_add(input.radius_y.checked_mul(2)?)?;
-        let alpha = self.alpha_image(outline_w, outline_h);
+        let alpha = self.alpha_image(input.target.width, input.target.height);
         let target = self.empty_image(input.target);
 
         let mut encoder = self
@@ -767,12 +765,18 @@ impl GpuRasterBackend for GpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tellur-gpu-outline"),
             });
-        self.copy_alpha(&mut encoder, &child, &alpha, input.radius_x, input.radius_y);
+        self.copy_alpha(
+            &mut encoder,
+            &child,
+            &alpha,
+            input.child_offset_x,
+            input.child_offset_y,
+        );
         self.composite_outline_alpha(
             &mut encoder,
             &target,
             &alpha,
-            (input.outline_offset_x, input.outline_offset_y),
+            (0, 0),
             (input.radius_x, input.radius_y),
             input.color,
         );
@@ -1303,8 +1307,8 @@ struct Params {
     src_h: u32,
     out_w: u32,
     out_h: u32,
-    pad_x: u32,
-    pad_y: u32,
+    offset_x: i32,
+    offset_y: i32,
     pad0: u32,
     pad1: u32,
 }
@@ -1321,12 +1325,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let out_idx = y * params.out_w + x;
-    if (x < params.pad_x || y < params.pad_y) {
+    let sx_i = i32(x) - params.offset_x;
+    let sy_i = i32(y) - params.offset_y;
+    if (sx_i < 0 || sy_i < 0) {
         alpha[out_idx] = 0u;
         return;
     }
-    let sx = x - params.pad_x;
-    let sy = y - params.pad_y;
+    let sx = u32(sx_i);
+    let sy = u32(sy_i);
     if (sx >= params.src_w || sy >= params.src_h) {
         alpha[out_idx] = 0u;
         return;
@@ -1521,9 +1527,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let dilated = u32(round(clamp(m, 0.0, 255.0)));
-    let orig = alpha[y * params.src_w + x];
-    let ring = select(0u, dilated - orig, dilated > orig);
-    let a = (ring * params.a + 127u) / 255u;
+    let a = (dilated * params.a + 127u) / 255u;
     if (a == 0u) {
         return;
     }
@@ -1805,8 +1809,6 @@ mod tests {
             target: Resolution::new(3, 3),
             child_offset_x: 1,
             child_offset_y: 1,
-            outline_offset_x: 0,
-            outline_offset_y: 0,
             radius_x: 1,
             radius_y: 1,
             color: Color::rgba_u8(1, 2, 3, 255),
