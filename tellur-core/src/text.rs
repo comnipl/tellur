@@ -3,11 +3,13 @@
 //! [`Text`] shapes a sequence of [`TextSpan`]s with rustybuzz, lays the
 //! resulting glyph runs out left-to-right, and emits one filled
 //! [`Path`](crate::vector::Path) per glyph through the existing
-//! [`VectorGraphic`] pipeline. The base `Text { font, size, fill }`
-//! provides defaults that each `TextSpan` may override on a per-field
-//! basis: a `Some(_)` value on a span replaces the base; `None` inherits
-//! it. Coloring a substring red is therefore just "insert a `TextSpan`
-//! whose `fill: Some(Paint::Solid(red))` between plain spans".
+//! [`VectorGraphic`] pipeline. OpenType `palt` is enabled during
+//! shaping, so Japanese proportional alternate widths are honored when
+//! the font provides them. The base `Text { font, size, fill }` provides
+//! defaults that each `TextSpan` may override on a per-field basis: a
+//! `Some(_)` value on a span replaces the base; `None` inherits it.
+//! Coloring a substring red is therefore just "insert a `TextSpan` whose
+//! `fill: Some(Paint::Solid(red))` between plain spans".
 //!
 //! Single-line only for now: `\n` is not interpreted; multi-line layout
 //! and line breaking are deferred to a follow-up.
@@ -71,6 +73,14 @@ pub static FANTASY: LazyLock<Arc<Font>> =
 /// numeric readout) while comfortably covering any realistic set of
 /// static labels.
 const SHAPE_CACHE_CAPACITY: usize = 512;
+
+fn default_shaping_features() -> [rustybuzz::Feature; 1] {
+    [rustybuzz::Feature::new(
+        ttf_parser::Tag::from_bytes(b"palt"),
+        1,
+        ..,
+    )]
+}
 
 /// Cache key for a shaped span: everything that determines the produced
 /// glyph geometry except the font itself (the cache is per-font). The
@@ -294,7 +304,8 @@ impl Font {
 
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
-        let glyph_buffer = rustybuzz::shape(&face, &[], buffer);
+        let features = default_shaping_features();
+        let glyph_buffer = rustybuzz::shape(&face, &features, buffer);
 
         let mut glyphs = Vec::new();
         let mut pen_x: f32 = 0.0;
@@ -769,5 +780,20 @@ impl ttf_parser::OutlineBuilder for OutlinePathBuilder {
     }
     fn close(&mut self) {
         self.commands.push(PathCommand::Close);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_shaping_enables_proportional_alternates() {
+        let features = default_shaping_features();
+
+        assert_eq!(features[0].tag, ttf_parser::Tag::from_bytes(b"palt"));
+        assert_eq!(features[0].value, 1);
+        assert_eq!(features[0].start, 0);
+        assert_eq!(features[0].end, u32::MAX);
     }
 }
