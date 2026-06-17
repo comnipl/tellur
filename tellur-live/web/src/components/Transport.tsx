@@ -1,4 +1,11 @@
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import {
+  Pause,
+  Play,
+  SkipBack,
+  SkipForward,
+  Volume2,
+  VolumeX,
+} from "lucide-react";
 import { formatTimecode } from "../formatTime";
 import type { PreviewResolution } from "../types";
 
@@ -14,8 +21,10 @@ interface TransportProps {
   resolution: PreviewResolution;
   resolutionOptions: ResolutionOption[];
   motionBlur: boolean;
+  muted: boolean;
   playing: boolean;
   onTogglePlay: () => void;
+  onToggleMute: () => void;
   onStep: (delta: number) => void;
   onRewind: () => void;
   onResolutionChange: (resolution: PreviewResolution) => void;
@@ -34,8 +43,10 @@ export function Transport(props: TransportProps) {
     resolution,
     resolutionOptions,
     motionBlur,
+    muted,
     playing,
     onTogglePlay,
+    onToggleMute,
     onStep,
     onRewind,
     onResolutionChange,
@@ -99,6 +110,27 @@ export function Transport(props: TransportProps) {
           }}
         >
           <SkipForward size={14} strokeWidth={1.6} />
+        </button>
+        <button
+          type="button"
+          className={
+            muted
+              ? "transport__toggle transport__toggle--on"
+              : "transport__toggle"
+          }
+          aria-pressed={muted}
+          aria-label={muted ? "Unmute" : "Mute"}
+          data-tooltip={muted ? "Unmute" : "Mute"}
+          onClick={(e) => {
+            onToggleMute();
+            e.currentTarget.blur();
+          }}
+        >
+          {muted ? (
+            <VolumeX size={16} strokeWidth={1.6} />
+          ) : (
+            <Volume2 size={16} strokeWidth={1.6} />
+          )}
         </button>
       </div>
       <div className="transport__right">

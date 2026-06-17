@@ -125,6 +125,7 @@ export interface TimelinePlayerConfig {
   duration: number;
   fps: number;
   initialPosition: number;
+  isMuted: () => boolean;
   // Builds the /api/video.mp4 URL for the half-open segment [start, end). When
   // end >= duration the caller should omit the `duration` param (stream to the tail);
   // this closure handles that.
@@ -310,12 +311,12 @@ export class TimelinePlayer {
     }
   }
 
-  // Must be called inside the user gesture (it unmutes for the autoplay policy).
+  // Must be called inside the user gesture so unmuted playback satisfies autoplay policy.
   play(): void {
     if (this.disposed) return;
-    // Unmute synchronously within the gesture so the (now A/V) stream plays with sound.
+    // Apply the user's audio state synchronously within the gesture.
     // React does not re-apply the `muted` attribute after mount, so set the property.
-    this.video.muted = false;
+    this.video.muted = this.config.isMuted();
     // Play-from-the-end replays from the start: at duration the cursor loop has no work
     // and playback would silently never begin.
     const replayFromEnd = this.position >= this.config.duration - EPSILON;
@@ -342,6 +343,11 @@ export class TimelinePlayer {
     this.setDisplayMode("still", this.position, "hold");
     this.tryResolveReveal();
     this.kickFill();
+  }
+
+  setMuted(muted: boolean): void {
+    if (this.disposed) return;
+    this.video.muted = muted;
   }
 
   pause(): void {

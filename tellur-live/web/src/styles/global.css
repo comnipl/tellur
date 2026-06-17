@@ -555,10 +555,10 @@ select option {
   color: var(--text-secondary);
 }
 
-/* Icon-only on/off toggle (e.g. Motion Blur) in the right control cluster. Same
-   geometry as .transport__btn; the state lives in the icon color — accent when
-   on, faint when off (dimmer than plain buttons so "off" reads as a state, not
-   just an idle control). The label is provided by aria-label + data-tooltip. */
+/* Icon-only on/off toggle (e.g. mute or Motion Blur). Same geometry as
+   .transport__btn; the state lives in the icon color — accent when on, faint
+   when off (dimmer than plain buttons so "off" reads as a state, not just an
+   idle control). The label is provided by aria-label + data-tooltip. */
 .transport__toggle {
   display: inline-flex;
   align-items: center;

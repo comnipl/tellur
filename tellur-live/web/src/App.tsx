@@ -424,8 +424,10 @@ export function App() {
               resolution={resolution}
               resolutionOptions={resolutionOptions}
               motionBlur={motionBlur}
+              muted={preview.state.muted}
               playing={preview.state.playing}
               onTogglePlay={preview.togglePlay}
+              onToggleMute={preview.toggleMute}
               onStep={preview.stepFrame}
               onRewind={preview.rewindToStart}
               onResolutionChange={changeResolution}
