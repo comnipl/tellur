@@ -200,6 +200,27 @@ function leafClip(node: Arrangement, path: string): Clip {
   };
 }
 
+// A summary clip for a grouping container (one that owns nested container
+// children). It stays visible both collapsed and expanded so the container's own
+// span remains selectable/toggleable while its children are open.
+function summaryClip(node: Arrangement, path: string): Clip {
+  return {
+    id: path,
+    start: node.start,
+    end: node.end,
+    name: displayName(node),
+    kind: node.kind,
+    trim: node.trim,
+    triggers: node.triggers,
+    collapsedNode: path,
+    isTitle: false,
+    frameOwner: null,
+    isComponent: node.name != null,
+    hasChildren: node.children.length > 0,
+    source: node.source,
+  };
+}
+
 // A title-bar clip for a leaf-container, spanning its full [start, end]. Clicking
 // it toggles `path`; `isTitle` drives the thick window-title styling. `frameOwner`
 // is left null here and set by the expanded leaf-container branch — a COLLAPSED
@@ -224,8 +245,8 @@ function titleClip(node: Arrangement, path: string): Clip {
 
 // Lanes for `node`'s subtree:
 //  - leaf -> one content lane.
-//  - grouping container (has a container child): rail header lane + packed
-//    children at depth+1. Collapsed grouping -> a single summary lane.
+//  - grouping container (has a container child): summary lane + packed children
+//    at depth+1. Collapsed grouping -> the summary lane only.
 //  - leaf container (all children are leaves): a COLLAPSIBLE WINDOW. Collapsed
 //    -> one title-bar lane (no frame, so siblings pack onto a shared lane).
 //    Expanded -> a title lane + packed children at depth+1, every lane tagged
@@ -247,23 +268,7 @@ function layout(
     // For a grouping container it is a plain summary; for a leaf container it is
     // a title bar (so collapsed Dialogues read as `Dialogue | Dialogue | ...`).
     const grouping = isGrouping(node);
-    const clip: Clip = grouping
-      ? {
-          id: path,
-          start: node.start,
-          end: node.end,
-          name: displayName(node),
-          kind: node.kind,
-          trim: node.trim,
-          triggers: node.triggers,
-          collapsedNode: path,
-          isTitle: false,
-          frameOwner: null,
-          isComponent: node.name != null,
-          hasChildren: node.children.length > 0,
-          source: node.source,
-        }
-      : titleClip(node, path);
+    const clip: Clip = grouping ? summaryClip(node, path) : titleClip(node, path);
     return [
       {
         id: path,
@@ -276,14 +281,14 @@ function layout(
   }
 
   if (isGrouping(node)) {
-    const headerLane: Lane = {
+    const summaryLane: Lane = {
       id: `${path}#header`,
       depth,
       header: { nodeId: path, name: displayName(node) },
-      clips: [],
+      clips: [summaryClip(node, path)],
       frame: null,
     };
-    return [headerLane, ...packChildren(node.children, depth + 1, path, collapsed)];
+    return [summaryLane, ...packChildren(node.children, depth + 1, path, collapsed)];
   }
 
   // Leaf container, expanded: a window. Title lane on top, child lanes below.
@@ -834,9 +839,9 @@ export function Timeline(props: TimelineProps) {
             const railLabel = lane.header
               ? lane.header.name
               : contentLaneLabel(lane);
-            // A header lane with no clips is a grouping-container section header
-            // (de-emphasized). A header lane with clips is a leaf-container title
-            // bar (collapsed or expanded), which reads as a window title.
+            // A header lane with no clips is a de-emphasized section fallback.
+            // A header lane with clips is a container lane (grouping summary or
+            // leaf-container title), where the body clip carries the main label.
             const isSectionHeader = lane.header != null && lane.clips.length === 0;
             return (
               <div
@@ -913,8 +918,7 @@ export function Timeline(props: TimelineProps) {
           {lanes.length > 0
             ? lanes.map((lane, laneIndex) => {
                 if (lane.header && lane.clips.length === 0) {
-                  // Grouping-container header row: no clip, just a faint
-                  // full-row hairline so the group band reads as a section.
+                  // Empty section row: no clip, just a faint full-row hairline.
                   return (
                     <div key={lane.id} className="timeline__track">
                       <div className="timeline__group-line" />
