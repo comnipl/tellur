@@ -9,7 +9,9 @@
 //! defaults that each `TextSpan` may override on a per-field basis: a
 //! `Some(_)` value on a span replaces the base; `None` inherits it.
 //! Coloring a substring red is therefore just "insert a `TextSpan` whose
-//! `fill: Some(Paint::Solid(red))` between plain spans".
+//! `fill: Some(Paint::Solid(red))` between plain spans". A span can also
+//! apply independent X/Y scale to its glyph outlines for slightly wide or
+//! tall lettering while still participating in the same line layout.
 //!
 //! Single-line only for now: `\n` is not interpreted; multi-line layout
 //! and line breaking are deferred to a follow-up.
@@ -410,6 +412,12 @@ pub struct TextSpan {
     pub font: Option<Arc<Font>>,
     pub size: Option<f32>,
     pub weight: Option<Weight>,
+    /// Horizontal multiplier for the span's glyph outlines and advance.
+    /// `None` inherits the normal 1:1 text shape.
+    pub scale_x: Option<f32>,
+    /// Vertical multiplier for the span's glyph outlines and line metrics,
+    /// applied around the baseline. `None` inherits the normal 1:1 text shape.
+    pub scale_y: Option<f32>,
 }
 
 impl TextSpan {
@@ -442,6 +450,8 @@ impl Span for TextSpan {
         let size = self.size.unwrap_or(ctx.size);
         let weight = self.weight.unwrap_or(ctx.weight);
         let fill = self.fill.clone().unwrap_or_else(|| ctx.fill.clone());
+        let scale_x = self.scale_x.unwrap_or(1.0);
+        let scale_y = self.scale_y.unwrap_or(1.0);
 
         if self.text.is_empty() {
             return ShapedSpan {
@@ -460,13 +470,24 @@ impl Span for TextSpan {
         let paths = shaped
             .glyphs
             .iter()
-            .map(|commands| (commands.clone(), fill.clone()))
+            .map(|commands| {
+                let commands = if scale_x == 1.0 && scale_y == 1.0 {
+                    commands.clone()
+                } else {
+                    commands
+                        .iter()
+                        .copied()
+                        .map(|c| scale_command(c, Vec2(scale_x, scale_y)))
+                        .collect()
+                };
+                (commands, fill.clone())
+            })
             .collect();
         let (ascent, descent) = font.vertical_metrics(size);
         ShapedSpan {
-            width: shaped.width,
-            ascent,
-            descent,
+            width: shaped.width * scale_x,
+            ascent: ascent * scale_y,
+            descent: descent * scale_y,
             paths,
         }
     }
@@ -656,6 +677,27 @@ fn translate_command(cmd: PathCommand, delta: Vec2) -> PathCommand {
     }
 }
 
+/// Scales every coordinate in a path command around the span origin. Text
+/// spans are shaped with the baseline at `y = 0`, so this preserves the
+/// baseline while making glyphs wider/narrower or taller/shorter.
+fn scale_command(cmd: PathCommand, scale: Vec2) -> PathCommand {
+    let transform = Transform::scale(scale);
+    match cmd {
+        PathCommand::MoveTo(p) => PathCommand::MoveTo(transform.transform_point(p)),
+        PathCommand::LineTo(p) => PathCommand::LineTo(transform.transform_point(p)),
+        PathCommand::QuadTo { control, to } => PathCommand::QuadTo {
+            control: transform.transform_point(control),
+            to: transform.transform_point(to),
+        },
+        PathCommand::CubicTo { c1, c2, to } => PathCommand::CubicTo {
+            c1: transform.transform_point(c1),
+            c2: transform.transform_point(c2),
+            to: transform.transform_point(to),
+        },
+        PathCommand::Close => PathCommand::Close,
+    }
+}
+
 /// An independently placeable vector graphic of one shaped text span,
 /// produced by [`Text::into_spans`]. Implements [`VectorComponent`] so
 /// the span can be wrapped in any of the existing layout / decoration
@@ -795,5 +837,58 @@ mod tests {
         assert_eq!(features[0].value, 1);
         assert_eq!(features[0].start, 0);
         assert_eq!(features[0].end, u32::MAX);
+    }
+
+    #[test]
+    fn text_span_scales_glyphs_and_metrics() {
+        let font = SANS_SERIF.clone();
+        let fill = Paint::Solid(crate::color::Color::rgb_u8(20, 20, 20));
+        let ctx = SpanContext {
+            font: &font,
+            size: 48.0,
+            weight: Weight::NORMAL,
+            fill: &fill,
+        };
+
+        let normal = TextSpan::plain("Scale").shape(&ctx);
+        let scaled = TextSpan::builder()
+            .text("Scale")
+            .scale_x(1.4)
+            .scale_y(1.25)
+            .build()
+            .shape(&ctx);
+
+        assert!(normal.width > 0.0);
+        assert_close(scaled.width, normal.width * 1.4);
+        assert_close(scaled.ascent, normal.ascent * 1.25);
+        assert_close(scaled.descent, normal.descent * 1.25);
+
+        let (normal_x, normal_y) = first_path_point(&normal);
+        let (scaled_x, scaled_y) = first_path_point(&scaled);
+        assert_close(scaled_x, normal_x * 1.4);
+        assert_close(scaled_y, normal_y * 1.25);
+    }
+
+    fn first_path_point(span: &ShapedSpan) -> (f32, f32) {
+        for (commands, _) in &span.paths {
+            for command in commands {
+                if let PathCommand::MoveTo(point)
+                | PathCommand::LineTo(point)
+                | PathCommand::QuadTo { to: point, .. }
+                | PathCommand::CubicTo { to: point, .. } = command
+                {
+                    return (point.0, point.1);
+                }
+            }
+        }
+        panic!("span should contain at least one path point");
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        let tolerance = 0.001;
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "expected {actual} to be within {tolerance} of {expected}"
+        );
     }
 }
