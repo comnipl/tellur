@@ -555,10 +555,10 @@ select option {
   color: var(--text-secondary);
 }
 
-/* Icon-only on/off toggle (e.g. Motion Blur) in the right control cluster. Same
-   geometry as .transport__btn; the state lives in the icon color — accent when
-   on, faint when off (dimmer than plain buttons so "off" reads as a state, not
-   just an idle control). The label is provided by aria-label + data-tooltip. */
+/* Icon-only on/off toggle (e.g. mute or Motion Blur). Same geometry as
+   .transport__btn; the state lives in the icon color — accent when on, faint
+   when off (dimmer than plain buttons so "off" reads as a state, not just an
+   idle control). The label is provided by aria-label + data-tooltip. */
 .transport__toggle {
   display: inline-flex;
   align-items: center;
@@ -1128,8 +1128,8 @@ select option {
   visibility: hidden;
 }
 
-/* Grouping-container header rows are de-emphasized vs content rows: no clip
-   band sits beside them, so the lighter text reads as a section label. */
+/* Empty section rows are de-emphasized vs content rows: no clip band sits beside
+   them, so the lighter text reads as a section label. */
 .track-head--group {
   background: transparent;
 }
@@ -1139,8 +1139,8 @@ select option {
   font-weight: 600;
 }
 
-/* Grouping containers (Timeline, Sequence) read as "components": a subtle green
-   tint on their rail chevron, matching the green kind color of container bars. */
+/* Empty section rows read as container structure: a subtle green tint on their
+   rail chevron, matching the green kind color of container bars. */
 .track-head--group .track-head__chevron {
   color: #6fcf97;
 }
@@ -1149,9 +1149,8 @@ select option {
   color: #8fdcab;
 }
 
-/* Leaf-container title rows (collapsed bar or expanded window title) read as a
-   window title: transparent head (the clip carries the title look) with a
-   slightly bolder, brighter name. */
+/* Container rows with a body clip (grouping summary or leaf-container title)
+   keep the rail transparent; the clip carries the visible structure. */
 .track-head--title {
   background: transparent;
 }
@@ -1353,8 +1352,7 @@ select option {
   font-weight: 700;
 }
 
-/* Faint full-row hairline behind a grouping-container header row, so the empty
-   track still reads as part of the group band. */
+/* Faint full-row hairline behind an empty section row. */
 .timeline__group-line {
   position: absolute;
   top: 50%;

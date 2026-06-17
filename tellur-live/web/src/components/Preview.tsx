@@ -34,7 +34,7 @@ export const Preview = forwardRef<HTMLDivElement, PreviewProps & PreviewRefs>(
       <section className="preview" ref={ref} style={previewStyle}>
         <div className="preview__frame">
           <div className="preview__media">
-            <video ref={videoRef} muted playsInline preload="auto" />
+            <video ref={videoRef} playsInline preload="auto" />
             <img
               ref={imgRef}
               className={imageVisible ? "" : "hidden"}
