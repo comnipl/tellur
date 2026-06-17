@@ -7,6 +7,7 @@
 //!   at the crate root, and
 //! - under the `renderer` feature (on by default) the GPU / encode backend at
 //!   [`renderer`].
+//! - optional authoring features such as `latex`, forwarded to the engine crates.
 //!
 //! The `#[component]` and `export_timeline!` macros emit their paths through this
 //! facade (resolved at expansion time), so an authored project never needs to
