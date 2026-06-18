@@ -19,7 +19,11 @@
 //! therefore PITCH-SHIFTS the source, which is acceptable for v1.
 
 use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::UNIX_EPOCH;
 
+use lru::LruCache;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
@@ -30,6 +34,177 @@ use symphonia::core::probe::Hint;
 use symphonia::core::units::Time as SymphoniaTime;
 
 use crate::timeline_component::AudioBuffer;
+
+const AUDIO_CACHE_CAPACITY_BYTES: usize = 512 * 1024 * 1024;
+const CACHE_FULL_ON_TRIM_SOURCE_BYTES_LIMIT: u64 = 64 * 1024 * 1024;
+
+static DECODE_CACHE: LazyLock<Mutex<AudioDecodeCache>> =
+    LazyLock::new(|| Mutex::new(AudioDecodeCache::default()));
+static CONFORM_CACHE: LazyLock<Mutex<ConformedAudioCache>> =
+    LazyLock::new(|| Mutex::new(ConformedAudioCache::default()));
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AudioCacheKey {
+    path: PathBuf,
+    len: u64,
+    modified_ns: Option<u128>,
+}
+
+struct AudioDecodeCache {
+    entries: LruCache<AudioCacheKey, Arc<AudioBuffer>>,
+    bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConformedAudioCacheKey {
+    source: AudioCacheKey,
+    trim: Option<(u32, u32)>,
+    rate: u32,
+    channels: u16,
+    gain_bits: u32,
+    speed_bits: u32,
+}
+
+struct ConformedAudioCache {
+    entries: LruCache<ConformedAudioCacheKey, Arc<AudioBuffer>>,
+    bytes: usize,
+}
+
+impl Default for AudioDecodeCache {
+    fn default() -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            bytes: 0,
+        }
+    }
+}
+
+impl AudioDecodeCache {
+    fn get(&mut self, key: &AudioCacheKey) -> Option<Arc<AudioBuffer>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: AudioCacheKey, buffer: Arc<AudioBuffer>) {
+        let bytes = audio_buffer_bytes(&buffer);
+        if bytes > AUDIO_CACHE_CAPACITY_BYTES {
+            return;
+        }
+
+        while self.bytes + bytes > AUDIO_CACHE_CAPACITY_BYTES {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        }
+
+        if let Some(old) = self.entries.put(key, buffer) {
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        }
+        self.bytes += bytes;
+    }
+}
+
+impl Default for ConformedAudioCache {
+    fn default() -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            bytes: 0,
+        }
+    }
+}
+
+impl ConformedAudioCache {
+    fn get(&mut self, key: &ConformedAudioCacheKey) -> Option<Arc<AudioBuffer>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: ConformedAudioCacheKey, buffer: Arc<AudioBuffer>) {
+        let bytes = audio_buffer_bytes(&buffer);
+        if bytes > AUDIO_CACHE_CAPACITY_BYTES {
+            return;
+        }
+
+        while self.bytes + bytes > AUDIO_CACHE_CAPACITY_BYTES {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        }
+
+        if let Some(old) = self.entries.put(key, buffer) {
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        }
+        self.bytes += bytes;
+    }
+}
+
+fn audio_buffer_bytes(buffer: &AudioBuffer) -> usize {
+    buffer.samples.len() * std::mem::size_of::<f32>()
+}
+
+fn audio_cache_key(path: &str) -> io::Result<AudioCacheKey> {
+    let raw_path = Path::new(path);
+    let metadata = std::fs::metadata(raw_path)?;
+    let canonical = std::fs::canonicalize(raw_path).unwrap_or_else(|_| raw_path.to_path_buf());
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Ok(AudioCacheKey {
+        path: canonical,
+        len: metadata.len(),
+        modified_ns,
+    })
+}
+
+fn cached_full_audio(key: &AudioCacheKey) -> Option<Arc<AudioBuffer>> {
+    DECODE_CACHE.lock().ok()?.get(key)
+}
+
+fn cache_full_audio(key: AudioCacheKey, buffer: Arc<AudioBuffer>) {
+    if let Ok(mut cache) = DECODE_CACHE.lock() {
+        cache.insert(key, buffer);
+    }
+}
+
+fn cached_conformed_audio(key: &ConformedAudioCacheKey) -> Option<Arc<AudioBuffer>> {
+    CONFORM_CACHE.lock().ok()?.get(key)
+}
+
+fn cache_conformed_audio(key: ConformedAudioCacheKey, buffer: Arc<AudioBuffer>) {
+    if let Ok(mut cache) = CONFORM_CACHE.lock() {
+        cache.insert(key, buffer);
+    }
+}
+
+#[cfg(test)]
+fn clear_decode_cache_for_tests() {
+    if let Ok(mut cache) = DECODE_CACHE.lock() {
+        cache.entries.clear();
+        cache.bytes = 0;
+    }
+    if let Ok(mut cache) = CONFORM_CACHE.lock() {
+        cache.entries.clear();
+        cache.bytes = 0;
+    }
+}
+
+#[cfg(test)]
+fn decode_cache_len_for_tests() -> usize {
+    DECODE_CACHE
+        .lock()
+        .map(|cache| cache.entries.len())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+fn conform_cache_len_for_tests() -> usize {
+    CONFORM_CACHE
+        .lock()
+        .map(|cache| cache.entries.len())
+        .unwrap_or(0)
+}
 
 /// Maps a symphonia error into an [`io::Error`] so the decode path stays in the
 /// crate's existing `io::Result` vocabulary (the encoder/probe seams use it).
@@ -47,16 +222,87 @@ fn map_err(e: SymphoniaError) -> io::Error {
 /// mix-down resamples / re-channels it into the encoder's fixed layout. A `None`
 /// trim decodes the whole file.
 pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuffer> {
+    let key = audio_cache_key(path)?;
+
+    if let Some(cached) = cached_full_audio(&key) {
+        return Ok(slice_audio_buffer(&cached, trim));
+    }
+
+    let should_cache_full = trim.is_none() || key.len <= CACHE_FULL_ON_TRIM_SOURCE_BYTES_LIMIT;
+    if should_cache_full {
+        let decoded = Arc::new(decode_file_uncached(&key.path, None)?);
+        let out = slice_audio_buffer(&decoded, trim);
+        cache_full_audio(key, decoded);
+        return Ok(out);
+    }
+
+    decode_file_uncached(&key.path, trim)
+}
+
+/// Decoded duration in seconds, using the same cache as [`decode_file`] without
+/// cloning a large sample buffer just to count frames.
+pub fn decoded_duration(path: &str, trim: Option<(f32, f32)>) -> io::Result<f32> {
+    let key = audio_cache_key(path)?;
+
+    if let Some(cached) = cached_full_audio(&key) {
+        return Ok(audio_buffer_duration(&slice_audio_buffer(&cached, trim)));
+    }
+
+    let should_cache_full = trim.is_none() || key.len <= CACHE_FULL_ON_TRIM_SOURCE_BYTES_LIMIT;
+    let decoded = if should_cache_full {
+        let decoded = Arc::new(decode_file_uncached(&key.path, None)?);
+        cache_full_audio(key, Arc::clone(&decoded));
+        slice_audio_buffer(&decoded, trim)
+    } else {
+        decode_file_uncached(&key.path, trim)?
+    };
+    Ok(audio_buffer_duration(&decoded))
+}
+
+/// Decodes and conforms a whole source (or source trim) once for repeated
+/// timeline windows. Live preview segments can then slice the conformed PCM
+/// instead of re-decoding and re-resampling the same media on every request.
+pub(crate) fn conform_file_cached(
+    path: &str,
+    trim: Option<(f32, f32)>,
+    rate: u32,
+    channels: u16,
+    gain: f32,
+    speed: f32,
+) -> io::Result<Arc<AudioBuffer>> {
+    let source = audio_cache_key(path)?;
+    let key = ConformedAudioCacheKey {
+        source,
+        trim: trim.map(|(start, end)| (start.to_bits(), end.to_bits())),
+        rate,
+        channels,
+        gain_bits: gain.to_bits(),
+        speed_bits: speed.to_bits(),
+    };
+
+    if let Some(cached) = cached_conformed_audio(&key) {
+        return Ok(cached);
+    }
+
+    let decoded = decode_file(path, trim)?;
+    let samples = conform(decoded, rate, channels, gain, speed);
+    let conformed = Arc::new(AudioBuffer {
+        samples,
+        rate,
+        channels,
+    });
+    cache_conformed_audio(key, Arc::clone(&conformed));
+    Ok(conformed)
+}
+
+fn decode_file_uncached(path: &Path, trim: Option<(f32, f32)>) -> io::Result<AudioBuffer> {
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     // Hint the demuxer with the file extension; symphonia still falls back to
     // content sniffing if the extension is absent or wrong.
     let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-    {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
     }
 
@@ -196,6 +442,40 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
         rate,
         channels,
     })
+}
+
+pub(crate) fn slice_audio_buffer(buffer: &AudioBuffer, trim: Option<(f32, f32)>) -> AudioBuffer {
+    let Some((start, end)) = trim else {
+        return buffer.clone();
+    };
+
+    let start = start.max(0.0);
+    let end = end.max(0.0);
+    if end <= start {
+        return AudioBuffer::empty(buffer.rate, buffer.channels);
+    }
+
+    let channels = buffer.channels.max(1) as usize;
+    let total_frames = buffer.samples.len() / channels;
+    let start_frame = seconds_to_frame(start, buffer.rate).min(total_frames as u64) as usize;
+    let end_frame = seconds_to_frame(end, buffer.rate).min(total_frames as u64) as usize;
+    if end_frame <= start_frame {
+        return AudioBuffer::empty(buffer.rate, buffer.channels);
+    }
+
+    let lo = start_frame * channels;
+    let hi = end_frame * channels;
+    AudioBuffer {
+        samples: buffer.samples[lo..hi].to_vec(),
+        rate: buffer.rate,
+        channels: buffer.channels,
+    }
+}
+
+fn audio_buffer_duration(buffer: &AudioBuffer) -> f32 {
+    let channels = buffer.channels.max(1) as usize;
+    let frames = buffer.samples.len() / channels;
+    frames as f32 / buffer.rate.max(1) as f32
 }
 
 fn seconds_to_frame(seconds: f32, rate: u32) -> u64 {
@@ -386,6 +666,44 @@ impl AudioMix {
 mod tests {
     use super::*;
 
+    fn temp_wav(samples: &[i16], rate: u32, channels: u16) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after unix epoch")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "tellur-audio-cache-{}-{nanos}.wav",
+            std::process::id()
+        ));
+
+        let bits = 16u16;
+        let data_bytes = (samples.len() * 2) as u32;
+        let byte_rate = rate * channels as u32 * (bits as u32 / 8);
+        let block_align = channels * (bits / 8);
+        let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_bytes.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).expect("write wav fixture");
+        path
+    }
+
     #[test]
     fn resample_doubles_rate_length() {
         // Mono ramp at 4 Hz upsampled to 8 Hz roughly doubles the frame count.
@@ -441,5 +759,45 @@ mod tests {
         // Same rate, mono→mono, gain 0.5 halves the samples.
         let out = conform(buf, 48_000, 1, 0.5, 1.0);
         assert_eq!(out, vec![0.25, 0.25]);
+    }
+
+    #[test]
+    fn trimmed_decode_populates_and_reuses_full_cache_for_small_sources() {
+        clear_decode_cache_for_tests();
+        let path = temp_wav(&[0, 1000, 2000, 3000, 4000, 5000], 6, 1);
+        let path_str = path.to_string_lossy();
+
+        let window = decode_file(&path_str, Some((0.0, 0.5))).expect("decode trimmed wav");
+
+        assert_eq!(decode_cache_len_for_tests(), 1);
+        assert_eq!(window.rate, 6);
+        assert_eq!(window.channels, 1);
+        assert_eq!(window.samples.len(), 3);
+
+        let duration = decoded_duration(&path_str, None).expect("duration from cached wav");
+        assert!((duration - 1.0).abs() < 1e-6);
+
+        let _ = std::fs::remove_file(path);
+        clear_decode_cache_for_tests();
+    }
+
+    #[test]
+    fn conformed_audio_is_cached_for_repeated_windows() {
+        clear_decode_cache_for_tests();
+        let path = temp_wav(&[0, 1000, 2000, 3000, 4000, 5000], 6, 1);
+        let path_str = path.to_string_lossy();
+
+        let first =
+            conform_file_cached(&path_str, None, 12, 2, 0.5, 1.0).expect("conform first time");
+        let second =
+            conform_file_cached(&path_str, None, 12, 2, 0.5, 1.0).expect("conform second time");
+
+        assert_eq!(conform_cache_len_for_tests(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.rate, 12);
+        assert_eq!(first.channels, 2);
+
+        let _ = std::fs::remove_file(path);
+        clear_decode_cache_for_tests();
     }
 }
