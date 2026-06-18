@@ -54,6 +54,7 @@ export function Transport(props: TransportProps) {
     onMotionBlurChange,
   } = props;
   const selectedResolutionKey = resolutionKey(resolution);
+  const fpsOptions = previewFpsOptions(fps);
 
   return (
     <div className="transport">
@@ -163,7 +164,7 @@ export function Transport(props: TransportProps) {
               e.currentTarget.blur();
             }}
           >
-            {FPS_OPTIONS.map((value) => (
+            {fpsOptions.map((value) => (
               <option key={value} value={value}>
                 {value} fps
               </option>
@@ -202,6 +203,12 @@ export function Transport(props: TransportProps) {
 
 function resolutionKey(resolution: PreviewResolution): string {
   return `${resolution.width}x${resolution.height}`;
+}
+
+function previewFpsOptions(fps: number): number[] {
+  const current = Math.max(1, Math.round(fps));
+  if (FPS_OPTIONS.includes(current)) return FPS_OPTIONS;
+  return [current, ...FPS_OPTIONS].sort((a, b) => b - a);
 }
 
 // Lucide has no motion-blur glyph, so this hand-rolled icon follows the same
