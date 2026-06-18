@@ -36,6 +36,8 @@ const DEFAULT_PREVIEW_RESOLUTION: PreviewResolution = {
   width: 1280,
   height: 720,
 };
+const DEFAULT_PREVIEW_FPS = 30;
+const PREVIEW_SETTINGS_STORAGE_PREFIX = "tellur-live:preview-settings:v1:";
 const PREVIEW_RESOLUTION_OPTIONS = [
   { width: 3840, height: 2160, label: "3840 × 2160" },
   { width: 1920, height: 1080, label: "1920 × 1080" },
@@ -68,7 +70,7 @@ export function App() {
   const [resolution, setResolution] = useState<PreviewResolution>(
     DEFAULT_PREVIEW_RESOLUTION,
   );
-  const [fps, setFps] = useState(30);
+  const [fps, setFps] = useState(DEFAULT_PREVIEW_FPS);
   const [motionBlur, setMotionBlur] = useState(false);
   const [timelineViewport, setTimelineViewport] = useState<TimelineViewport>({
     start: 0,
@@ -90,7 +92,8 @@ export function App() {
   );
   const [resizingWorkspace, setResizingWorkspace] = useState(false);
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
-  const userSelectedResolutionRef = useRef(false);
+  const previewSettingsProjectRef = useRef<string | null>(null);
+  const userChangedPreviewSettingsRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,15 +102,22 @@ export function App() {
 
     const applyInfo = (next: ServerInfo) => {
       if (cancelled) return;
-      setInfo((prev) => {
-        if (!prev) {
-          setFps((current) => Math.max(next.fps || current, 1));
-          if (!userSelectedResolutionRef.current) {
-            setResolution({ width: next.width, height: next.height });
-          }
+      if (previewSettingsProjectRef.current !== next.projectName) {
+        const keepPendingUserSettings =
+          previewSettingsProjectRef.current === null &&
+          userChangedPreviewSettingsRef.current;
+        previewSettingsProjectRef.current = next.projectName;
+
+        const stored = loadProjectPreviewSettings(next.projectName);
+        if (stored) {
+          setResolution(stored.resolution);
+          setFps(stored.fps);
+        } else if (!keepPendingUserSettings) {
+          setResolution({ width: next.width, height: next.height });
+          setFps(Math.max(next.fps || DEFAULT_PREVIEW_FPS, 1));
         }
-        return next;
-      });
+      }
+      setInfo(next);
       setLoadError(null);
     };
 
@@ -256,10 +266,31 @@ export function App() {
   const displayTimeline = timeline ?? FALLBACK_TIMELINE;
   const timelineDuration = displayTimeline.duration;
   const resolutionOptions = previewResolutionOptions(resolution);
-  const changeResolution = useCallback((next: PreviewResolution) => {
-    userSelectedResolutionRef.current = true;
-    setResolution(next);
-  }, []);
+  const projectName = info?.projectName ?? null;
+  const changeResolution = useCallback(
+    (next: PreviewResolution) => {
+      userChangedPreviewSettingsRef.current = true;
+      setResolution(next);
+      if (projectName) {
+        saveProjectPreviewSettings(projectName, { resolution: next, fps });
+      }
+    },
+    [fps, projectName],
+  );
+  const changeFps = useCallback(
+    (next: number) => {
+      const normalized = Math.max(1, Math.round(next));
+      userChangedPreviewSettingsRef.current = true;
+      setFps(normalized);
+      if (projectName) {
+        saveProjectPreviewSettings(projectName, {
+          resolution,
+          fps: normalized,
+        });
+      }
+    },
+    [projectName, resolution],
+  );
   const updateTimelineViewport = useCallback(
     (next: TimelineViewportChange) => {
       setTimelineViewport((current) => {
@@ -431,7 +462,7 @@ export function App() {
               onStep={preview.stepFrame}
               onRewind={preview.rewindToStart}
               onResolutionChange={changeResolution}
-              onFpsChange={setFps}
+              onFpsChange={changeFps}
               onMotionBlurChange={setMotionBlur}
             />
           </section>
@@ -514,6 +545,78 @@ function sameResolution(
 
 function mediaQueryMatches(query: string): boolean {
   return typeof window !== "undefined" ? window.matchMedia(query).matches : true;
+}
+
+interface ProjectPreviewSettings {
+  resolution: PreviewResolution;
+  fps: number;
+}
+
+function loadProjectPreviewSettings(
+  projectName: string,
+): ProjectPreviewSettings | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(
+      projectPreviewSettingsKey(projectName),
+    );
+    if (!raw) return null;
+    return parseProjectPreviewSettings(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function saveProjectPreviewSettings(
+  projectName: string,
+  settings: ProjectPreviewSettings,
+) {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      projectPreviewSettingsKey(projectName),
+      JSON.stringify(settings),
+    );
+  } catch {
+    // localStorage can be unavailable in private or locked-down browsers.
+  }
+}
+
+function projectPreviewSettingsKey(projectName: string): string {
+  return `${PREVIEW_SETTINGS_STORAGE_PREFIX}${projectName}`;
+}
+
+function parseProjectPreviewSettings(
+  value: unknown,
+): ProjectPreviewSettings | null {
+  if (!isRecord(value)) return null;
+
+  const resolution = parsePreviewResolution(value.resolution);
+  const fps = parsePreviewFps(value.fps);
+  if (!resolution || fps === null) return null;
+
+  return { resolution, fps };
+}
+
+function parsePreviewResolution(value: unknown): PreviewResolution | null {
+  if (!isRecord(value)) return null;
+  const { width, height } = value;
+  if (!positiveInteger(width) || !positiveInteger(height)) return null;
+  return { width, height };
+}
+
+function parsePreviewFps(value: unknown): number | null {
+  return positiveInteger(value) ? value : null;
+}
+
+function positiveInteger(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function clampLandscapePreviewHeight(

@@ -68,12 +68,14 @@ struct LiveArgs {
     /// TCP port for the preview server.
     #[arg(long, default_value_t = 4317)]
     port: u16,
-    /// Preview render resolution, `WIDTHxHEIGHT`.
-    #[arg(long, default_value = "1280x720")]
-    size: String,
-    /// Preview frame rate.
-    #[arg(long, default_value_t = 30)]
-    fps: u32,
+    /// Preview render resolution, `WIDTHxHEIGHT`. Defaults to
+    /// `package.metadata.tellur.live.size`, then `1280x720`.
+    #[arg(long, value_name = "WIDTHxHEIGHT")]
+    size: Option<String>,
+    /// Preview frame rate. Defaults to `package.metadata.tellur.live.fps`, then
+    /// 30.
+    #[arg(long)]
+    fps: Option<u32>,
     /// Prefer GPU rendering.
     #[arg(long, conflicts_with = "no_gpu")]
     gpu: bool,
@@ -99,7 +101,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
-    let resolution = parse_resolution(&args.size)?;
     let gpu_preference = if args.no_gpu {
         GpuPreference::Disabled
     } else if args.gpu {
@@ -126,6 +127,18 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
                 return dispatch_to_host(&source, &version);
             }
         }
+    }
+
+    let live_defaults = live_defaults(package)?;
+    let resolution = args
+        .size
+        .as_deref()
+        .map(parse_resolution)
+        .transpose()?
+        .unwrap_or(live_defaults.resolution);
+    let fps = args.fps.unwrap_or(live_defaults.fps);
+    if fps == 0 {
+        return Err("fps must be greater than zero".into());
     }
 
     let lib_name = cdylib_target_name(package).ok_or_else(|| {
@@ -174,7 +187,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
         project_name: package.name.clone(),
         bind: format!("{}:{}", args.host, args.port),
         resolution,
-        fps: args.fps,
+        fps,
         gpu_preference,
         verbose: args.verbose,
         auto_build,
@@ -401,6 +414,67 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
     Ok(Resolution::new(w, h))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LiveDefaults {
+    resolution: Resolution,
+    fps: u32,
+}
+
+const FALLBACK_LIVE_DEFAULTS: LiveDefaults = LiveDefaults {
+    resolution: Resolution::new(1280, 720),
+    fps: 30,
+};
+
+const LIVE_DEFAULTS_TABLE: &str = "package.metadata.tellur.live";
+
+fn live_defaults(package: &Package) -> Result<LiveDefaults, Box<dyn Error>> {
+    let manifest = package.manifest_path.as_std_path();
+    let contents = fs::read_to_string(manifest)?;
+    live_defaults_from_manifest(&contents)
+}
+
+fn live_defaults_from_manifest(contents: &str) -> Result<LiveDefaults, Box<dyn Error>> {
+    let doc = contents.parse::<toml_edit::DocumentMut>()?;
+    let Some(package) = doc.get("package").and_then(|item| item.as_table_like()) else {
+        return Ok(FALLBACK_LIVE_DEFAULTS);
+    };
+    let Some(metadata) = package
+        .get("metadata")
+        .and_then(|item| item.as_table_like())
+    else {
+        return Ok(FALLBACK_LIVE_DEFAULTS);
+    };
+    let Some(tellur) = metadata.get("tellur").and_then(|item| item.as_table_like()) else {
+        return Ok(FALLBACK_LIVE_DEFAULTS);
+    };
+    let Some(item) = tellur.get("live") else {
+        return Ok(FALLBACK_LIVE_DEFAULTS);
+    };
+    let live = item
+        .as_table_like()
+        .ok_or_else(|| format!("{LIVE_DEFAULTS_TABLE} must be a table"))?;
+
+    let mut defaults = FALLBACK_LIVE_DEFAULTS;
+    if let Some(value) = live.get("size") {
+        let size = value
+            .as_str()
+            .ok_or_else(|| format!("{LIVE_DEFAULTS_TABLE}.size must be a string"))?;
+        defaults.resolution = parse_resolution(size)
+            .map_err(|e| format!("invalid {LIVE_DEFAULTS_TABLE}.size: {e}"))?;
+    }
+    if let Some(value) = live.get("fps") {
+        let fps = value
+            .as_integer()
+            .ok_or_else(|| format!("{LIVE_DEFAULTS_TABLE}.fps must be a positive integer"))?;
+        if !(1..=u32::MAX as i64).contains(&fps) {
+            return Err(format!("{LIVE_DEFAULTS_TABLE}.fps must be a positive integer").into());
+        }
+        defaults.fps = fps as u32;
+    }
+
+    Ok(defaults)
+}
+
 fn create(args: CreateArgs) -> Result<(), Box<dyn Error>> {
     let target = create_target(&args.path, &env::current_dir()?)?;
     let title = args.title.unwrap_or_else(|| target.crate_name.clone());
@@ -565,7 +639,12 @@ fn project_manifest(name: &str, workspace_dependency: bool) -> String {
          crate-type = [\"cdylib\"]\n\
          \n\
          [dependencies]\n\
-         tellur = {tellur_dependency}\n"
+         tellur = {tellur_dependency}\n\
+         \n\
+         # Optional defaults for `tellur live`:\n\
+         # [package.metadata.tellur.live]\n\
+         # size = \"1280x720\"\n\
+         # fps = 30\n"
     )
 }
 
@@ -1013,6 +1092,66 @@ mod tests {
     }
 
     #[test]
+    fn live_defaults_fall_back_without_metadata() {
+        let defaults =
+            live_defaults_from_manifest("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
+                .unwrap();
+
+        assert_eq!(defaults, FALLBACK_LIVE_DEFAULTS);
+    }
+
+    #[test]
+    fn live_defaults_read_package_metadata() {
+        let defaults = live_defaults_from_manifest(
+            "[package]\n\
+             name = \"demo\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [package.metadata.tellur.live]\n\
+             size = \"1920x1080\"\n\
+             fps = 60\n",
+        )
+        .unwrap();
+
+        assert_eq!(defaults.resolution, Resolution::new(1920, 1080));
+        assert_eq!(defaults.fps, 60);
+    }
+
+    #[test]
+    fn live_defaults_reject_zero_fps() {
+        let error = live_defaults_from_manifest(
+            "[package]\n\
+             name = \"demo\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [package.metadata.tellur.live]\n\
+             fps = 0\n",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("package.metadata.tellur.live.fps"));
+        assert!(error.contains("positive integer"));
+    }
+
+    #[test]
+    fn live_defaults_reject_invalid_size() {
+        let error = live_defaults_from_manifest(
+            "[package]\n\
+             name = \"demo\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [package.metadata.tellur.live]\n\
+             size = \"wide\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("package.metadata.tellur.live.size"));
+        assert!(error.contains("resolution must be WIDTHxHEIGHT"));
+    }
+
+    #[test]
     fn project_manifest_uses_workspace_dependency_for_workspace_member() {
         let manifest = project_manifest("demo", true);
 
@@ -1025,6 +1164,15 @@ mod tests {
 
         assert!(manifest.contains(&format!("tellur = \"{}\"", env!("CARGO_PKG_VERSION"))));
         assert!(!manifest.contains("workspace = true"));
+    }
+
+    #[test]
+    fn project_manifest_documents_live_defaults() {
+        let manifest = project_manifest("demo", true);
+
+        assert!(manifest.contains("[package.metadata.tellur.live]"));
+        assert!(manifest.contains("size = \"1280x720\""));
+        assert!(manifest.contains("fps = 30"));
     }
 
     #[test]
