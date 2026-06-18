@@ -401,6 +401,11 @@ impl TimelineComponent for Sequence {
                 cursor += self.spacing;
             }
             let slot = child.measure();
+            // Children are ordered; once a finite future slot starts, no later
+            // finite child can be active at this local time.
+            if slot.is_some() && local_t < cursor {
+                break;
+            }
             let active = match slot {
                 Some(len) => local_t >= cursor && local_t < cursor + len,
                 None => true,
@@ -436,8 +441,22 @@ impl TimelineComponent for Sequence {
             if placed_any {
                 cursor += self.spacing;
             }
-            child.mix_into(mix, start_secs + cursor, speed);
-            cursor += child.measure().unwrap_or(0.0);
+            let slot = child.measure();
+            let child_start = start_secs + cursor;
+            if let Some(len) = slot {
+                // Windowed live audio should not even ask off-window clips to
+                // decode/conform; in long sequences this is the hot path.
+                if child_start + len <= 0.0 {
+                    cursor += len;
+                    placed_any = true;
+                    continue;
+                }
+                if child_start >= mix.duration() {
+                    break;
+                }
+            }
+            child.mix_into(mix, child_start, speed);
+            cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
     }
