@@ -152,10 +152,16 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
                 if channels == 0 {
                     channels = spec.channels.count() as u16;
                 }
-                // (Re)allocate the interleaving scratch buffer to fit this frame.
-                let buf = sample_buf.get_or_insert_with(|| {
-                    SampleBuffer::<f32>::new(decoded.capacity() as u64, spec)
-                });
+                // Reallocate the interleaving scratch buffer when a codec emits
+                // a larger packet than the previous one.
+                let required = decoded.capacity().saturating_mul(spec.channels.count());
+                if sample_buf
+                    .as_ref()
+                    .map_or(true, |buf| buf.capacity() < required)
+                {
+                    sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+                }
+                let buf = sample_buf.as_mut().expect("sample buffer allocated");
                 buf.copy_interleaved_ref(decoded);
                 let decoded = buf.samples();
                 let ch = channels.max(1) as usize;
