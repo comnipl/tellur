@@ -15,11 +15,12 @@ const PLAY_AHEAD = 10;
 // Buffered history kept behind the playhead before eviction frees it. The persistent
 // green bar comes from IndexedDB, so evicting MSE never shrinks it.
 const KEEP_BEHIND = 6;
-// Max seconds streamed (and cached) per paused/priming /api/video.mp4 request. Active
-// playback uses a much larger cap so ordinary short previews stream as one request, while
-// long timelines still retain a bounded memory/cache footprint.
+// Max seconds streamed (and cached) per /api/video.mp4 request. Active playback
+// uses a modestly larger cap than priming: long chunks delay durable cache
+// commits and make slow first-pass renders expensive to abort/retry, while very
+// small chunks pay too much ffmpeg/audio setup overhead.
 const PRIME_STREAM_PIECE = 3;
-const PLAY_STREAM_PIECE = 30;
+const PLAY_STREAM_PIECE = 5;
 // Minimum length for a cached segment row to be worth re-appending from IndexedDB.
 // Shorter rows (shards from the old lookahead-clamped frontier) are streamed over in
 // full pieces instead — putSegment's subsume then deletes them, so a fragmented store
