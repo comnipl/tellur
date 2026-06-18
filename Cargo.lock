@@ -2052,6 +2052,7 @@ dependencies = [
 name = "tellur-live"
 version = "0.1.0"
 dependencies = [
+ "lru",
  "png",
  "tellur-core",
  "tellur-plugin",

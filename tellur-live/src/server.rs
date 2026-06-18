@@ -6,11 +6,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, LazyLock, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
@@ -28,6 +29,85 @@ use tellur_plugin::TimelineInfo;
 /// cache below the renderer's export-oriented 1 GiB default avoids memory
 /// pressure and LRU churn making playback look stalled.
 const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const VIDEO_SEGMENT_CACHE_BYTES: usize = 512 * 1024 * 1024;
+const VIDEO_SEGMENT_CACHE_ENTRIES: usize = 128;
+
+static VIDEO_SEGMENT_CACHE: LazyLock<Mutex<VideoSegmentCache>> =
+    LazyLock::new(|| Mutex::new(VideoSegmentCache::default()));
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VideoSegmentCacheKey {
+    plugin_cache_key: String,
+    timeline_id: String,
+    start_seconds_bits: u32,
+    video_seconds_bits: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    gop: u32,
+    crf: u8,
+    motion_blur: bool,
+}
+
+struct VideoSegmentCache {
+    entries: LruCache<VideoSegmentCacheKey, Arc<Vec<u8>>>,
+    bytes: usize,
+}
+
+impl Default for VideoSegmentCache {
+    fn default() -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            bytes: 0,
+        }
+    }
+}
+
+impl VideoSegmentCache {
+    fn get(&mut self, key: &VideoSegmentCacheKey) -> Option<Arc<Vec<u8>>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: VideoSegmentCacheKey, body: Vec<u8>) {
+        let bytes = body.len();
+        if bytes > VIDEO_SEGMENT_CACHE_BYTES {
+            return;
+        }
+        while self.bytes + bytes > VIDEO_SEGMENT_CACHE_BYTES
+            || self.entries.len() >= VIDEO_SEGMENT_CACHE_ENTRIES
+        {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+        if let Some(old) = self.entries.put(key, Arc::new(body)) {
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+        self.bytes += bytes;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+fn cached_video_segment(key: &VideoSegmentCacheKey) -> Option<Arc<Vec<u8>>> {
+    VIDEO_SEGMENT_CACHE.lock().ok()?.get(key)
+}
+
+fn cache_video_segment(key: VideoSegmentCacheKey, body: Vec<u8>) {
+    if let Ok(mut cache) = VIDEO_SEGMENT_CACHE.lock() {
+        cache.insert(key, body);
+    }
+}
+
+fn clear_video_segment_cache() {
+    if let Ok(mut cache) = VIDEO_SEGMENT_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -230,6 +310,7 @@ impl PreviewApp {
         if changed {
             self.ctx.clear();
             self.ctx.clear_metrics();
+            clear_video_segment_cache();
         }
         Ok(changed)
     }
@@ -649,6 +730,43 @@ struct VideoStreamSetup {
     verbose: bool,
 }
 
+fn video_segment_cache_key(
+    setup: &VideoStreamSetup,
+    plugin_cache_key: &str,
+    video_seconds: f32,
+) -> VideoSegmentCacheKey {
+    VideoSegmentCacheKey {
+        plugin_cache_key: plugin_cache_key.to_owned(),
+        timeline_id: setup.timeline_id.clone(),
+        start_seconds_bits: setup.start_seconds.to_bits(),
+        video_seconds_bits: video_seconds.to_bits(),
+        width: setup.resolution.width,
+        height: setup.resolution.height,
+        fps: setup.fps,
+        gop: setup.gop,
+        crf: setup.crf,
+        motion_blur: setup.motion_blur,
+    }
+}
+
+fn write_video_stream_headers(
+    stream: &mut TcpStream,
+    setup: &VideoStreamSetup,
+) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: video/mp4\r\n\
+         X-Tellur-Width: {}\r\n\
+         X-Tellur-Height: {}\r\n\
+         X-Tellur-Fps: {}\r\n\
+         X-Tellur-Gop: {}\r\n\
+         Cache-Control: {}\r\n\
+         Connection: close\r\n\r\n",
+        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
+    )
+}
+
 struct VideoFrame {
     image: CpuRasterImage,
     render_time: Duration,
@@ -805,6 +923,31 @@ fn handle_video_stream(
     // (instead of `-shortest`; see that arg). This is also the loop's frame count.
     let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
     let video_seconds = total_frames as f32 / setup.fps as f32;
+    let segment_cache_key = if setup.cache_control != "no-store" {
+        query
+            .get("v")
+            .map(|cache_key| video_segment_cache_key(&setup, cache_key, video_seconds))
+    } else {
+        None
+    };
+    if let Some(key) = &segment_cache_key {
+        if let Some(body) = cached_video_segment(key) {
+            write_video_stream_headers(&mut stream, &setup)?;
+            stream.write_all(&body)?;
+            stream.flush()?;
+            if setup.verbose {
+                println!(
+                    "video-stream-cache timeline={} start={:.3}s duration={:.3}s bytes={} total={:.2}ms",
+                    setup.timeline_id,
+                    setup.start_seconds,
+                    video_seconds,
+                    body.len(),
+                    ms(stream_start.elapsed()),
+                );
+            }
+            return Ok(());
+        }
+    }
 
     // Render only this stream's audio window and stage it as a temp WAV. Full
     // timeline audio can be huge, and live preview requests many short cache
@@ -843,18 +986,7 @@ fn handle_video_stream(
         return Ok(());
     }
 
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: video/mp4\r\n\
-         X-Tellur-Width: {}\r\n\
-         X-Tellur-Height: {}\r\n\
-         X-Tellur-Fps: {}\r\n\
-         X-Tellur-Gop: {}\r\n\
-         Cache-Control: {}\r\n\
-         Connection: close\r\n\r\n",
-        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
-    )?;
+    write_video_stream_headers(&mut stream, &setup)?;
 
     // FLAC block size aligned to ONE video frame's worth of audio samples, applied
     // to the encoder below (only when the sample rate divides evenly by fps — the
@@ -984,6 +1116,7 @@ fn handle_video_stream(
     let mut stream_out = stream.try_clone()?;
     let client_alive = Arc::new(AtomicBool::new(true));
     let client_alive_for_stdout = Arc::clone(&client_alive);
+    let collect_segment_body = segment_cache_key.is_some();
 
     // Drain ffmpeg's stdout to the client until TRUE EOF. ffmpeg emits the tail
     // GOP/fragments only after stdin is closed (the EOF below `drop(stdin)`), so
@@ -994,6 +1127,7 @@ fn handle_video_stream(
     // bug). Only a real read error or a client write failure ends the drain.
     let stdout_thread = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
+        let mut segment_body = collect_segment_body.then(Vec::new);
         loop {
             let n = match stdout.read(&mut buf) {
                 Ok(0) => break,
@@ -1008,10 +1142,14 @@ fn handle_video_stream(
                 client_alive_for_stdout.store(false, Ordering::Relaxed);
                 break;
             }
+            if let Some(body) = &mut segment_body {
+                body.extend_from_slice(&buf[..n]);
+            }
         }
         // Flush the final fragments to the kernel before the connection's FIN so
         // the tail is not stranded in a userspace/socket buffer at close.
         let _ = stream_out.flush();
+        segment_body
     });
 
     let stderr_thread = thread::spawn(move || {
@@ -1109,12 +1247,17 @@ fn handle_video_stream(
     if !client_alive.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
-    let _ = stdout_thread.join();
+    let segment_body = stdout_thread.join().unwrap_or(None);
     if !client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
         end_reason = "client_closed";
     }
     let stderr_text = stderr_thread.join().unwrap_or_default();
     let status = child.wait()?;
+    if status.success() && client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
+        if let (Some(key), Some(body)) = (segment_cache_key, segment_body) {
+            cache_video_segment(key, body);
+        }
+    }
     if setup.verbose {
         println!(
             "video-stream timeline={} start={:.3}s duration={:.3}s frames={}/{} written={} reason={} setup={:.2}ms audio={} audio_setup={:.2}ms ffmpeg_spawn={:.2}ms render_total={:.2}ms stdin_write={:.2}ms total={:.2}ms status={} stderr_bytes={}",

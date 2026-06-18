@@ -17,6 +17,7 @@ include = [
 ]
 
 [dependencies]
+lru = "0.12.5"
 png = "0.18.1"
 tellur-core = { path = "../tellur-core" }
 tellur-plugin = { path = "../tellur-plugin" }
