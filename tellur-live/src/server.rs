@@ -567,9 +567,10 @@ impl PreviewApp {
         seconds: f32,
         resolution: Resolution,
         motion_blur: bool,
+        collect_stats: bool,
     ) -> Result<VideoFrame, Box<dyn Error>> {
         self.ctx.set_motion_blur_enabled(motion_blur);
-        let before = self.ctx.metrics();
+        let before = collect_stats.then(|| self.ctx.metrics());
         let render_start = Instant::now();
         let image = self
             .plugin
@@ -586,21 +587,45 @@ impl PreviewApp {
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
         }
-        let after = self.ctx.metrics();
-        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
+        let stats = before.map(|before| {
+            let after = self.ctx.metrics();
+            let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
+            (
+                after.hits.saturating_sub(before.hits),
+                after.misses.saturating_sub(before.misses),
+                after.bytes_cached,
+                after.gpu_available,
+                after.gpu_init_attempted,
+                gpu_init_error,
+                format!("{:?}", after.gpu_preference),
+                after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
+                after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+            )
+        });
+        let (
+            cache_hits,
+            cache_misses,
+            bytes_cached,
+            gpu_available,
+            gpu_init_attempted,
+            gpu_init_error,
+            gpu_preference,
+            gpu_ops,
+            gpu_readbacks,
+        ) = stats.unwrap_or_else(|| (0, 0, 0, false, false, None, String::new(), 0, 0));
 
         Ok(VideoFrame {
             image,
             render_time,
-            cache_hits: after.hits.saturating_sub(before.hits),
-            cache_misses: after.misses.saturating_sub(before.misses),
-            bytes_cached: after.bytes_cached,
-            gpu_available: after.gpu_available,
-            gpu_init_attempted: after.gpu_init_attempted,
+            cache_hits,
+            cache_misses,
+            bytes_cached,
+            gpu_available,
+            gpu_init_attempted,
             gpu_init_error,
-            gpu_preference: format!("{:?}", after.gpu_preference),
-            gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
-            gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+            gpu_preference,
+            gpu_ops,
+            gpu_readbacks,
         })
     }
 
@@ -1204,13 +1229,15 @@ fn handle_video_stream(
             let mut app = app
                 .lock()
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let verbose = app.verbose;
             let frame = app.render_video_rgba(
                 &setup.timeline_id,
                 seconds,
                 setup.resolution,
                 setup.motion_blur,
+                verbose,
             )?;
-            if app.verbose {
+            if verbose {
                 println!(
                     "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
