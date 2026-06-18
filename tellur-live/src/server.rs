@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -16,6 +17,7 @@ use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
+use tellur_renderer::render_context::{CacheMetrics, TypeStats};
 use tellur_renderer::CachingRenderContext;
 
 use crate::build_watch::{
@@ -1165,6 +1167,16 @@ fn handle_video_stream(
     let mut render_total = Duration::ZERO;
     let mut stdin_write_total = Duration::ZERO;
     let mut end_reason = "complete";
+    let cache_metrics_before = if setup.verbose {
+        Some(
+            app.lock()
+                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?
+                .ctx
+                .metrics(),
+        )
+    } else {
+        None
+    };
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {
@@ -1278,6 +1290,11 @@ fn handle_video_stream(
             status,
             stderr_text.len(),
         );
+        if let Some(before) = cache_metrics_before {
+            if let Ok(app) = app.lock() {
+                log_cache_metrics_delta(&before, &app.ctx.metrics());
+            }
+        }
     }
     if !status.success() && client_alive.load(Ordering::Relaxed) {
         return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
@@ -1393,6 +1410,105 @@ fn log_frame_stats(stats: &FrameRenderStats) {
         stats.gpu_ops,
         stats.gpu_readbacks,
     );
+}
+
+#[derive(Clone, Copy)]
+struct TypeStatsDelta {
+    hits: u64,
+    misses: u64,
+    inclusive_time: Duration,
+    self_time: Duration,
+}
+
+impl TypeStatsDelta {
+    fn total(self) -> u64 {
+        self.hits + self.misses
+    }
+
+    fn hit_rate(self) -> f64 {
+        let total = self.total();
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+}
+
+fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
+    let hits = after.hits.saturating_sub(before.hits);
+    let misses = after.misses.saturating_sub(before.misses);
+    let total = hits + misses;
+    let hit_rate = if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64
+    };
+    let gpu_before = &before.gpu;
+    let gpu_after = &after.gpu;
+    println!(
+        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
+        hits,
+        misses,
+        hit_rate * 100.0,
+        format_bytes(after.bytes_cached as u64),
+        format_bytes(after.bytes_evicted.saturating_sub(before.bytes_evicted)),
+        after.pressure_skips.saturating_sub(before.pressure_skips),
+        after.oversize_skips.saturating_sub(before.oversize_skips),
+        gpu_after.total_ops().saturating_sub(gpu_before.total_ops()),
+        gpu_after.composites.saturating_sub(gpu_before.composites),
+        gpu_after.drop_shadows.saturating_sub(gpu_before.drop_shadows),
+        gpu_after.outlines.saturating_sub(gpu_before.outlines),
+        gpu_after.rasterizes.saturating_sub(gpu_before.rasterizes),
+        gpu_after.fills.saturating_sub(gpu_before.fills),
+        gpu_after
+            .temporal_averages
+            .saturating_sub(gpu_before.temporal_averages),
+        gpu_after.readbacks.saturating_sub(gpu_before.readbacks),
+    );
+
+    let mut rows: Vec<(&'static str, TypeStatsDelta)> = after
+        .per_type
+        .iter()
+        .map(|(name, stats)| {
+            let before_stats = before.per_type.get(name);
+            (*name, diff_type_stats(before_stats, stats))
+        })
+        .filter(|(_, stats)| stats.total() > 0 || !stats.self_time.is_zero())
+        .collect();
+    rows.sort_by_key(|(_, stats)| Reverse(stats.self_time));
+    for (name, stats) in rows.into_iter().take(12) {
+        println!(
+            "video-stream-cache-type name={} hits={} misses={} hit_rate={:.1}% self={} incl={}",
+            name,
+            stats.hits,
+            stats.misses,
+            stats.hit_rate() * 100.0,
+            format_duration(stats.self_time),
+            format_duration(stats.inclusive_time),
+        );
+    }
+}
+
+fn diff_type_stats(before: Option<&TypeStats>, after: &TypeStats) -> TypeStatsDelta {
+    let before = before.copied().unwrap_or_default();
+    TypeStatsDelta {
+        hits: after.hits.saturating_sub(before.hits),
+        misses: after.misses.saturating_sub(before.misses),
+        inclusive_time: after.inclusive_time.saturating_sub(before.inclusive_time),
+        self_time: after.self_time.saturating_sub(before.self_time),
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let micros = d.as_micros();
+    if micros >= 1_000_000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else if micros >= 1_000 {
+        format!("{:.2}ms", micros as f64 / 1_000.0)
+    } else {
+        format!("{micros}us")
+    }
 }
 
 fn ms(d: Duration) -> f64 {
