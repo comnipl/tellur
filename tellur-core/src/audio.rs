@@ -666,6 +666,8 @@ impl AudioMix {
 mod tests {
     use super::*;
 
+    static AUDIO_CACHE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
     fn temp_wav(samples: &[i16], rate: u32, channels: u16) -> std::path::PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -763,6 +765,9 @@ mod tests {
 
     #[test]
     fn trimmed_decode_populates_and_reuses_full_cache_for_small_sources() {
+        let _guard = AUDIO_CACHE_TEST_LOCK
+            .lock()
+            .expect("audio cache test lock should not be poisoned");
         clear_decode_cache_for_tests();
         let path = temp_wav(&[0, 1000, 2000, 3000, 4000, 5000], 6, 1);
         let path_str = path.to_string_lossy();
@@ -783,6 +788,9 @@ mod tests {
 
     #[test]
     fn conformed_audio_is_cached_for_repeated_windows() {
+        let _guard = AUDIO_CACHE_TEST_LOCK
+            .lock()
+            .expect("audio cache test lock should not be poisoned");
         clear_decode_cache_for_tests();
         let path = temp_wav(&[0, 1000, 2000, 3000, 4000, 5000], 6, 1);
         let path_str = path.to_string_lossy();
