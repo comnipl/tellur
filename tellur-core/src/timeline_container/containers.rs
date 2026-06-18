@@ -1,7 +1,7 @@
 //! The overlay [`Timeline`] and the one-after-another [`Sequence`].
 
 use crate::audio::AudioMix;
-use crate::composite::{composite_frame_over, composite_frames_over};
+use crate::composite::composite_frames_over;
 use crate::geometry::Vec2;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
@@ -388,7 +388,7 @@ impl TimelineComponent for Sequence {
         // slot contributes nothing (`.sketch/02 §8`).
         let mut cursor = 0.0_f32;
         let mut placed_any = false;
-        let mut acc: Option<RasterImage> = None;
+        let mut frames = Vec::new();
         let local_t = clock.local().seconds();
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
@@ -408,13 +408,13 @@ impl TimelineComponent for Sequence {
             if active {
                 let child_clock = clock.with_local_window(LocalTime::new(local_t - cursor), slot);
                 if let Some(img) = child.frame(child_clock, canvas, target, ctx) {
-                    acc = Some(composite_frame_over(acc, img, target, ctx));
+                    frames.push(img);
                 }
             }
             cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
-        acc
+        composite_frames_over(frames, target, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {

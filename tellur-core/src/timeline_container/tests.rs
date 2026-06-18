@@ -1,7 +1,9 @@
 use super::leaves::STUB_PROBE_SECONDS;
 use super::*;
 use crate::geometry::{Constraints, Vec2};
-use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use crate::raster::{
+    CpuRasterImage, GpuSurface, PixelFormat, RasterComponent, RasterImage, Resolution,
+};
 use crate::render_context::RenderContext;
 use crate::timeline_component::{
     resolve, Arrangement, NodeKind, ResolveCtx, ResolveError, Timed, TimedBuilder,
@@ -570,6 +572,104 @@ fn sequence_gates_each_child_to_its_slot() {
             .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
             .is_none(),
         "past both slots: nothing",
+    );
+}
+
+#[derive(PartialEq, Hash)]
+struct GpuFrame;
+
+impl TimelineComponent for GpuFrame {
+    fn duration(&self) -> Option<f32> {
+        Some(1.0)
+    }
+
+    fn frame(
+        &self,
+        _clock: Clock<'_>,
+        _canvas: Vec2,
+        target: Resolution,
+        _ctx: &mut dyn RenderContext,
+    ) -> Option<RasterImage> {
+        Some(RasterImage::Gpu(GpuSurface::new(
+            target.width,
+            target.height,
+            PixelFormat::Rgba8,
+            "test-gpu",
+            Arc::new(()),
+        )))
+    }
+
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        Arrangement {
+            kind: NodeKind::Video,
+            label: String::new(),
+            name: None,
+            source: None,
+            start: offset,
+            end: offset + 1.0,
+            trim: None,
+            triggers: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingReadbackContext {
+    readbacks: usize,
+}
+
+impl RenderContext for CountingReadbackContext {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn render(
+        &mut self,
+        component: &dyn RasterComponent,
+        size: Vec2,
+        target: Resolution,
+    ) -> RasterImage {
+        component.render(size, target, self)
+    }
+
+    fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
+        self.readbacks += 1;
+        match image {
+            RasterImage::Cpu(image) => image,
+            RasterImage::Gpu(surface) => {
+                let stride = match surface.format {
+                    PixelFormat::Rgba8 => 4,
+                    PixelFormat::Rgba16Float => 8,
+                };
+                let bytes = (surface.width as usize) * (surface.height as usize) * stride;
+                CpuRasterImage::new(
+                    surface.width,
+                    surface.height,
+                    surface.format,
+                    vec![0u8; bytes],
+                )
+            }
+        }
+    }
+}
+
+#[test]
+fn sequence_single_active_frame_preserves_gpu_image() {
+    let seq = Sequence::builder()
+        .child(Box::new(GpuFrame) as Box<dyn TimelineComponent + Send>)
+        .build();
+    let resolved = resolve_root(seq).expect("windowed, not timeless");
+    let mut ctx = CountingReadbackContext::default();
+
+    let frame = resolved
+        .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+        .expect("active slot contributes");
+
+    assert_eq!(ctx.readbacks, 0, "single active slot should not read back");
+    assert!(
+        matches!(frame, RasterImage::Gpu(_)),
+        "sequence should preserve a target-sized GPU frame"
     );
 }
 

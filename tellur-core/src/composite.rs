@@ -138,36 +138,6 @@ pub fn composite_at(
     }
 }
 
-/// Source-over composites the image-channel frame `top` onto the running
-/// accumulator `acc`, at the full `target` frame (offset `(0, 0)`).
-///
-/// This is the timeline-sampling counterpart of [`composite_children`]
-/// (`layer.rs`): the spatial path renders `&dyn RasterComponent` children
-/// itself, but a timeline container has already turned each child into an
-/// `Option<RasterImage>` by recursing `frame`, so it must composite at the
-/// IMAGE layer (`.sketch/02 §8`). `top` is read back to CPU through `ctx` and
-/// blended over `acc`; the first contributing frame seeds a transparent
-/// `target`-sized accumulator. A `None` `top` leaves `acc` untouched.
-pub(crate) fn composite_frame_over(
-    acc: Option<RasterImage>,
-    top: RasterImage,
-    target: Resolution,
-    ctx: &mut dyn RenderContext,
-) -> RasterImage {
-    // Seed a transparent accumulator on the first contributing frame.
-    let mut buffer = match acc {
-        Some(image) => {
-            let cpu = ctx.readback(image);
-            // The accumulator owns its bytes; copy out of the (shared) `Bytes`.
-            cpu.pixels.to_vec()
-        }
-        None => vec![0u8; (target.width as usize) * (target.height as usize) * 4],
-    };
-    let top = ctx.readback(top);
-    composite_at(&mut buffer, target, &top, 0, 0);
-    RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buffer)
-}
-
 /// Source-over composites already-rendered timeline frames, bottom to top.
 ///
 /// Timeline containers recurse into child timelines before they can composite,
