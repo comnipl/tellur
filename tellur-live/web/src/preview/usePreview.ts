@@ -263,6 +263,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
               // video by firing its revealOnLoad after we switched to video.
               stillTokenRef.current++;
               cancelStillRequest();
+            } else if (cover === "hold-video") {
+              // Hold the current surface but do NOT fetch a PNG still. The
+              // TimelinePlayer is priming/revealing an MP4 frame for this time,
+              // and staying on the video decode path avoids the PNG<->MP4 color jump.
+              stillTokenRef.current++;
+              cancelStillRequest();
             } else if (cover === "hold") {
               // The current display (parked video frame or trailing still) is the best
               // stand-in (pause / end / play / paused scrub over cold frames): keep it

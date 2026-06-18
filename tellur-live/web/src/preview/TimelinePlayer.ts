@@ -105,7 +105,10 @@ export type DisplayMode = "video" | "still";
 //               recognizable stale frame — then show the fresh still when it decodes.
 // - "trailing": mount. Show the still layer immediately and refine it once the first
 //               frame loads.
-export type StillCover = "hold" | "blank" | "trailing";
+// - "hold-video": keep the current surface up without fetching a PNG still. Used when
+//                 the next reveal should come from MP4/video decode too, avoiding a
+//                 PNG/RGBA -> H.264/YUV color jump on play.
+export type StillCover = "hold" | "hold-video" | "blank" | "trailing";
 
 export interface TimelinePlayerEvents {
   onTime?: (seconds: number) => void;
@@ -301,12 +304,13 @@ export class TimelinePlayer {
         this.pendingReveal = { target, fillGen: this.fillGen };
         void this.revealFromCache(target, this.fillGen);
       } else {
-        // Cold frame: keep the current display (trailing still or held video
-        // frame) up for drag continuity and swap in the fresh server still once
-        // it decodes. The prime fetch is debounced so a drag doesn't storm the
-        // server.
-        this.pendingReveal = null;
-        this.setDisplayMode("still", target, "hold");
+        // Cold frame: keep the current display up for drag continuity, but do
+        // not fetch a PNG still. Instead, prime a short MP4 segment and reveal
+        // the parked <video> frame once it lands. That keeps paused and playing
+        // frames on the same browser decode path, so there is no PNG/RGBA ->
+        // H.264/YUV color jump when playback starts.
+        this.pendingReveal = { target, fillGen: this.fillGen };
+        this.setDisplayMode("still", target, "hold-video");
       }
       this.scheduleDebouncedFill();
     }
@@ -339,9 +343,9 @@ export class TimelinePlayer {
     this.mode = "playing";
     this.events.onPlaying?.(true);
     this.pendingReveal = { target: this.position, fillGen: this.fillGen };
-    // The element is parked on the play frame: hold it (don't flash the previous still)
-    // and let revealAt swap straight to running video, usually before any still loads.
-    this.setDisplayMode("still", this.position, "hold");
+    // Keep the current surface up without fetching a PNG still; revealAt swaps
+    // straight to running video once enough MP4 is buffered.
+    this.setDisplayMode("still", this.position, "hold-video");
     this.tryResolveReveal();
     this.kickFill();
   }
