@@ -26,9 +26,11 @@
 //! terminal width; separators and the total count are dimmed so the
 //! live numbers stand out. Disable via [`FfmpegEncoder::progress`].
 
+use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdout, Command, Stdio};
+use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -52,26 +54,54 @@ const AUDIO_CHANNELS: u16 = 2;
 /// when encoding. The conversion and the color tag are always derived from the
 /// SAME value, so they cannot disagree — a conversion/tag mismatch is exactly
 /// what shifts the decoded colors away from the rendered source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ColorRange {
-    /// Limited / "TV" range (luma 16–235). The safe, widely-compatible default:
-    /// effectively every player and editor decodes it correctly.
-    #[default]
+    /// Limited / "TV" range (luma 16–235). Useful for broad external-player
+    /// compatibility when a downstream target expects studio-range video.
     Limited,
-    /// Full / "PC" range (luma 0–255). Reproduces the full-range rendered source
-    /// most precisely, but full-range `yuv420p` is mishandled by some external
-    /// players/editors, so it is opt-in.
+    /// Full / "PC" range (luma 0–255). The default because rendered frames and
+    /// PNG stills are full-range RGB, so this keeps MP4 preview/export colors
+    /// aligned with paused frames.
+    #[default]
     Full,
 }
 
 impl ColorRange {
+    /// A stable user-facing token for CLI, manifest, query, and headers.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ColorRange::Limited => "limited",
+            ColorRange::Full => "full",
+        }
+    }
+
     /// The ffmpeg range token used for both the `scale`/`setparams` filter and
     /// the `-color_range` output tag.
-    fn token(self) -> &'static str {
+    pub fn ffmpeg_token(self) -> &'static str {
         match self {
             ColorRange::Limited => "tv",
             ColorRange::Full => "pc",
         }
+    }
+}
+
+impl FromStr for ColorRange {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "limited" | "limited-range" | "tv" => Ok(ColorRange::Limited),
+            "full" | "full-range" | "pc" => Ok(ColorRange::Full),
+            other => Err(format!(
+                "invalid color range `{other}`; expected `full` or `limited`"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ColorRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -134,9 +164,9 @@ impl FfmpegEncoder {
 
     /// Selects the YUV range the rendered full-range RGB is converted to AND the
     /// color metadata the output is tagged with. Both are derived from this one
-    /// value, so they can never disagree. Defaults to [`ColorRange::Limited`];
-    /// pass [`ColorRange::Full`] to reproduce the rendered source most precisely
-    /// at the cost of broad external-player compatibility.
+    /// value, so they can never disagree. Defaults to [`ColorRange::Full`] so
+    /// MP4 output matches full-range rendered frames and PNG stills; pass
+    /// [`ColorRange::Limited`] when a downstream target requires TV range.
     pub fn color_range(mut self, range: ColorRange) -> Self {
         self.color_range = range;
         self
@@ -316,7 +346,7 @@ impl FfmpegEncoder {
         // conversion (`out_range`) and the tag (`-color_range`) come from the SAME
         // token, so they can't drift apart — a mismatch is what would otherwise
         // shift decoded colors away from the rendered source.
-        let range = self.color_range.token();
+        let range = self.color_range.ffmpeg_token();
         let color_vf = format!(
             "scale=out_range={range}:out_color_matrix=bt709,format=yuv420p,\
              setparams=range={range}:color_primaries=bt709:colorspace=bt709:color_trc=bt709"
@@ -893,38 +923,38 @@ mod av_mux_tests {
         let tl = Timeline::builder().child(Solid.at(0.0..0.2)).build();
         let resolved = resolve(tl).expect("solid timeline resolves");
 
-        // Default: limited-range BT.709, every field tagged.
-        let mut lim = std::env::temp_dir();
-        lim.push(format!("tellur_color_lim_{}.mp4", std::process::id()));
-        FfmpegEncoder::new(Resolution::new(64, 64), 24)
-            .progress(false)
-            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-            .encode_timeline(&resolved, &lim)
-            .expect("limited-range encode succeeds");
-        assert_eq!(
-            probe_color(&lim),
-            "tv|bt709|bt709|bt709",
-            "default output is tagged limited-range BT.709 on all four fields"
-        );
-
-        // Opt-in full range flips ONLY the range; the matrix/primaries/transfer
-        // stay BT.709.
+        // Default: full-range BT.709, every field tagged.
         let mut full = std::env::temp_dir();
         full.push(format!("tellur_color_full_{}.mp4", std::process::id()));
         FfmpegEncoder::new(Resolution::new(64, 64), 24)
             .progress(false)
-            .color_range(ColorRange::Full)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             .encode_timeline(&resolved, &full)
             .expect("full-range encode succeeds");
         assert_eq!(
             probe_color(&full),
             "pc|bt709|bt709|bt709",
-            "color_range(Full) tags full range, keeping the BT.709 matrix"
+            "default output is tagged full-range BT.709 on all four fields"
         );
 
-        let _ = std::fs::remove_file(&lim);
+        // Limited range flips ONLY the range; the matrix/primaries/transfer stay
+        // BT.709.
+        let mut lim = std::env::temp_dir();
+        lim.push(format!("tellur_color_lim_{}.mp4", std::process::id()));
+        FfmpegEncoder::new(Resolution::new(64, 64), 24)
+            .progress(false)
+            .color_range(ColorRange::Limited)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .encode_timeline(&resolved, &lim)
+            .expect("limited-range encode succeeds");
+        assert_eq!(
+            probe_color(&lim),
+            "tv|bt709|bt709|bt709",
+            "color_range(Limited) tags limited range, keeping the BT.709 matrix"
+        );
+
         let _ = std::fs::remove_file(&full);
+        let _ = std::fs::remove_file(&lim);
     }
 
     // End-to-end A/V: a REAL decoded video background (`testsrc` mp4 via

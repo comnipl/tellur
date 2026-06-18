@@ -18,7 +18,7 @@ use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
 use tellur_renderer::render_context::{CacheMetrics, TypeStats};
-use tellur_renderer::CachingRenderContext;
+use tellur_renderer::{CachingRenderContext, ColorRange};
 
 use crate::build_watch::{
     describe_build, run_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot,
@@ -49,6 +49,7 @@ struct VideoSegmentCacheKey {
     gop: u32,
     crf: u8,
     motion_blur: bool,
+    color_range: ColorRange,
 }
 
 struct VideoSegmentCache {
@@ -118,6 +119,7 @@ pub struct ServerOptions {
     pub bind: String,
     pub resolution: Resolution,
     pub fps: u32,
+    pub color_range: ColorRange,
     pub gpu_preference: GpuPreference,
     pub verbose: bool,
     pub auto_build: Option<AutoBuildOptions>,
@@ -148,6 +150,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
             .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
+        color_range: options.color_range,
         verbose: options.verbose,
         compile_state,
     }));
@@ -303,6 +306,7 @@ struct PreviewApp {
     ctx: CachingRenderContext,
     resolution: Resolution,
     fps: u32,
+    color_range: ColorRange,
     verbose: bool,
     compile_state: CompileState,
 }
@@ -752,6 +756,7 @@ struct VideoStreamSetup {
     gop: u32,
     crf: u8,
     motion_blur: bool,
+    color_range: ColorRange,
     start_seconds: f32,
     cache_control: &'static str,
     realtime: bool,
@@ -774,6 +779,7 @@ fn video_segment_cache_key(
         gop: setup.gop,
         crf: setup.crf,
         motion_blur: setup.motion_blur,
+        color_range: setup.color_range,
     }
 }
 
@@ -789,9 +795,15 @@ fn write_video_stream_headers(
          X-Tellur-Height: {}\r\n\
          X-Tellur-Fps: {}\r\n\
          X-Tellur-Gop: {}\r\n\
+         X-Tellur-Color-Range: {}\r\n\
          Cache-Control: {}\r\n\
          Connection: close\r\n\r\n",
-        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
+        setup.resolution.width,
+        setup.resolution.height,
+        setup.fps,
+        setup.gop,
+        setup.color_range.as_str(),
+        setup.cache_control,
     )
 }
 
@@ -932,6 +944,7 @@ fn handle_video_stream(
             gop,
             crf,
             motion_blur: request_motion_blur(&query),
+            color_range: request_color_range(&query, app.color_range),
             start_seconds,
             cache_control: if cacheable {
                 "public, max-age=31536000, immutable"
@@ -1055,10 +1068,16 @@ fn handle_video_stream(
             ));
         }
     }
+    let range = setup.color_range.ffmpeg_token();
+    let color_vf = format!(
+        "scale=out_range={range}:out_color_matrix=bt709,format=yuv420p,\
+         setparams=range={range}:color_primaries=bt709:colorspace=bt709:color_trc=bt709"
+    );
+
     cmd.args(["-c:v", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-tune", "zerolatency"])
-        // Convert the rendered full-range RGB to (limited-range) BT.709 YUV and
+        // Convert the rendered full-range RGB to BT.709 YUV and
         // TAG the stream with that exact matrix/range. Without this, swscale
         // converts with its BT.601/limited defaults and writes NO color metadata,
         // so the browser falls back to its own guess (BT.709 for 720p+) and
@@ -1066,19 +1085,16 @@ fn handle_video_stream(
         // colors versus the paused PNG (which shows the raw full-range RGB with no
         // conversion). `scale` does the conversion, `setparams` stamps all four
         // color fields onto the frames (so primaries/transfer are written too,
-        // without codec-specific params), and the `-color_*` options mirror them
-        // at the stream level. Limited range matches the offline export default
-        // (`FfmpegEncoder`'s `ColorRange::Limited`) so preview and export agree.
-        .args([
-            "-vf",
-            "scale=out_range=tv:out_color_matrix=bt709,format=yuv420p,\
-             setparams=range=tv:color_primaries=bt709:colorspace=bt709:color_trc=bt709",
-        ])
+        // without codec-specific params), and the `-color_*` options mirror the
+        // same range at stream level. Full range is the default because paused
+        // PNG/RGBA frames are full-range too; use `color_range=limited` only when
+        // a downstream target requires TV range.
+        .args(["-vf", &color_vf])
         .args(["-pix_fmt", "yuv420p"])
         .args(["-color_primaries", "bt709"])
         .args(["-color_trc", "bt709"])
         .args(["-colorspace", "bt709"])
-        .args(["-color_range", "tv"])
+        .args(["-color_range", range])
         .args(["-g", &setup.gop.to_string()])
         .args(["-keyint_min", &setup.gop.to_string()])
         .args(["-sc_threshold", "0"])
@@ -1575,6 +1591,14 @@ fn request_motion_blur(query: &HashMap<String, String>) -> bool {
     )
 }
 
+fn request_color_range(query: &HashMap<String, String>, default: ColorRange) -> ColorRange {
+    query
+        .get("color_range")
+        .or_else(|| query.get("colorRange"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> Resolution {
     if let (Some(width), Some(height)) = (
         query
@@ -2015,6 +2039,38 @@ mod tests {
 
         query.insert("motion_blur".to_owned(), "true".to_owned());
         assert!(request_motion_blur(&query));
+    }
+
+    #[test]
+    fn request_color_range_defaults_to_server_value() {
+        assert_eq!(
+            request_color_range(&HashMap::new(), ColorRange::Limited),
+            ColorRange::Limited
+        );
+
+        let mut query = HashMap::new();
+        query.insert("color_range".to_owned(), "bogus".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Full),
+            ColorRange::Full
+        );
+    }
+
+    #[test]
+    fn request_color_range_accepts_query_aliases() {
+        let mut query = HashMap::new();
+        query.insert("color_range".to_owned(), "limited".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Full),
+            ColorRange::Limited
+        );
+
+        query.clear();
+        query.insert("colorRange".to_owned(), "pc".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Limited),
+            ColorRange::Full
+        );
     }
 
     #[test]
