@@ -53,7 +53,8 @@
             pkgs.pkg-config
             pkgs.mold
           ];
-          buildInputs = [ pkgs.fontconfig ];
+          buildInputs = [ pkgs.fontconfig ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.stdenv.cc.cc.lib ];
 
           # Drop the prebuilt web bundle into the crate so build.rs embeds it
           # rather than invoking npm (which has no network in the sandbox).
@@ -78,7 +79,10 @@
               wrapProgram $out/bin/tellur \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg ]} ${
                   pkgs.lib.optionalString pkgs.stdenv.isLinux
-                    "--prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]}"
+                    "--prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [
+                      pkgs.vulkan-loader
+                      pkgs.stdenv.cc.cc.lib
+                    ]}"
                 }
             '';
           }
@@ -112,7 +116,10 @@
           ];
 
           LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux (
-            pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader ]
+            pkgs.lib.makeLibraryPath [
+              pkgs.vulkan-loader
+              pkgs.stdenv.cc.cc.lib
+            ]
           );
         };
       }
