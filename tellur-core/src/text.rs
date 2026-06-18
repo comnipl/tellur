@@ -1,7 +1,7 @@
 //! Text rendering as a vector component.
 //!
-//! [`Text`] shapes a sequence of [`TextSpan`]s with rustybuzz, lays the
-//! resulting glyph runs out left-to-right, and emits one filled
+//! [`Text`] shapes styled text with rustybuzz, lays the resulting glyph
+//! runs out left-to-right, and emits one filled
 //! [`Path`](crate::vector::Path) per glyph through the existing
 //! [`VectorGraphic`] pipeline. OpenType `palt` is enabled during
 //! shaping, so Japanese proportional alternate widths are honored when
@@ -12,6 +12,9 @@
 //! `fill: Some(Paint::Solid(red))` between plain spans". A span can also
 //! apply independent X/Y scale to its glyph outlines for slightly wide or
 //! tall lettering while still participating in the same line layout.
+//! Adjacent `TextSpan`s with the same resolved shaping style are shaped
+//! as one run, so splitting a string for styling does not change
+//! kerning, ligatures, or other cross-boundary glyph positioning.
 //!
 //! Single-line only for now: `\n` is not interpreted; multi-line layout
 //! and line breaking are deferred to a follow-up.
@@ -70,7 +73,7 @@ pub static CURSIVE: LazyLock<Arc<Font>> =
 pub static FANTASY: LazyLock<Arc<Font>> =
     LazyLock::new(|| Arc::new(Font::fantasy().expect("resolve system fantasy font")));
 
-/// Number of distinct shaped spans cached per font. Bounds memory for
+/// Number of distinct shaped runs cached per font. Bounds memory for
 /// long-running sessions whose text varies continuously (e.g. a live
 /// numeric readout) while comfortably covering any realistic set of
 /// static labels.
@@ -84,7 +87,7 @@ fn default_shaping_features() -> [rustybuzz::Feature; 1] {
     )]
 }
 
-/// Cache key for a shaped span: everything that determines the produced
+/// Cache key for a shaped run: everything that determines the produced
 /// glyph geometry except the font itself (the cache is per-font). The
 /// fill/paint is deliberately excluded — it is cheap to re-apply and
 /// often animates frame to frame, so keying on it would defeat the cache.
@@ -96,23 +99,33 @@ struct ShapeKey {
     text: String,
 }
 
-/// Memoized geometry of one shaped span, in span-local coordinates (the
-/// first glyph origin sits near `x = 0` and the baseline is baked in).
-/// Paint is not stored; the caller pairs each glyph with the current fill.
+/// One glyph slot inside a shaped run. Whitespace glyphs have no outline but
+/// still carry their cluster and advance so span boundaries can be recovered.
+struct ShapedGlyph {
+    /// UTF-8 byte offset in the shaped input that produced this glyph.
+    cluster: usize,
+    /// Pen position immediately after this glyph's advance.
+    advance_end: f32,
+    /// The visible outline, empty for whitespace / empty-outline glyphs.
+    commands: Vec<PathCommand>,
+}
+
+/// Memoized geometry of one shaped run, in run-local coordinates (the first
+/// glyph origin sits near `x = 0` and the baseline is baked in). Paint is not
+/// stored; the caller pairs each glyph with the current fill.
 struct ShapedGlyphs {
-    /// One entry per visible glyph. Whitespace and empty-outline glyphs
-    /// are omitted, but their advance is already folded into `width`.
-    glyphs: Vec<Vec<PathCommand>>,
-    /// Total advance of the span.
+    /// One entry per shaped glyph, including whitespace.
+    glyphs: Vec<ShapedGlyph>,
+    /// Total advance of the run.
     width: f32,
 }
 
 /// An owned font, cheaply shareable via `Arc<Font>` across components.
 ///
-/// The byte buffer is reference-counted. Shaping a span — building a
+/// The byte buffer is reference-counted. Shaping a run — building a
 /// `rustybuzz::Face`, shaping with rustybuzz, and outlining each glyph —
 /// is comparatively expensive and fully determined by
-/// `(weight, size, baseline, text)`, so the per-span result is memoized
+/// `(weight, size, baseline, text)`, so the shaped-run result is memoized
 /// in `shape_cache`: a label whose content is stable across frames shapes
 /// once and is reused thereafter, even while its fill color animates (the
 /// cache stores geometry only; the caller re-attaches the paint). The
@@ -255,7 +268,7 @@ impl Font {
         (ascent.max(0.0), descent.max(0.0))
     }
 
-    /// Returns the memoized span-local geometry for `text` at the given
+    /// Returns the memoized run-local geometry for `text` at the given
     /// style, computing and caching it on a miss. Keyed on
     /// `(weight, size, baseline, text)`; the result carries no paint, so
     /// callers re-attach the (possibly per-frame) fill themselves.
@@ -286,7 +299,7 @@ impl Font {
 
     /// The uncached path behind [`Font::shaped_glyphs`]: builds a fresh
     /// `rustybuzz::Face`, shapes `text`, and outlines every glyph into
-    /// span-local path commands.
+    /// run-local path commands.
     fn shape_uncached(
         &self,
         weight: Weight,
@@ -332,12 +345,14 @@ impl Font {
                 origin_y: glyph_y,
             };
             face.outline_glyph(glyph_id, &mut builder);
-            if !builder.commands.is_empty() {
-                glyphs.push(builder.commands);
-            }
 
             pen_x += pos.x_advance as f32 * scale;
             // y_advance is typically 0 for horizontal text.
+            glyphs.push(ShapedGlyph {
+                cluster: info.cluster as usize,
+                advance_end: pen_x,
+                commands: builder.commands,
+            });
         }
 
         ShapedGlyphs {
@@ -470,11 +485,13 @@ impl Span for TextSpan {
         let paths = shaped
             .glyphs
             .iter()
-            .map(|commands| {
+            .filter(|glyph| !glyph.commands.is_empty())
+            .map(|glyph| {
                 let commands = if scale_x == 1.0 && scale_y == 1.0 {
-                    commands.clone()
+                    glyph.commands.clone()
                 } else {
-                    commands
+                    glyph
+                        .commands
                         .iter()
                         .copied()
                         .map(|c| scale_command(c, Vec2(scale_x, scale_y)))
@@ -538,6 +555,114 @@ pub struct Text {
     pub fill: Paint,
 }
 
+#[derive(Clone)]
+struct ResolvedTextRunStyle {
+    font: Arc<Font>,
+    size: f32,
+    weight: Weight,
+    scale_x: f32,
+    scale_y: f32,
+}
+
+impl ResolvedTextRunStyle {
+    fn from_span(span: &TextSpan, ctx: &SpanContext<'_>) -> Self {
+        Self {
+            font: span.font.clone().unwrap_or_else(|| ctx.font.clone()),
+            size: span.size.unwrap_or(ctx.size),
+            weight: span.weight.unwrap_or(ctx.weight),
+            scale_x: span.scale_x.unwrap_or(1.0),
+            scale_y: span.scale_y.unwrap_or(1.0),
+        }
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.font == other.font
+            && self.size.to_bits() == other.size.to_bits()
+            && self.weight == other.weight
+            && self.scale_x.to_bits() == other.scale_x.to_bits()
+            && self.scale_y.to_bits() == other.scale_y.to_bits()
+    }
+}
+
+struct TextRunPart {
+    start: usize,
+    end: usize,
+    fill: Paint,
+}
+
+fn boundary_advance(shaped: &ShapedGlyphs, byte_offset: usize) -> f32 {
+    shaped
+        .glyphs
+        .iter()
+        .take_while(|glyph| glyph.cluster < byte_offset)
+        .last()
+        .map_or(0.0, |glyph| glyph.advance_end)
+}
+
+fn shape_text_run(
+    style: &ResolvedTextRunStyle,
+    text: &str,
+    parts: &[TextRunPart],
+) -> Vec<ShapedSpan> {
+    let shaped = style
+        .font
+        .shaped_glyphs(style.weight, style.size, 0.0, text);
+    let (ascent, descent) = style.font.vertical_metrics(style.size);
+    let ascent = ascent * style.scale_y;
+    let descent = descent * style.scale_y;
+    let scale = Vec2(style.scale_x, style.scale_y);
+
+    parts
+        .iter()
+        .map(|part| {
+            if part.start == part.end {
+                return ShapedSpan {
+                    width: 0.0,
+                    ascent: 0.0,
+                    descent: 0.0,
+                    paths: Vec::new(),
+                };
+            }
+
+            let start_x = boundary_advance(&shaped, part.start) * style.scale_x;
+            let end_x = boundary_advance(&shaped, part.end) * style.scale_x;
+            let paths = shaped
+                .glyphs
+                .iter()
+                .filter(|glyph| {
+                    !glyph.commands.is_empty()
+                        && part.start <= glyph.cluster
+                        && glyph.cluster < part.end
+                })
+                .map(|glyph| {
+                    let commands = if style.scale_x == 1.0 && style.scale_y == 1.0 {
+                        glyph.commands.clone()
+                    } else {
+                        glyph
+                            .commands
+                            .iter()
+                            .copied()
+                            .map(|c| scale_command(c, scale))
+                            .collect()
+                    };
+                    let commands = commands
+                        .into_iter()
+                        .map(|c| translate_command(c, Vec2(-start_x, 0.0)))
+                        .collect();
+                    (commands, part.fill.clone())
+                })
+                .collect();
+
+            ShapedSpan {
+                width: end_x - start_x,
+                ascent,
+                descent,
+                paths,
+            }
+        })
+        .collect()
+}
+
 impl Text {
     /// Vertical metrics of the base font at `self.size`, returned as
     /// `(ascent, line_height)`.
@@ -553,17 +678,21 @@ impl Text {
         (ascent, line_height)
     }
 
-    /// Shapes every span against the base style and lays them out
+    /// Shapes every input span independently and lays them out
     /// left-to-right. Returns each span's start-x paired with its
     /// [`ShapedSpan`] (paths still baseline-relative), the line baseline
     /// `y`, and the line's intrinsic `(width, height)`.
+    ///
+    /// This is used by [`Text::into_spans`], where the exact one-output-
+    /// per-input-span contract is more important than cross-boundary
+    /// kerning.
     ///
     /// The line box grows to fit the tallest span: its baseline sits at
     /// `max(base ascent, span ascents)` and it extends down to
     /// `max(base depth, span descents)`, so a span that overrides
     /// `font`/`size` — or a [`MathSpan`](crate::math::MathSpan) taller
     /// than the surrounding text — is enclosed rather than clipped.
-    fn shape_line(&self) -> (Vec<(f32, ShapedSpan)>, f32, Vec2) {
+    fn shape_line_preserving_spans(&self) -> (Vec<(f32, ShapedSpan)>, f32, Vec2) {
         let ctx = SpanContext {
             font: &self.font,
             size: self.size,
@@ -591,9 +720,125 @@ impl Text {
         (placed, line_ascent, size)
     }
 
-    /// Shapes every span and returns `(glyph paths, intrinsic size)`,
-    /// with paths in the line's global coordinates (all spans
-    /// concatenated left-to-right and dropped onto the baseline).
+    /// Shapes the line for normal rendering. Adjacent built-in spans with
+    /// matching shaping style are coalesced first, so splitting a
+    /// `TextSpan` or compatible `MathSpan` does not introduce artificial
+    /// advance at the boundary.
+    fn shape_line(&self) -> (Vec<(f32, ShapedSpan)>, f32, Vec2) {
+        let ctx = SpanContext {
+            font: &self.font,
+            size: self.size,
+            weight: self.weight,
+            fill: &self.fill,
+        };
+        let (base_ascent, base_line_height) = self.line_metrics();
+        let base_below = (base_line_height - base_ascent).max(0.0);
+
+        let mut placed: Vec<(f32, ShapedSpan)> = Vec::with_capacity(self.spans.len());
+        let mut pen_x: f32 = 0.0;
+        let mut line_ascent = base_ascent;
+        let mut line_below = base_below;
+        let mut i = 0;
+
+        while i < self.spans.len() {
+            if let Some(text_span) = self.spans[i].as_ref().as_any().downcast_ref::<TextSpan>() {
+                let style = ResolvedTextRunStyle::from_span(text_span, &ctx);
+                let mut text = String::new();
+                let mut parts = Vec::new();
+                let mut j = i;
+
+                while j < self.spans.len() {
+                    let Some(next_span) =
+                        self.spans[j].as_ref().as_any().downcast_ref::<TextSpan>()
+                    else {
+                        break;
+                    };
+                    let next_style = ResolvedTextRunStyle::from_span(next_span, &ctx);
+                    if !style.matches(&next_style) {
+                        break;
+                    }
+
+                    let start = text.len();
+                    text.push_str(&next_span.text);
+                    let end = text.len();
+                    parts.push(TextRunPart {
+                        start,
+                        end,
+                        fill: next_span.fill.clone().unwrap_or_else(|| ctx.fill.clone()),
+                    });
+                    j += 1;
+                }
+
+                for shaped in shape_text_run(&style, &text, &parts) {
+                    line_ascent = line_ascent.max(shaped.ascent);
+                    line_below = line_below.max(shaped.descent);
+                    let start_x = pen_x;
+                    pen_x += shaped.width;
+                    placed.push((start_x, shaped));
+                }
+                i = j;
+                continue;
+            }
+
+            #[cfg(feature = "latex")]
+            if let Some(math_span) = self.spans[i]
+                .as_ref()
+                .as_any()
+                .downcast_ref::<crate::math::MathSpan>()
+            {
+                let size = math_span.size.unwrap_or(ctx.size);
+                let fill = math_span.fill.clone().unwrap_or_else(|| ctx.fill.clone());
+                let mut source = String::new();
+                let mut j = i;
+
+                while j < self.spans.len() {
+                    let Some(next_span) = self.spans[j]
+                        .as_ref()
+                        .as_any()
+                        .downcast_ref::<crate::math::MathSpan>()
+                    else {
+                        break;
+                    };
+                    let next_size = next_span.size.unwrap_or(ctx.size);
+                    let next_fill = next_span.fill.clone().unwrap_or_else(|| ctx.fill.clone());
+                    if size.to_bits() != next_size.to_bits() || fill != next_fill {
+                        break;
+                    }
+                    source.push_str(&next_span.source);
+                    j += 1;
+                }
+
+                let shaped = crate::math::MathSpan {
+                    source,
+                    size: Some(size),
+                    fill: Some(fill),
+                }
+                .shape(&ctx);
+                line_ascent = line_ascent.max(shaped.ascent);
+                line_below = line_below.max(shaped.descent);
+                let start_x = pen_x;
+                pen_x += shaped.width;
+                placed.push((start_x, shaped));
+                i = j;
+                continue;
+            }
+
+            let shaped = self.spans[i].shape(&ctx);
+            line_ascent = line_ascent.max(shaped.ascent);
+            line_below = line_below.max(shaped.descent);
+            let start_x = pen_x;
+            pen_x += shaped.width;
+            placed.push((start_x, shaped));
+            i += 1;
+        }
+
+        let size = Vec2(pen_x, line_ascent + line_below);
+        (placed, line_ascent, size)
+    }
+
+    /// Shapes the line and returns `(glyph paths, intrinsic size)`, with
+    /// paths in the line's global coordinates (all runs concatenated
+    /// left-to-right and dropped onto the baseline).
     fn shape_and_layout(&self) -> (Vec<(Vec<PathCommand>, Paint)>, Vec2) {
         let (placed, baseline_y, size) = self.shape_line();
 
@@ -618,6 +863,10 @@ impl Text {
     /// order), and entries for empty spans are zero-width placeholders so
     /// positional indexing matches.
     ///
+    /// Because this preserves one output per input span, it intentionally
+    /// shapes those spans independently instead of coalescing adjacent
+    /// compatible spans.
+    ///
     /// Useful for attaching per-span effects (transforms, drop shadows
     /// on the rasterized form, outlines, ...) by composing each
     /// [`Positioned`] span back into a layer:
@@ -630,7 +879,7 @@ impl Text {
     ///     .build();
     /// ```
     pub fn into_spans(self) -> Vec<Positioned> {
-        let (placed, baseline_y, size) = self.shape_line();
+        let (placed, baseline_y, size) = self.shape_line_preserving_spans();
         let line_height = size.1;
         placed
             .into_iter()
@@ -867,6 +1116,82 @@ mod tests {
         let (scaled_x, scaled_y) = first_path_point(&scaled);
         assert_close(scaled_x, normal_x * 1.4);
         assert_close(scaled_y, normal_y * 1.25);
+    }
+
+    #[test]
+    fn adjacent_text_spans_shape_as_one_run() {
+        let fill = Paint::Solid(crate::color::Color::rgb_u8(20, 20, 20));
+        let whole = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(fill.clone())
+            .span("AVAV")
+            .build();
+        let split = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(fill)
+            .span("A")
+            .span("V")
+            .span("A")
+            .span("V")
+            .build();
+
+        let (whole_paths, whole_size) = whole.shape_and_layout();
+        let (split_paths, split_size) = split.shape_and_layout();
+
+        assert_eq!(split_size, whole_size);
+        assert_eq!(split_paths, whole_paths);
+    }
+
+    #[test]
+    fn differently_colored_text_spans_keep_combined_run_advance() {
+        let black = Paint::Solid(crate::color::Color::rgb_u8(20, 20, 20));
+        let red = Paint::Solid(crate::color::Color::rgb_u8(220, 60, 60));
+        let whole = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(black.clone())
+            .span("AVAV")
+            .build();
+        let split = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(black)
+            .span("A")
+            .span(TextSpan::builder().text("V").fill(red.clone()))
+            .span("A")
+            .span(TextSpan::builder().text("V").fill(red))
+            .build();
+
+        let (_whole_paths, whole_size) = whole.shape_and_layout();
+        let (_split_paths, split_size) = split.shape_and_layout();
+
+        assert_eq!(split_size, whole_size);
+    }
+
+    #[cfg(feature = "latex")]
+    #[test]
+    fn adjacent_math_spans_shape_as_one_formula_when_style_matches() {
+        let fill = Paint::Solid(crate::color::Color::rgb_u8(20, 20, 20));
+        let whole = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(fill.clone())
+            .span(crate::math::MathSpan::new(r"x^2+y"))
+            .build();
+        let split = Text::builder()
+            .font(SERIF.clone())
+            .size(72.0)
+            .fill(fill)
+            .span(crate::math::MathSpan::new(r"x^2"))
+            .span(crate::math::MathSpan::new(r"+y"))
+            .build();
+
+        let (_whole_paths, whole_size) = whole.shape_and_layout();
+        let (_split_paths, split_size) = split.shape_and_layout();
+
+        assert_eq!(split_size, whole_size);
     }
 
     fn first_path_point(span: &ShapedSpan) -> (f32, f32) {
