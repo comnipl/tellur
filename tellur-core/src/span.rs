@@ -1,13 +1,15 @@
 //! The [`Span`] trait: one styled run within a line of
 //! [`Text`](crate::text::Text).
 //!
-//! A line is a sequence of spans laid out left-to-right. Each span shapes
+//! A line is a sequence of spans laid out left-to-right. A span can shape
 //! itself — given the base style it inherits from the enclosing `Text` —
 //! into placed vector paths plus the vertical metrics the line needs to
-//! position it. [`TextSpan`](crate::text::TextSpan) is the ordinary
-//! styled-text span; with the `latex` feature, [`MathSpan`](crate::math::MathSpan)
-//! renders a LaTeX formula as another kind of span. Anything implementing
-//! `Span` flows into `Text::builder().span(...)`.
+//! position it. Normal `Text` rendering may coalesce adjacent compatible
+//! built-in spans first so cross-boundary kerning and formula layout are
+//! preserved. [`TextSpan`](crate::text::TextSpan) is the ordinary styled-text
+//! span; with the `latex` feature, [`MathSpan`](crate::math::MathSpan) renders
+//! a LaTeX formula as another kind of span. Anything implementing `Span` flows
+//! into `Text::builder().span(...)`.
 
 use std::any::Any;
 use std::hash::{Hash, Hasher};
