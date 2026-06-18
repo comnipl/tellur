@@ -157,7 +157,7 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
                 let required = decoded.capacity().saturating_mul(spec.channels.count());
                 if sample_buf
                     .as_ref()
-                    .map_or(true, |buf| buf.capacity() < required)
+                    .is_none_or(|buf| buf.capacity() < required)
                 {
                     sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
                 }
