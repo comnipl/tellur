@@ -847,6 +847,38 @@ fn const_wav(name: &str, rate: u32, frames: usize, level: i16) -> std::path::Pat
     write_wav_fixture(name, rate, &vec![level; frames])
 }
 
+fn write_ffmpeg_sine_audio(name: &str, ext: &str, codec: &str, seconds: f32) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "tellur_audio_{}_{}.{}",
+        name,
+        std::process::id(),
+        ext
+    ));
+
+    let source = format!("sine=frequency=440:sample_rate={TEST_RATE}:duration={seconds:.3}");
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &source,
+            "-ac",
+            "1",
+            "-c:a",
+            codec,
+        ])
+        .arg(&path)
+        .status()
+        .expect("spawn ffmpeg audio fixture");
+    assert!(status.success(), "ffmpeg audio fixture write failed");
+    path
+}
+
 // Decode reads the real source length: a 1.0s fixture probes to ~1.0s.
 #[test]
 fn audiofile_probes_real_decoded_duration() {
@@ -854,6 +886,28 @@ fn audiofile_probes_real_decoded_duration() {
     let af = AudioFile::builder().path(path.to_str().unwrap()).build();
     let d = af.duration().expect("audio has a duration");
     assert!((d - 1.0).abs() < 1e-3, "decoded ~1.0s, got {d}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore = "requires ffmpeg with libmp3lame on PATH"]
+fn audiofile_decodes_mp3_duration_and_mix() {
+    let path = write_ffmpeg_sine_audio("mp3", "mp3", "libmp3lame", 2.0);
+    let af = AudioFile::builder().path(path.to_str().unwrap()).build();
+
+    let d = af.duration().expect("mp3 audio has a duration");
+    assert!(
+        d > 1.5 && d < 2.3,
+        "mp3 should decode near 2s instead of falling back to 1s, got {d}"
+    );
+
+    let resolved = resolve_audio(Timeline::builder().child(af).build()).expect("media-backed");
+    let mixed = resolved.render_audio_window(0.25, 0.25, TEST_RATE, 1);
+    assert!(
+        mixed.samples.iter().any(|sample| sample.abs() > 0.001),
+        "decoded mp3 should contribute audible samples to the mix"
+    );
+
     let _ = std::fs::remove_file(&path);
 }
 
