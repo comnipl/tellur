@@ -8,6 +8,9 @@ default = ["renderer"]
 # The GPU / encode backend (wgpu / vello / ffmpeg). Vector/raster-only projects
 # can turn this off to skip the heavy graphics stack: `default-features = false`.
 renderer = ["dep:tellur-renderer"]
+# Inline LaTeX math spans. Forwarded through the facade so authored projects can
+# depend on `tellur` alone and still opt into `tellur-core` feature gates.
+latex = ["tellur-core/latex", "tellur-renderer?/latex"]
 # The `tellur` command-line tool (the `tellur` binary). Pulls in the live-preview
 # host and the argument/metadata machinery; authored projects never enable this.
 cli = ["dep:clap", "dep:cargo_metadata", "dep:toml_edit", "dep:tellur-live", "renderer"]

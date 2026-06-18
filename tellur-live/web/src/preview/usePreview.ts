@@ -17,6 +17,7 @@ const STILL_REQUEST_DEBOUNCE_MS = 100;
 export interface PreviewState {
   seconds: number;
   playing: boolean;
+  muted: boolean;
   cacheRanges: CacheRange[];
   error: string | null;
   imageSrc: string | null;
@@ -32,6 +33,7 @@ export interface PreviewControls {
   imgRef: RefObject<HTMLImageElement>;
   setSeconds: (s: number) => void;
   togglePlay: () => void;
+  toggleMute: () => void;
   stepFrame: (delta: number) => void;
   rewindToStart: () => void;
 }
@@ -77,6 +79,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
   const [seconds, setSecondsState] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
   const [cacheRanges, setCacheRanges] = useState<CacheRange[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
@@ -85,6 +88,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
   const secondsRef = useRef(0);
   const playingRef = useRef(false);
+  const mutedRef = useRef(false);
   const playerRef = useRef<TimelinePlayer | null>(null);
 
   const cacheRef = useRef<MediaCache | null>(null);
@@ -236,6 +240,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
           duration,
           fps,
           initialPosition: secondsRef.current,
+          isMuted: () => mutedRef.current,
           videoUrl: buildVideoUrl,
           cache,
         },
@@ -329,9 +334,16 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const togglePlay = useCallback(() => {
     const player = playerRef.current;
     if (!player) return;
-    // Runs inside the click/keydown gesture so play() can unmute for the autoplay policy.
+    // Runs inside the click/keydown gesture so play() can apply the user's audio state.
     if (playingRef.current) player.pause();
     else player.play();
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    playerRef.current?.setMuted(next);
   }, []);
 
   const stepFrame = useCallback(
@@ -356,6 +368,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     state: {
       seconds,
       playing,
+      muted,
       cacheRanges,
       error,
       imageSrc,
@@ -366,6 +379,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     imgRef,
     setSeconds: seekTo,
     togglePlay,
+    toggleMute,
     stepFrame,
     rewindToStart,
   };
