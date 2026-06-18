@@ -20,9 +20,10 @@ const MAX_CURVE_STEPS: usize = 96;
 type ClipperPaths = clipper2::Paths<clipper2::Milli>;
 
 /// Which side of the original silhouette the outline band occupies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum OutlineSide {
     /// The whole band is outside the child silhouette.
+    #[default]
     Outset,
     /// The whole band is inside the child silhouette.
     Inset,
@@ -30,25 +31,14 @@ pub enum OutlineSide {
     Center,
 }
 
-impl Default for OutlineSide {
-    fn default() -> Self {
-        Self::Outset
-    }
-}
-
 /// Corner treatment used when offsetting the silhouette.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum OutlineJoin {
+    #[default]
     Round,
     Square,
     Bevel,
     Miter,
-}
-
-impl Default for OutlineJoin {
-    fn default() -> Self {
-        Self::Round
-    }
 }
 
 /// A vector component that renders only an outline band around its child.
@@ -477,19 +467,19 @@ fn flatten_bez_path(path: &BezPath, tolerance: f32) -> Vec<Vec<Vec2>> {
     let commands: Vec<PathCommand> = path
         .elements()
         .iter()
-        .filter_map(|el| match *el {
-            PathEl::MoveTo(p) => Some(PathCommand::MoveTo(from_point(p))),
-            PathEl::LineTo(p) => Some(PathCommand::LineTo(from_point(p))),
-            PathEl::QuadTo(p1, p2) => Some(PathCommand::QuadTo {
+        .map(|el| match *el {
+            PathEl::MoveTo(p) => PathCommand::MoveTo(from_point(p)),
+            PathEl::LineTo(p) => PathCommand::LineTo(from_point(p)),
+            PathEl::QuadTo(p1, p2) => PathCommand::QuadTo {
                 control: from_point(p1),
                 to: from_point(p2),
-            }),
-            PathEl::CurveTo(p1, p2, p3) => Some(PathCommand::CubicTo {
+            },
+            PathEl::CurveTo(p1, p2, p3) => PathCommand::CubicTo {
                 c1: from_point(p1),
                 c2: from_point(p2),
                 to: from_point(p3),
-            }),
-            PathEl::ClosePath => Some(PathCommand::Close),
+            },
+            PathEl::ClosePath => PathCommand::Close,
         })
         .collect();
     flatten_commands(&commands, Transform::IDENTITY, tolerance, true)
