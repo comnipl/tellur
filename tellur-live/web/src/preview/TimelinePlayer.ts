@@ -353,6 +353,7 @@ export class TimelinePlayer {
 
   pause(): void {
     if (this.disposed) return;
+    const hadPendingReveal = this.pendingReveal != null;
     this.position = this.currentPlaybackSeconds();
     this.video.pause();
     this.stopTicker();
@@ -361,9 +362,21 @@ export class TimelinePlayer {
     this.pendingReveal = null;
     this.events.onPlaying?.(false);
     this.emitTime(this.position);
-    // The video is parked on the correct frame: hold it and swap to the still only once a
-    // fresh still for THIS time decodes, so pausing never flashes a stale frame.
-    this.setDisplayMode("still", this.position, "hold");
+    // During normal playback the video is already parked on the correct frame.
+    // Keep displaying that decoded frame instead of swapping to a PNG still:
+    // H.264/YUV and PNG/RGBA are not byte-identical, so switching surfaces on
+    // pause creates a subtle color jump. If pause lands while a reveal is still
+    // pending, the element may be showing an old frame; use the still fallback.
+    const videoFrameStep = 1 / Math.max(this.config.fps, 1);
+    const videoOnFrame =
+      !hadPendingReveal &&
+      this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      Math.abs(this.video.currentTime - this.position) <= videoFrameStep * 2;
+    if (videoOnFrame) {
+      this.setDisplayMode("video", this.position);
+    } else {
+      this.setDisplayMode("still", this.position, "hold");
+    }
     // Let short priming pieces finish and persist, but stop a long playback stream
     // when the user pauses. Otherwise pausing near the start of a long timeline would keep
     // the server encoding far past the now-still playhead.
