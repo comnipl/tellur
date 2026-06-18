@@ -144,6 +144,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         plugin: HotReloadPlugin::new(options.plugin_path),
         project_name: options.project_name,
         ctx: CachingRenderContext::with_capacity_bytes(LIVE_PREVIEW_CACHE_BYTES)
+            .with_volatile_large_admission()
             .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
@@ -1447,7 +1448,7 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
     let gpu_before = &before.gpu;
     let gpu_after = &after.gpu;
     println!(
-        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
+        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
         hits,
         misses,
         hit_rate * 100.0,
@@ -1455,6 +1456,7 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
         format_bytes(after.bytes_evicted.saturating_sub(before.bytes_evicted)),
         after.pressure_skips.saturating_sub(before.pressure_skips),
         after.oversize_skips.saturating_sub(before.oversize_skips),
+        after.admission_skips.saturating_sub(before.admission_skips),
         gpu_after.total_ops().saturating_sub(gpu_before.total_ops()),
         gpu_after.composites.saturating_sub(gpu_before.composites),
         gpu_after.drop_shadows.saturating_sub(gpu_before.drop_shadows),
