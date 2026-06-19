@@ -1188,6 +1188,77 @@ fn gain_can_exceed_unit_range_before_ffmpeg_output() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn audiofile_applies_linear_fade_envelope() {
+    let frames = TEST_RATE as usize;
+    let level = (0.8 * i16::MAX as f32) as i16;
+    let path = const_wav("fade", TEST_RATE, frames, level);
+
+    let tl = Timeline::builder()
+        .child(
+            AudioFile::builder()
+                .path(path.to_str().unwrap())
+                .fade_in(0.25)
+                .fade_out(0.25),
+        )
+        .build();
+    let resolved = resolve_audio(tl).expect("media-backed");
+    let mixed = resolved.render_audio(TEST_RATE, 1);
+
+    let full = mixed.samples[(TEST_RATE / 2) as usize];
+    let half_rise = mixed.samples[(TEST_RATE / 8) as usize];
+    let half_fall = mixed.samples[(TEST_RATE * 7 / 8) as usize];
+    let tail = mixed.samples[frames - 1];
+
+    assert!(
+        mixed.samples[0].abs() < 1e-6,
+        "fade-in starts silent, got {}",
+        mixed.samples[0]
+    );
+    assert!(
+        (half_rise - full * 0.5).abs() < 0.02,
+        "halfway through fade-in should be half gain: {half_rise} vs {full}",
+    );
+    assert!(
+        (half_fall - full * 0.5).abs() < 0.02,
+        "halfway through fade-out should be half gain: {half_fall} vs {full}",
+    );
+    assert!(tail.abs() < 0.001, "fade-out ends near silence, got {tail}");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn audiofile_fade_matches_full_mix_when_rendering_window() {
+    let frames = TEST_RATE as usize;
+    let level = (0.7 * i16::MAX as f32) as i16;
+    let path = const_wav("fade_window", TEST_RATE, frames, level);
+
+    let tl = Timeline::builder()
+        .child(
+            AudioFile::builder()
+                .path(path.to_str().unwrap())
+                .fade_in(0.2)
+                .fade_out(0.3),
+        )
+        .build();
+    let resolved = resolve_audio(tl).expect("media-backed");
+    let full = resolved.render_audio(TEST_RATE, 1);
+    let window = resolved.render_audio_window(0.75, 0.2, TEST_RATE, 1);
+
+    let start = (TEST_RATE * 3 / 4) as usize;
+    let end = start + (TEST_RATE / 5) as usize;
+    assert_eq!(window.samples.len(), end - start);
+    for (a, b) in window.samples.iter().zip(&full.samples[start..end]) {
+        assert!(
+            (a - b).abs() < 1e-6,
+            "window sample {a} should match full mix slice sample {b}"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
 // (mix) `.at(window)` speed changes the SAMPLE COUNT: a 1.0s source placed
 // into a 0.5s window plays at 2× (half as many output frames for that clip).
 #[test]
