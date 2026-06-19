@@ -637,7 +637,13 @@ impl PreviewApp {
         &mut self,
         query: &HashMap<String, String>,
     ) -> Result<RenderedFrame, Box<dyn Error>> {
-        let rendered = self.render_image(query)?;
+        let mut rendered = self.render_image(query)?;
+        if request_video_color(query) {
+            rendered.image = video_color_preview_image(
+                &rendered.image,
+                request_color_range(query, self.color_range),
+            )?;
+        }
 
         let encode_start = Instant::now();
         let mut body = Vec::new();
@@ -1599,6 +1605,16 @@ fn request_color_range(query: &HashMap<String, String>, default: ColorRange) -> 
         .unwrap_or(default)
 }
 
+fn request_video_color(query: &HashMap<String, String>) -> bool {
+    matches!(
+        query
+            .get("video_color")
+            .or_else(|| query.get("videoColor"))
+            .map(String::as_str),
+        Some("1") | Some("true") | Some("mp4") | Some("video")
+    )
+}
+
 fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> Resolution {
     if let (Some(width), Some(height)) = (
         query
@@ -1629,6 +1645,115 @@ fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> R
 
 fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
+}
+
+fn video_color_preview_image(
+    image: &CpuRasterImage,
+    color_range: ColorRange,
+) -> Result<CpuRasterImage, Box<dyn Error>> {
+    if image.format != PixelFormat::Rgba8 {
+        return Err(format!("video-color preview requires Rgba8, got {:?}", image.format).into());
+    }
+
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let expected = width * height * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "video-color frame size mismatch: expected {expected} bytes, got {}",
+            image.pixels.len()
+        )
+        .into());
+    }
+
+    let mut out = vec![0u8; expected];
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let mut chroma = [(0usize, 0.0_f32, 0.0_f32, 0.0_f32); 4];
+            let mut count = 0usize;
+            for dy in 0..2 {
+                let py = y + dy;
+                if py >= height {
+                    continue;
+                }
+                for dx in 0..2 {
+                    let px = x + dx;
+                    if px >= width {
+                        continue;
+                    }
+                    let idx = (py * width + px) * 4;
+                    let rgb = [
+                        image.pixels[idx] as f32,
+                        image.pixels[idx + 1] as f32,
+                        image.pixels[idx + 2] as f32,
+                    ];
+                    let (encoded_y, encoded_cb, encoded_cr) = bt709_rgb_to_ycbcr(rgb, color_range);
+                    chroma[count] = (idx, encoded_y, encoded_cb, encoded_cr);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+
+            let cb = quantize_u8(
+                chroma[..count].iter().map(|(_, _, cb, _)| *cb).sum::<f32>() / count as f32,
+            ) as f32;
+            let cr = quantize_u8(
+                chroma[..count].iter().map(|(_, _, _, cr)| *cr).sum::<f32>() / count as f32,
+            ) as f32;
+            for &(idx, encoded_y, _, _) in &chroma[..count] {
+                let yy = quantize_u8(encoded_y) as f32;
+                let [r, g, b] = bt709_ycbcr_to_rgb(yy, cb, cr, color_range);
+                out[idx] = quantize_u8(r);
+                out[idx + 1] = quantize_u8(g);
+                out[idx + 2] = quantize_u8(b);
+                out[idx + 3] = image.pixels[idx + 3];
+            }
+        }
+    }
+
+    Ok(CpuRasterImage::new(
+        image.width,
+        image.height,
+        PixelFormat::Rgba8,
+        out,
+    ))
+}
+
+fn bt709_rgb_to_ycbcr(rgb: [f32; 3], color_range: ColorRange) -> (f32, f32, f32) {
+    let [r, g, b] = rgb;
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let cb = (b - y) / 1.8556;
+    let cr = (r - y) / 1.5748;
+    match color_range {
+        ColorRange::Full => (y, 128.0 + cb, 128.0 + cr),
+        ColorRange::Limited => (
+            16.0 + y * (219.0 / 255.0),
+            128.0 + cb * (224.0 / 255.0),
+            128.0 + cr * (224.0 / 255.0),
+        ),
+    }
+}
+
+fn bt709_ycbcr_to_rgb(y: f32, cb: f32, cr: f32, color_range: ColorRange) -> [f32; 3] {
+    let (y, cb, cr) = match color_range {
+        ColorRange::Full => (y, cb - 128.0, cr - 128.0),
+        ColorRange::Limited => (
+            (y - 16.0) * (255.0 / 219.0),
+            (cb - 128.0) * (255.0 / 224.0),
+            (cr - 128.0) * (255.0 / 224.0),
+        ),
+    };
+    [
+        y + 1.5748 * cr,
+        y - 0.187_324 * cb - 0.468_124 * cr,
+        y + 1.8556 * cb,
+    ]
+}
+
+fn quantize_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
 }
 
 fn export_preview_png<W: Write>(image: &CpuRasterImage, writer: W) -> Result<(), Box<dyn Error>> {
@@ -2071,6 +2196,49 @@ mod tests {
             request_color_range(&query, ColorRange::Limited),
             ColorRange::Full
         );
+    }
+
+    #[test]
+    fn request_video_color_is_explicitly_opt_in() {
+        assert!(!request_video_color(&HashMap::new()));
+
+        let mut query = HashMap::new();
+        query.insert("video_color".to_owned(), "1".to_owned());
+        assert!(request_video_color(&query));
+
+        query.clear();
+        query.insert("videoColor".to_owned(), "mp4".to_owned());
+        assert!(request_video_color(&query));
+    }
+
+    #[test]
+    fn video_color_preview_preserves_gray_pixels() {
+        let image = CpuRasterImage::new(
+            2,
+            2,
+            PixelFormat::Rgba8,
+            vec![
+                64, 64, 64, 255, 128, 128, 128, 200, 200, 200, 200, 180, 255, 255, 255, 128,
+            ],
+        );
+
+        let out = video_color_preview_image(&image, ColorRange::Full).expect("convert");
+        assert_eq!(out.pixels, image.pixels);
+    }
+
+    #[test]
+    fn video_color_preview_shares_chroma_per_420_block() {
+        let image =
+            CpuRasterImage::new(2, 1, PixelFormat::Rgba8, vec![255, 0, 0, 77, 0, 0, 255, 88]);
+
+        let out = video_color_preview_image(&image, ColorRange::Full).expect("convert");
+        assert_eq!(out.width, 2);
+        assert_eq!(out.height, 1);
+        assert_eq!(out.format, PixelFormat::Rgba8);
+        assert_eq!(out.pixels[3], 77);
+        assert_eq!(out.pixels[7], 88);
+        assert_ne!(&out.pixels[..3], &image.pixels[..3]);
+        assert_ne!(&out.pixels[4..7], &image.pixels[4..7]);
     }
 
     #[test]

@@ -181,6 +181,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         fps,
         motionBlur,
         cacheKey: pluginKey,
+        videoColor: true,
       });
       const token = ++stillTokenRef.current;
       cancelStillRequest();

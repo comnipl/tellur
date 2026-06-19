@@ -35,6 +35,7 @@ export interface FrameRequestParams {
   fps: number;
   motionBlur: boolean;
   cacheKey: string;
+  videoColor?: boolean;
 }
 
 export function frameUrl(params: FrameRequestParams): string {
@@ -48,6 +49,9 @@ export function frameUrl(params: FrameRequestParams): string {
     format: "png",
     v: params.cacheKey,
   });
+  if (params.videoColor) {
+    query.set("video_color", "1");
+  }
   return `/api/frame?${query}`;
 }
 
