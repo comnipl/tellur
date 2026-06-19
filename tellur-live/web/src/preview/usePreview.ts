@@ -57,7 +57,8 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const duration = timeline?.duration ?? 0;
   const width = Math.max(1, Math.round(resolution.width));
   const height = Math.max(1, Math.round(resolution.height));
-  const gop = Math.max(1, Math.floor(fps / 4));
+  // Keep preview fragments short so MSE can reveal/play cold segments quickly.
+  const gop = Math.max(1, Math.floor(fps / 10));
 
   const groupKey = useMemo(
     () =>
