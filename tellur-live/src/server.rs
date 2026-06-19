@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+use tellur_core::cache_budget::{cache_ram_capacity, try_reserve_cache_ram, BudgetReservation};
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
@@ -53,8 +54,13 @@ struct VideoSegmentCacheKey {
 }
 
 struct VideoSegmentCache {
-    entries: LruCache<VideoSegmentCacheKey, Arc<Vec<u8>>>,
+    entries: LruCache<VideoSegmentCacheKey, CachedVideoSegment>,
     bytes: usize,
+}
+
+struct CachedVideoSegment {
+    body: Arc<Vec<u8>>,
+    _reservation: BudgetReservation,
 }
 
 impl Default for VideoSegmentCache {
@@ -68,24 +74,30 @@ impl Default for VideoSegmentCache {
 
 impl VideoSegmentCache {
     fn get(&mut self, key: &VideoSegmentCacheKey) -> Option<Arc<Vec<u8>>> {
-        self.entries.get(key).cloned()
+        self.entries.get(key).map(|entry| Arc::clone(&entry.body))
     }
 
     fn insert(&mut self, key: VideoSegmentCacheKey, body: Vec<u8>) {
         let bytes = body.len();
-        if bytes > VIDEO_SEGMENT_CACHE_BYTES {
+        let capacity = cache_ram_capacity(VIDEO_SEGMENT_CACHE_BYTES);
+        if bytes > capacity {
             return;
         }
-        while self.bytes + bytes > VIDEO_SEGMENT_CACHE_BYTES
-            || self.entries.len() >= VIDEO_SEGMENT_CACHE_ENTRIES
-        {
+        while self.bytes + bytes > capacity || self.entries.len() >= VIDEO_SEGMENT_CACHE_ENTRIES {
             let Some((_, old)) = self.entries.pop_lru() else {
                 break;
             };
-            self.bytes = self.bytes.saturating_sub(old.len());
+            self.bytes = self.bytes.saturating_sub(old.body.len());
         }
-        if let Some(old) = self.entries.put(key, Arc::new(body)) {
-            self.bytes = self.bytes.saturating_sub(old.len());
+        let Some(reservation) = try_reserve_cache_ram(bytes) else {
+            return;
+        };
+        let entry = CachedVideoSegment {
+            body: Arc::new(body),
+            _reservation: reservation,
+        };
+        if let Some(old) = self.entries.put(key, entry) {
+            self.bytes = self.bytes.saturating_sub(old.body.len());
         }
         self.bytes += bytes;
     }
@@ -1572,7 +1584,7 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
     let gpu_before = &before.gpu;
     let gpu_after = &after.gpu;
     println!(
-        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
+        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} budget_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
         hits,
         misses,
         hit_rate * 100.0,
@@ -1581,6 +1593,7 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
         after.pressure_skips.saturating_sub(before.pressure_skips),
         after.oversize_skips.saturating_sub(before.oversize_skips),
         after.admission_skips.saturating_sub(before.admission_skips),
+        after.budget_skips.saturating_sub(before.budget_skips),
         gpu_after.total_ops().saturating_sub(gpu_before.total_ops()),
         gpu_after.composites.saturating_sub(gpu_before.composites),
         gpu_after.drop_shadows.saturating_sub(gpu_before.drop_shadows),
