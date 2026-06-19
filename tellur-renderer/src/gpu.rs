@@ -309,6 +309,16 @@ impl GpuRenderer {
         self.stats
     }
 
+    /// Drops reusable GPU allocations so a later required allocation, usually
+    /// readback staging, can retry with as much Tellur-managed VRAM freed as
+    /// possible.
+    pub fn release_cached_resources(&mut self) {
+        self.vello_target = None;
+        self.readback_staging = None;
+        self.cpu_upload_cache_cap_bytes = 0;
+        self.evict_upload_cache_to_fit(0);
+    }
+
     fn reserve_render_vram(&mut self, bytes: usize) -> Option<BudgetReservation> {
         if let Some(reservation) = try_reserve_vram(bytes) {
             self.note_vram_reserve_success();
@@ -1087,7 +1097,7 @@ impl GpuRasterBackend for GpuRenderer {
             RasterImage::Cpu(image) => Some(image),
             RasterImage::Gpu(surface) if surface.backend() == BACKEND => {
                 let image = Arc::downcast::<GpuBufferImage>(surface.handle_arc()).ok()?;
-                let byte_len = (image.width as usize) * (image.height as usize) * 4;
+                let byte_len = Self::buffer_image_bytes(&image);
                 // Reuse a persisted MAP_READ staging buffer across frames (the
                 // resolution is stable), so this allocates once instead of every
                 // readback. The copy below fully overwrites it each time.
@@ -1097,7 +1107,11 @@ impl GpuRasterBackend for GpuRenderer {
                     .map(|(buffer, _)| buffer.size())
                     != Some(byte_len as u64)
                 {
-                    let reservation = self.reserve_render_vram(byte_len)?;
+                    self.readback_staging = None;
+                    let reservation = self.reserve_render_vram(byte_len).or_else(|| {
+                        self.release_cached_resources();
+                        self.reserve_render_vram(byte_len)
+                    })?;
                     self.readback_staging = Some((
                         self.device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("tellur-gpu-readback"),
