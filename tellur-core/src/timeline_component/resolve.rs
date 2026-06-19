@@ -264,7 +264,8 @@ impl ResolvedTimeline {
         target: Resolution,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
+        let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers())
+            .with_local_window(LocalTime::new(t.seconds()), Some(self.duration));
         self.source().frame(clock, self.canvas, target, ctx)
     }
 

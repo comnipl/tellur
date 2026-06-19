@@ -190,7 +190,11 @@ impl TimelineComponent for Timeline {
         // determinate length to gate against and is left open (already a
         // resolve-time warning).
         let local_t = clock.local().seconds();
-        if let Some(length) = self.measure() {
+        let length = clock
+            .window()
+            .map(|window| window.width())
+            .or_else(|| self.measure());
+        if let Some(length) = length {
             if local_t < 0.0 || local_t >= length {
                 return None;
             }
