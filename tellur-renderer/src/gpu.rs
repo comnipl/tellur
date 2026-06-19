@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use lru::LruCache;
 use tellur_core::color::Color;
 use tellur_core::geometry::{Transform, Vec2};
 use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, Resolution};
@@ -16,6 +17,7 @@ use wgpu::util::DeviceExt;
 
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
 const WORKGROUP: u32 = 16;
+const CPU_UPLOAD_CACHE_ENTRIES: usize = 64;
 
 pub struct GpuRenderer {
     device: wgpu::Device,
@@ -37,6 +39,7 @@ pub struct GpuRenderer {
     // their size has to match (recreated when the resolution changes).
     vello_target: Option<(u32, u32, wgpu::Texture)>,
     readback_staging: Option<wgpu::Buffer>,
+    cpu_upload_cache: LruCache<CpuUploadCacheKey, Arc<GpuBufferImage>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,6 +69,27 @@ struct GpuBufferImage {
     height: u32,
     format: PixelFormat,
     buffer: wgpu::Buffer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CpuUploadCacheKey {
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    ptr: usize,
+    len: usize,
+}
+
+impl CpuUploadCacheKey {
+    fn new(image: &CpuRasterImage) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            format: image.format,
+            ptr: image.pixels.as_ptr() as usize,
+            len: image.pixels.len(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -237,6 +261,10 @@ impl GpuRenderer {
             stats: GpuRenderStats::default(),
             vello_target: None,
             readback_staging: None,
+            cpu_upload_cache: LruCache::new(
+                NonZeroUsize::new(CPU_UPLOAD_CACHE_ENTRIES)
+                    .expect("CPU upload cache capacity must be non-zero"),
+            ),
         })
     }
 
@@ -244,9 +272,13 @@ impl GpuRenderer {
         self.stats
     }
 
-    fn upload(&self, image: &CpuRasterImage) -> Option<Arc<GpuBufferImage>> {
+    fn upload(&mut self, image: &CpuRasterImage) -> Option<Arc<GpuBufferImage>> {
         if image.format != PixelFormat::Rgba8 {
             return None;
+        }
+        let key = CpuUploadCacheKey::new(image);
+        if let Some(cached) = self.cpu_upload_cache.get(&key) {
+            return Some(Arc::clone(cached));
         }
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-upload"),
@@ -257,15 +289,17 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, &image.pixels);
-        Some(Arc::new(GpuBufferImage {
+        let uploaded = Arc::new(GpuBufferImage {
             width: image.width,
             height: image.height,
             format: image.format,
             buffer,
-        }))
+        });
+        self.cpu_upload_cache.put(key, Arc::clone(&uploaded));
+        Some(uploaded)
     }
 
-    fn image_ref(&self, image: &RasterImage) -> Option<Arc<GpuBufferImage>> {
+    fn image_ref(&mut self, image: &RasterImage) -> Option<Arc<GpuBufferImage>> {
         match image {
             RasterImage::Cpu(image) => self.upload(image),
             RasterImage::Gpu(surface) if surface.backend() == BACKEND => {
