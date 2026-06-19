@@ -1,7 +1,7 @@
 //! The overlay [`Timeline`] and the one-after-another [`Sequence`].
 
 use crate::audio::AudioMix;
-use crate::composite::{composite_frame_over, composite_frames_over};
+use crate::composite::composite_frames_over;
 use crate::geometry::Vec2;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
@@ -190,7 +190,11 @@ impl TimelineComponent for Timeline {
         // determinate length to gate against and is left open (already a
         // resolve-time warning).
         let local_t = clock.local().seconds();
-        if let Some(length) = self.measure() {
+        let length = clock
+            .window()
+            .map(|window| window.width())
+            .or_else(|| self.measure());
+        if let Some(length) = length {
             if local_t < 0.0 || local_t >= length {
                 return None;
             }
@@ -388,7 +392,7 @@ impl TimelineComponent for Sequence {
         // slot contributes nothing (`.sketch/02 §8`).
         let mut cursor = 0.0_f32;
         let mut placed_any = false;
-        let mut acc: Option<RasterImage> = None;
+        let mut frames = Vec::new();
         let local_t = clock.local().seconds();
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
@@ -401,6 +405,11 @@ impl TimelineComponent for Sequence {
                 cursor += self.spacing;
             }
             let slot = child.measure();
+            // Children are ordered; once a finite future slot starts, no later
+            // finite child can be active at this local time.
+            if slot.is_some() && local_t < cursor {
+                break;
+            }
             let active = match slot {
                 Some(len) => local_t >= cursor && local_t < cursor + len,
                 None => true,
@@ -408,13 +417,13 @@ impl TimelineComponent for Sequence {
             if active {
                 let child_clock = clock.with_local_window(LocalTime::new(local_t - cursor), slot);
                 if let Some(img) = child.frame(child_clock, canvas, target, ctx) {
-                    acc = Some(composite_frame_over(acc, img, target, ctx));
+                    frames.push(img);
                 }
             }
             cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
-        acc
+        composite_frames_over(frames, target, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -436,8 +445,22 @@ impl TimelineComponent for Sequence {
             if placed_any {
                 cursor += self.spacing;
             }
-            child.mix_into(mix, start_secs + cursor, speed);
-            cursor += child.measure().unwrap_or(0.0);
+            let slot = child.measure();
+            let child_start = start_secs + cursor;
+            if let Some(len) = slot {
+                // Windowed live audio should not even ask off-window clips to
+                // decode/conform; in long sequences this is the hot path.
+                if child_start + len <= 0.0 {
+                    cursor += len;
+                    placed_any = true;
+                    continue;
+                }
+                if child_start >= mix.duration() {
+                    break;
+                }
+            }
+            child.mix_into(mix, child_start, speed);
+            cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
     }

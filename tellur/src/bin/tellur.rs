@@ -26,6 +26,7 @@ use clap::{Args, Parser, Subcommand};
 
 use tellur::core::raster::Resolution;
 use tellur::core::render_context::GpuPreference;
+use tellur::renderer::ColorRange;
 use tellur_live::{run_build_once, serve, AutoBuildOptions, ServerOptions};
 
 #[derive(Parser)]
@@ -76,6 +77,10 @@ struct LiveArgs {
     /// 30.
     #[arg(long)]
     fps: Option<u32>,
+    /// MP4 preview color range. Defaults to
+    /// `package.metadata.tellur.live.color_range`, then `full`.
+    #[arg(long, value_name = "full|limited")]
+    color_range: Option<ColorRange>,
     /// Prefer GPU rendering.
     #[arg(long, conflicts_with = "no_gpu")]
     gpu: bool,
@@ -140,6 +145,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
     if fps == 0 {
         return Err("fps must be greater than zero".into());
     }
+    let color_range = args.color_range.unwrap_or(live_defaults.color_range);
 
     let lib_name = cdylib_target_name(package).ok_or_else(|| {
         format!(
@@ -188,6 +194,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
         bind: format!("{}:{}", args.host, args.port),
         resolution,
         fps,
+        color_range,
         gpu_preference,
         verbose: args.verbose,
         auto_build,
@@ -418,11 +425,13 @@ fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
 struct LiveDefaults {
     resolution: Resolution,
     fps: u32,
+    color_range: ColorRange,
 }
 
 const FALLBACK_LIVE_DEFAULTS: LiveDefaults = LiveDefaults {
     resolution: Resolution::new(1280, 720),
     fps: 30,
+    color_range: ColorRange::Full,
 };
 
 const LIVE_DEFAULTS_TABLE: &str = "package.metadata.tellur.live";
@@ -470,6 +479,14 @@ fn live_defaults_from_manifest(contents: &str) -> Result<LiveDefaults, Box<dyn E
             return Err(format!("{LIVE_DEFAULTS_TABLE}.fps must be a positive integer").into());
         }
         defaults.fps = fps as u32;
+    }
+    if let Some(value) = live.get("color_range").or_else(|| live.get("color-range")) {
+        let color_range = value
+            .as_str()
+            .ok_or_else(|| format!("{LIVE_DEFAULTS_TABLE}.color_range must be a string"))?;
+        defaults.color_range = color_range
+            .parse()
+            .map_err(|e: String| format!("invalid {LIVE_DEFAULTS_TABLE}.color_range: {e}"))?;
     }
 
     Ok(defaults)
@@ -644,7 +661,8 @@ fn project_manifest(name: &str, workspace_dependency: bool) -> String {
          # Optional defaults for `tellur live`:\n\
          # [package.metadata.tellur.live]\n\
          # size = \"1280x720\"\n\
-         # fps = 30\n"
+         # fps = 30\n\
+         # color_range = \"full\"\n"
     )
 }
 
@@ -1109,12 +1127,14 @@ mod tests {
              \n\
              [package.metadata.tellur.live]\n\
              size = \"1920x1080\"\n\
-             fps = 60\n",
+             fps = 60\n\
+             color_range = \"limited\"\n",
         )
         .unwrap();
 
         assert_eq!(defaults.resolution, Resolution::new(1920, 1080));
         assert_eq!(defaults.fps, 60);
+        assert_eq!(defaults.color_range, ColorRange::Limited);
     }
 
     #[test]
@@ -1152,6 +1172,23 @@ mod tests {
     }
 
     #[test]
+    fn live_defaults_reject_invalid_color_range() {
+        let error = live_defaults_from_manifest(
+            "[package]\n\
+             name = \"demo\"\n\
+             version = \"0.1.0\"\n\
+             \n\
+             [package.metadata.tellur.live]\n\
+             color_range = \"narrow\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("package.metadata.tellur.live.color_range"));
+        assert!(error.contains("expected `full` or `limited`"));
+    }
+
+    #[test]
     fn project_manifest_uses_workspace_dependency_for_workspace_member() {
         let manifest = project_manifest("demo", true);
 
@@ -1173,6 +1210,7 @@ mod tests {
         assert!(manifest.contains("[package.metadata.tellur.live]"));
         assert!(manifest.contains("size = \"1280x720\""));
         assert!(manifest.contains("fps = 30"));
+        assert!(manifest.contains("color_range = \"full\""));
     }
 
     #[test]

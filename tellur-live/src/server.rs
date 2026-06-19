@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Write};
@@ -6,16 +7,18 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, Mutex,
+    Arc, LazyLock, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use tellur_core::raster::{CpuRasterImage, PixelFormat, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline_component::{Arrangement, AudioBuffer, NodeKind};
-use tellur_renderer::CachingRenderContext;
+use tellur_renderer::render_context::{CacheMetrics, TypeStats};
+use tellur_renderer::{CachingRenderContext, ColorRange};
 
 use crate::build_watch::{
     describe_build, run_build_once, start_build_watcher, AutoBuildOptions, CompileSnapshot,
@@ -28,6 +31,86 @@ use tellur_plugin::TimelineInfo;
 /// cache below the renderer's export-oriented 1 GiB default avoids memory
 /// pressure and LRU churn making playback look stalled.
 const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const VIDEO_SEGMENT_CACHE_BYTES: usize = 512 * 1024 * 1024;
+const VIDEO_SEGMENT_CACHE_ENTRIES: usize = 128;
+
+static VIDEO_SEGMENT_CACHE: LazyLock<Mutex<VideoSegmentCache>> =
+    LazyLock::new(|| Mutex::new(VideoSegmentCache::default()));
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VideoSegmentCacheKey {
+    plugin_cache_key: String,
+    timeline_id: String,
+    start_seconds_bits: u32,
+    video_seconds_bits: u32,
+    width: u32,
+    height: u32,
+    fps: u32,
+    gop: u32,
+    crf: u8,
+    motion_blur: bool,
+    color_range: ColorRange,
+}
+
+struct VideoSegmentCache {
+    entries: LruCache<VideoSegmentCacheKey, Arc<Vec<u8>>>,
+    bytes: usize,
+}
+
+impl Default for VideoSegmentCache {
+    fn default() -> Self {
+        Self {
+            entries: LruCache::unbounded(),
+            bytes: 0,
+        }
+    }
+}
+
+impl VideoSegmentCache {
+    fn get(&mut self, key: &VideoSegmentCacheKey) -> Option<Arc<Vec<u8>>> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: VideoSegmentCacheKey, body: Vec<u8>) {
+        let bytes = body.len();
+        if bytes > VIDEO_SEGMENT_CACHE_BYTES {
+            return;
+        }
+        while self.bytes + bytes > VIDEO_SEGMENT_CACHE_BYTES
+            || self.entries.len() >= VIDEO_SEGMENT_CACHE_ENTRIES
+        {
+            let Some((_, old)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+        if let Some(old) = self.entries.put(key, Arc::new(body)) {
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+        self.bytes += bytes;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
+
+fn cached_video_segment(key: &VideoSegmentCacheKey) -> Option<Arc<Vec<u8>>> {
+    VIDEO_SEGMENT_CACHE.lock().ok()?.get(key)
+}
+
+fn cache_video_segment(key: VideoSegmentCacheKey, body: Vec<u8>) {
+    if let Ok(mut cache) = VIDEO_SEGMENT_CACHE.lock() {
+        cache.insert(key, body);
+    }
+}
+
+fn clear_video_segment_cache() {
+    if let Ok(mut cache) = VIDEO_SEGMENT_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -36,6 +119,7 @@ pub struct ServerOptions {
     pub bind: String,
     pub resolution: Resolution,
     pub fps: u32,
+    pub color_range: ColorRange,
     pub gpu_preference: GpuPreference,
     pub verbose: bool,
     pub auto_build: Option<AutoBuildOptions>,
@@ -52,6 +136,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         run_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
     }
 
+    let prewarm_gpu = options.gpu_preference.prefers_gpu();
     let compile_state = options
         .auto_build
         .clone()
@@ -62,9 +147,11 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         plugin: HotReloadPlugin::new(options.plugin_path),
         project_name: options.project_name,
         ctx: CachingRenderContext::with_capacity_bytes(LIVE_PREVIEW_CACHE_BYTES)
+            .with_volatile_large_admission()
             .with_gpu_preference(options.gpu_preference),
         resolution: options.resolution,
         fps: options.fps,
+        color_range: options.color_range,
         verbose: options.verbose,
         compile_state,
     }));
@@ -73,6 +160,9 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
             .lock()
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
         app.reload_plugin_if_changed()?;
+    }
+    if prewarm_gpu {
+        start_preview_prewarm(Arc::clone(&app));
     }
 
     let video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>> =
@@ -94,6 +184,67 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn start_preview_prewarm(app: Arc<Mutex<PreviewApp>>) {
+    thread::spawn(move || {
+        let prewarm_start = Instant::now();
+        match preview_prewarm(&app) {
+            Ok(Some((timeline_id, audio_time, render_time, build_time, readback_time, true))) => {
+                println!(
+                    "preview-prewarm timeline={} audio={:.2}ms render={:.2}ms build={:.2}ms readback={:.2}ms total={:.2}ms",
+                    timeline_id,
+                    ms(audio_time),
+                    ms(render_time),
+                    ms(build_time),
+                    ms(readback_time),
+                    ms(prewarm_start.elapsed()),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("preview prewarm failed: {e}"),
+        }
+    });
+}
+
+type PreviewPrewarmStats = (String, Duration, Duration, Duration, Duration, bool);
+
+fn preview_prewarm(
+    app: &Arc<Mutex<PreviewApp>>,
+) -> Result<Option<PreviewPrewarmStats>, Box<dyn Error>> {
+    let mut app = app
+        .lock()
+        .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+    app.reload_plugin_if_changed()?;
+    let Some(info) = app
+        .plugin
+        .collection()?
+        .timelines()
+        .into_iter()
+        .find(|info| info.error.is_none() && info.duration > 0.0)
+    else {
+        return Ok(None);
+    };
+    let verbose = app.verbose;
+    let resolution = app.resolution;
+    let audio_start = Instant::now();
+    let _ = app.plugin.collection()?.render_audio_window(
+        &info.id,
+        0.0,
+        info.duration.min(1.0),
+        AUDIO_RATE,
+        AUDIO_CHANNELS,
+    );
+    let audio_time = audio_start.elapsed();
+    let frame = app.render_video_rgba(&info.id, 0.0, resolution, false, false)?;
+    Ok(Some((
+        info.id,
+        audio_time,
+        frame.render_time,
+        frame.build_time,
+        frame.readback_time,
+        verbose,
+    )))
 }
 
 fn handle_connection(
@@ -220,6 +371,7 @@ struct PreviewApp {
     ctx: CachingRenderContext,
     resolution: Resolution,
     fps: u32,
+    color_range: ColorRange,
     verbose: bool,
     compile_state: CompileState,
 }
@@ -230,6 +382,7 @@ impl PreviewApp {
         if changed {
             self.ctx.clear();
             self.ctx.clear_metrics();
+            clear_video_segment_cache();
         }
         Ok(changed)
     }
@@ -483,10 +636,12 @@ impl PreviewApp {
         seconds: f32,
         resolution: Resolution,
         motion_blur: bool,
+        collect_stats: bool,
     ) -> Result<VideoFrame, Box<dyn Error>> {
         self.ctx.set_motion_blur_enabled(motion_blur);
-        let before = self.ctx.metrics();
+        let before = collect_stats.then(|| self.ctx.metrics());
         let render_start = Instant::now();
+        let build_start = Instant::now();
         let image = self
             .plugin
             .collection()?
@@ -497,26 +652,55 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let build_time = build_start.elapsed();
+        let readback_start = Instant::now();
         let image = self.ctx.readback(image);
+        let readback_time = readback_start.elapsed();
         let render_time = render_start.elapsed();
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
         }
-        let after = self.ctx.metrics();
-        let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
+        let stats = before.map(|before| {
+            let after = self.ctx.metrics();
+            let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
+            (
+                after.hits.saturating_sub(before.hits),
+                after.misses.saturating_sub(before.misses),
+                after.bytes_cached,
+                after.gpu_available,
+                after.gpu_init_attempted,
+                gpu_init_error,
+                format!("{:?}", after.gpu_preference),
+                after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
+                after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+            )
+        });
+        let (
+            cache_hits,
+            cache_misses,
+            bytes_cached,
+            gpu_available,
+            gpu_init_attempted,
+            gpu_init_error,
+            gpu_preference,
+            gpu_ops,
+            gpu_readbacks,
+        ) = stats.unwrap_or_else(|| (0, 0, 0, false, false, None, String::new(), 0, 0));
 
         Ok(VideoFrame {
             image,
             render_time,
-            cache_hits: after.hits.saturating_sub(before.hits),
-            cache_misses: after.misses.saturating_sub(before.misses),
-            bytes_cached: after.bytes_cached,
-            gpu_available: after.gpu_available,
-            gpu_init_attempted: after.gpu_init_attempted,
+            build_time,
+            readback_time,
+            cache_hits,
+            cache_misses,
+            bytes_cached,
+            gpu_available,
+            gpu_init_attempted,
             gpu_init_error,
-            gpu_preference: format!("{:?}", after.gpu_preference),
-            gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
-            gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+            gpu_preference,
+            gpu_ops,
+            gpu_readbacks,
         })
     }
 
@@ -524,7 +708,13 @@ impl PreviewApp {
         &mut self,
         query: &HashMap<String, String>,
     ) -> Result<RenderedFrame, Box<dyn Error>> {
-        let rendered = self.render_image(query)?;
+        let mut rendered = self.render_image(query)?;
+        if request_video_color(query) {
+            rendered.image = video_color_preview_image(
+                &rendered.image,
+                request_color_range(query, self.color_range),
+            )?;
+        }
 
         let encode_start = Instant::now();
         let mut body = Vec::new();
@@ -643,15 +833,62 @@ struct VideoStreamSetup {
     gop: u32,
     crf: u8,
     motion_blur: bool,
+    color_range: ColorRange,
     start_seconds: f32,
     cache_control: &'static str,
     realtime: bool,
     verbose: bool,
 }
 
+fn video_segment_cache_key(
+    setup: &VideoStreamSetup,
+    plugin_cache_key: &str,
+    video_seconds: f32,
+) -> VideoSegmentCacheKey {
+    VideoSegmentCacheKey {
+        plugin_cache_key: plugin_cache_key.to_owned(),
+        timeline_id: setup.timeline_id.clone(),
+        start_seconds_bits: setup.start_seconds.to_bits(),
+        video_seconds_bits: video_seconds.to_bits(),
+        width: setup.resolution.width,
+        height: setup.resolution.height,
+        fps: setup.fps,
+        gop: setup.gop,
+        crf: setup.crf,
+        motion_blur: setup.motion_blur,
+        color_range: setup.color_range,
+    }
+}
+
+fn write_video_stream_headers(
+    stream: &mut TcpStream,
+    setup: &VideoStreamSetup,
+) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: video/mp4\r\n\
+         X-Tellur-Width: {}\r\n\
+         X-Tellur-Height: {}\r\n\
+         X-Tellur-Fps: {}\r\n\
+         X-Tellur-Gop: {}\r\n\
+         X-Tellur-Color-Range: {}\r\n\
+         Cache-Control: {}\r\n\
+         Connection: close\r\n\r\n",
+        setup.resolution.width,
+        setup.resolution.height,
+        setup.fps,
+        setup.gop,
+        setup.color_range.as_str(),
+        setup.cache_control,
+    )
+}
+
 struct VideoFrame {
     image: CpuRasterImage,
     render_time: Duration,
+    build_time: Duration,
+    readback_time: Duration,
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
@@ -786,6 +1023,7 @@ fn handle_video_stream(
             gop,
             crf,
             motion_blur: request_motion_blur(&query),
+            color_range: request_color_range(&query, app.color_range),
             start_seconds,
             cache_control: if cacheable {
                 "public, max-age=31536000, immutable"
@@ -805,6 +1043,31 @@ fn handle_video_stream(
     // (instead of `-shortest`; see that arg). This is also the loop's frame count.
     let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
     let video_seconds = total_frames as f32 / setup.fps as f32;
+    let segment_cache_key = if setup.cache_control != "no-store" {
+        query
+            .get("v")
+            .map(|cache_key| video_segment_cache_key(&setup, cache_key, video_seconds))
+    } else {
+        None
+    };
+    if let Some(key) = &segment_cache_key {
+        if let Some(body) = cached_video_segment(key) {
+            write_video_stream_headers(&mut stream, &setup)?;
+            stream.write_all(&body)?;
+            stream.flush()?;
+            if setup.verbose {
+                println!(
+                    "video-stream-cache timeline={} start={:.3}s duration={:.3}s bytes={} total={:.2}ms",
+                    setup.timeline_id,
+                    setup.start_seconds,
+                    video_seconds,
+                    body.len(),
+                    ms(stream_start.elapsed()),
+                );
+            }
+            return Ok(());
+        }
+    }
 
     // Render only this stream's audio window and stage it as a temp WAV. Full
     // timeline audio can be huge, and live preview requests many short cache
@@ -843,18 +1106,7 @@ fn handle_video_stream(
         return Ok(());
     }
 
-    write!(
-        stream,
-        "HTTP/1.1 200 OK\r\n\
-         Content-Type: video/mp4\r\n\
-         X-Tellur-Width: {}\r\n\
-         X-Tellur-Height: {}\r\n\
-         X-Tellur-Fps: {}\r\n\
-         X-Tellur-Gop: {}\r\n\
-         Cache-Control: {}\r\n\
-         Connection: close\r\n\r\n",
-        setup.resolution.width, setup.resolution.height, setup.fps, setup.gop, setup.cache_control,
-    )?;
+    write_video_stream_headers(&mut stream, &setup)?;
 
     // FLAC block size aligned to ONE video frame's worth of audio samples, applied
     // to the encoder below (only when the sample rate divides evenly by fps — the
@@ -895,10 +1147,16 @@ fn handle_video_stream(
             ));
         }
     }
+    let range = setup.color_range.ffmpeg_token();
+    let color_vf = format!(
+        "scale=out_range={range}:out_color_matrix=bt709,format=yuv420p,\
+         setparams=range={range}:color_primaries=bt709:colorspace=bt709:color_trc=bt709"
+    );
+
     cmd.args(["-c:v", "libx264"])
         .args(["-preset", "ultrafast"])
         .args(["-tune", "zerolatency"])
-        // Convert the rendered full-range RGB to (limited-range) BT.709 YUV and
+        // Convert the rendered full-range RGB to BT.709 YUV and
         // TAG the stream with that exact matrix/range. Without this, swscale
         // converts with its BT.601/limited defaults and writes NO color metadata,
         // so the browser falls back to its own guess (BT.709 for 720p+) and
@@ -906,19 +1164,16 @@ fn handle_video_stream(
         // colors versus the paused PNG (which shows the raw full-range RGB with no
         // conversion). `scale` does the conversion, `setparams` stamps all four
         // color fields onto the frames (so primaries/transfer are written too,
-        // without codec-specific params), and the `-color_*` options mirror them
-        // at the stream level. Limited range matches the offline export default
-        // (`FfmpegEncoder`'s `ColorRange::Limited`) so preview and export agree.
-        .args([
-            "-vf",
-            "scale=out_range=tv:out_color_matrix=bt709,format=yuv420p,\
-             setparams=range=tv:color_primaries=bt709:colorspace=bt709:color_trc=bt709",
-        ])
+        // without codec-specific params), and the `-color_*` options mirror the
+        // same range at stream level. Full range is the default because paused
+        // PNG/RGBA frames are full-range too; use `color_range=limited` only when
+        // a downstream target requires TV range.
+        .args(["-vf", &color_vf])
         .args(["-pix_fmt", "yuv420p"])
         .args(["-color_primaries", "bt709"])
         .args(["-color_trc", "bt709"])
         .args(["-colorspace", "bt709"])
-        .args(["-color_range", "tv"])
+        .args(["-color_range", range])
         .args(["-g", &setup.gop.to_string()])
         .args(["-keyint_min", &setup.gop.to_string()])
         .args(["-sc_threshold", "0"])
@@ -984,6 +1239,7 @@ fn handle_video_stream(
     let mut stream_out = stream.try_clone()?;
     let client_alive = Arc::new(AtomicBool::new(true));
     let client_alive_for_stdout = Arc::clone(&client_alive);
+    let collect_segment_body = segment_cache_key.is_some();
 
     // Drain ffmpeg's stdout to the client until TRUE EOF. ffmpeg emits the tail
     // GOP/fragments only after stdin is closed (the EOF below `drop(stdin)`), so
@@ -994,6 +1250,7 @@ fn handle_video_stream(
     // bug). Only a real read error or a client write failure ends the drain.
     let stdout_thread = thread::spawn(move || {
         let mut buf = [0u8; 64 * 1024];
+        let mut segment_body = collect_segment_body.then(Vec::new);
         loop {
             let n = match stdout.read(&mut buf) {
                 Ok(0) => break,
@@ -1008,10 +1265,14 @@ fn handle_video_stream(
                 client_alive_for_stdout.store(false, Ordering::Relaxed);
                 break;
             }
+            if let Some(body) = &mut segment_body {
+                body.extend_from_slice(&buf[..n]);
+            }
         }
         // Flush the final fragments to the kernel before the connection's FIN so
         // the tail is not stranded in a userspace/socket buffer at close.
         let _ = stream_out.flush();
+        segment_body
     });
 
     let stderr_thread = thread::spawn(move || {
@@ -1027,6 +1288,16 @@ fn handle_video_stream(
     let mut render_total = Duration::ZERO;
     let mut stdin_write_total = Duration::ZERO;
     let mut end_reason = "complete";
+    let cache_metrics_before = if setup.verbose {
+        Some(
+            app.lock()
+                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?
+                .ctx
+                .metrics(),
+        )
+    } else {
+        None
+    };
 
     for frame in 0..total_frames {
         if !client_alive.load(Ordering::Relaxed) {
@@ -1053,15 +1324,17 @@ fn handle_video_stream(
             let mut app = app
                 .lock()
                 .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let verbose = app.verbose;
             let frame = app.render_video_rgba(
                 &setup.timeline_id,
                 seconds,
                 setup.resolution,
                 setup.motion_blur,
+                verbose,
             )?;
-            if app.verbose {
+            if verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms build={:.2}ms readback={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -1069,6 +1342,8 @@ fn handle_video_stream(
                     setup.fps,
                     setup.gop,
                     ms(frame.render_time),
+                    ms(frame.build_time),
+                    ms(frame.readback_time),
                     frame.image.pixels.len(),
                     frame.cache_hits,
                     frame.cache_misses,
@@ -1109,12 +1384,17 @@ fn handle_video_stream(
     if !client_alive.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
-    let _ = stdout_thread.join();
+    let segment_body = stdout_thread.join().unwrap_or(None);
     if !client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
         end_reason = "client_closed";
     }
     let stderr_text = stderr_thread.join().unwrap_or_default();
     let status = child.wait()?;
+    if status.success() && client_alive.load(Ordering::Relaxed) && end_reason == "complete" {
+        if let (Some(key), Some(body)) = (segment_cache_key, segment_body) {
+            cache_video_segment(key, body);
+        }
+    }
     if setup.verbose {
         println!(
             "video-stream timeline={} start={:.3}s duration={:.3}s frames={}/{} written={} reason={} setup={:.2}ms audio={} audio_setup={:.2}ms ffmpeg_spawn={:.2}ms render_total={:.2}ms stdin_write={:.2}ms total={:.2}ms status={} stderr_bytes={}",
@@ -1135,6 +1415,11 @@ fn handle_video_stream(
             status,
             stderr_text.len(),
         );
+        if let Some(before) = cache_metrics_before {
+            if let Ok(app) = app.lock() {
+                log_cache_metrics_delta(&before, &app.ctx.metrics());
+            }
+        }
     }
     if !status.success() && client_alive.load(Ordering::Relaxed) {
         return Err(format!("ffmpeg exited with {status}: {stderr_text}").into());
@@ -1252,6 +1537,106 @@ fn log_frame_stats(stats: &FrameRenderStats) {
     );
 }
 
+#[derive(Clone, Copy)]
+struct TypeStatsDelta {
+    hits: u64,
+    misses: u64,
+    inclusive_time: Duration,
+    self_time: Duration,
+}
+
+impl TypeStatsDelta {
+    fn total(self) -> u64 {
+        self.hits + self.misses
+    }
+
+    fn hit_rate(self) -> f64 {
+        let total = self.total();
+        if total == 0 {
+            0.0
+        } else {
+            self.hits as f64 / total as f64
+        }
+    }
+}
+
+fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
+    let hits = after.hits.saturating_sub(before.hits);
+    let misses = after.misses.saturating_sub(before.misses);
+    let total = hits + misses;
+    let hit_rate = if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64
+    };
+    let gpu_before = &before.gpu;
+    let gpu_after = &after.gpu;
+    println!(
+        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
+        hits,
+        misses,
+        hit_rate * 100.0,
+        format_bytes(after.bytes_cached as u64),
+        format_bytes(after.bytes_evicted.saturating_sub(before.bytes_evicted)),
+        after.pressure_skips.saturating_sub(before.pressure_skips),
+        after.oversize_skips.saturating_sub(before.oversize_skips),
+        after.admission_skips.saturating_sub(before.admission_skips),
+        gpu_after.total_ops().saturating_sub(gpu_before.total_ops()),
+        gpu_after.composites.saturating_sub(gpu_before.composites),
+        gpu_after.drop_shadows.saturating_sub(gpu_before.drop_shadows),
+        gpu_after.outlines.saturating_sub(gpu_before.outlines),
+        gpu_after.rasterizes.saturating_sub(gpu_before.rasterizes),
+        gpu_after.fills.saturating_sub(gpu_before.fills),
+        gpu_after
+            .temporal_averages
+            .saturating_sub(gpu_before.temporal_averages),
+        gpu_after.readbacks.saturating_sub(gpu_before.readbacks),
+    );
+
+    let mut rows: Vec<(&'static str, TypeStatsDelta)> = after
+        .per_type
+        .iter()
+        .map(|(name, stats)| {
+            let before_stats = before.per_type.get(name);
+            (*name, diff_type_stats(before_stats, stats))
+        })
+        .filter(|(_, stats)| stats.total() > 0 || !stats.self_time.is_zero())
+        .collect();
+    rows.sort_by_key(|(_, stats)| Reverse(stats.self_time));
+    for (name, stats) in rows.into_iter().take(12) {
+        println!(
+            "video-stream-cache-type name={} hits={} misses={} hit_rate={:.1}% self={} incl={}",
+            name,
+            stats.hits,
+            stats.misses,
+            stats.hit_rate() * 100.0,
+            format_duration(stats.self_time),
+            format_duration(stats.inclusive_time),
+        );
+    }
+}
+
+fn diff_type_stats(before: Option<&TypeStats>, after: &TypeStats) -> TypeStatsDelta {
+    let before = before.copied().unwrap_or_default();
+    TypeStatsDelta {
+        hits: after.hits.saturating_sub(before.hits),
+        misses: after.misses.saturating_sub(before.misses),
+        inclusive_time: after.inclusive_time.saturating_sub(before.inclusive_time),
+        self_time: after.self_time.saturating_sub(before.self_time),
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let micros = d.as_micros();
+    if micros >= 1_000_000 {
+        format!("{:.2}s", d.as_secs_f64())
+    } else if micros >= 1_000 {
+        format!("{:.2}ms", micros as f64 / 1_000.0)
+    } else {
+        format!("{micros}us")
+    }
+}
+
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
@@ -1287,6 +1672,24 @@ fn request_motion_blur(query: &HashMap<String, String>) -> bool {
     )
 }
 
+fn request_color_range(query: &HashMap<String, String>, default: ColorRange) -> ColorRange {
+    query
+        .get("color_range")
+        .or_else(|| query.get("colorRange"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn request_video_color(query: &HashMap<String, String>) -> bool {
+    matches!(
+        query
+            .get("video_color")
+            .or_else(|| query.get("videoColor"))
+            .map(String::as_str),
+        Some("1") | Some("true") | Some("mp4") | Some("video")
+    )
+}
+
 fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> Resolution {
     if let (Some(width), Some(height)) = (
         query
@@ -1317,6 +1720,115 @@ fn request_resolution(query: &HashMap<String, String>, default: Resolution) -> R
 
 fn scaled_dimension(value: u32, scale: f32) -> u32 {
     ((value as f32) * scale).round().clamp(1.0, u32::MAX as f32) as u32
+}
+
+fn video_color_preview_image(
+    image: &CpuRasterImage,
+    color_range: ColorRange,
+) -> Result<CpuRasterImage, Box<dyn Error>> {
+    if image.format != PixelFormat::Rgba8 {
+        return Err(format!("video-color preview requires Rgba8, got {:?}", image.format).into());
+    }
+
+    let width = image.width as usize;
+    let height = image.height as usize;
+    let expected = width * height * 4;
+    if image.pixels.len() != expected {
+        return Err(format!(
+            "video-color frame size mismatch: expected {expected} bytes, got {}",
+            image.pixels.len()
+        )
+        .into());
+    }
+
+    let mut out = vec![0u8; expected];
+    for y in (0..height).step_by(2) {
+        for x in (0..width).step_by(2) {
+            let mut chroma = [(0usize, 0.0_f32, 0.0_f32, 0.0_f32); 4];
+            let mut count = 0usize;
+            for dy in 0..2 {
+                let py = y + dy;
+                if py >= height {
+                    continue;
+                }
+                for dx in 0..2 {
+                    let px = x + dx;
+                    if px >= width {
+                        continue;
+                    }
+                    let idx = (py * width + px) * 4;
+                    let rgb = [
+                        image.pixels[idx] as f32,
+                        image.pixels[idx + 1] as f32,
+                        image.pixels[idx + 2] as f32,
+                    ];
+                    let (encoded_y, encoded_cb, encoded_cr) = bt709_rgb_to_ycbcr(rgb, color_range);
+                    chroma[count] = (idx, encoded_y, encoded_cb, encoded_cr);
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+
+            let cb = quantize_u8(
+                chroma[..count].iter().map(|(_, _, cb, _)| *cb).sum::<f32>() / count as f32,
+            ) as f32;
+            let cr = quantize_u8(
+                chroma[..count].iter().map(|(_, _, _, cr)| *cr).sum::<f32>() / count as f32,
+            ) as f32;
+            for &(idx, encoded_y, _, _) in &chroma[..count] {
+                let yy = quantize_u8(encoded_y) as f32;
+                let [r, g, b] = bt709_ycbcr_to_rgb(yy, cb, cr, color_range);
+                out[idx] = quantize_u8(r);
+                out[idx + 1] = quantize_u8(g);
+                out[idx + 2] = quantize_u8(b);
+                out[idx + 3] = image.pixels[idx + 3];
+            }
+        }
+    }
+
+    Ok(CpuRasterImage::new(
+        image.width,
+        image.height,
+        PixelFormat::Rgba8,
+        out,
+    ))
+}
+
+fn bt709_rgb_to_ycbcr(rgb: [f32; 3], color_range: ColorRange) -> (f32, f32, f32) {
+    let [r, g, b] = rgb;
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let cb = (b - y) / 1.8556;
+    let cr = (r - y) / 1.5748;
+    match color_range {
+        ColorRange::Full => (y, 128.0 + cb, 128.0 + cr),
+        ColorRange::Limited => (
+            16.0 + y * (219.0 / 255.0),
+            128.0 + cb * (224.0 / 255.0),
+            128.0 + cr * (224.0 / 255.0),
+        ),
+    }
+}
+
+fn bt709_ycbcr_to_rgb(y: f32, cb: f32, cr: f32, color_range: ColorRange) -> [f32; 3] {
+    let (y, cb, cr) = match color_range {
+        ColorRange::Full => (y, cb - 128.0, cr - 128.0),
+        ColorRange::Limited => (
+            (y - 16.0) * (255.0 / 219.0),
+            (cb - 128.0) * (255.0 / 224.0),
+            (cr - 128.0) * (255.0 / 224.0),
+        ),
+    };
+    [
+        y + 1.5748 * cr,
+        y - 0.187_324 * cb - 0.468_124 * cr,
+        y + 1.8556 * cb,
+    ]
+}
+
+fn quantize_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
 }
 
 fn export_preview_png<W: Write>(image: &CpuRasterImage, writer: W) -> Result<(), Box<dyn Error>> {
@@ -1727,6 +2239,81 @@ mod tests {
 
         query.insert("motion_blur".to_owned(), "true".to_owned());
         assert!(request_motion_blur(&query));
+    }
+
+    #[test]
+    fn request_color_range_defaults_to_server_value() {
+        assert_eq!(
+            request_color_range(&HashMap::new(), ColorRange::Limited),
+            ColorRange::Limited
+        );
+
+        let mut query = HashMap::new();
+        query.insert("color_range".to_owned(), "bogus".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Full),
+            ColorRange::Full
+        );
+    }
+
+    #[test]
+    fn request_color_range_accepts_query_aliases() {
+        let mut query = HashMap::new();
+        query.insert("color_range".to_owned(), "limited".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Full),
+            ColorRange::Limited
+        );
+
+        query.clear();
+        query.insert("colorRange".to_owned(), "pc".to_owned());
+        assert_eq!(
+            request_color_range(&query, ColorRange::Limited),
+            ColorRange::Full
+        );
+    }
+
+    #[test]
+    fn request_video_color_is_explicitly_opt_in() {
+        assert!(!request_video_color(&HashMap::new()));
+
+        let mut query = HashMap::new();
+        query.insert("video_color".to_owned(), "1".to_owned());
+        assert!(request_video_color(&query));
+
+        query.clear();
+        query.insert("videoColor".to_owned(), "mp4".to_owned());
+        assert!(request_video_color(&query));
+    }
+
+    #[test]
+    fn video_color_preview_preserves_gray_pixels() {
+        let image = CpuRasterImage::new(
+            2,
+            2,
+            PixelFormat::Rgba8,
+            vec![
+                64, 64, 64, 255, 128, 128, 128, 200, 200, 200, 200, 180, 255, 255, 255, 128,
+            ],
+        );
+
+        let out = video_color_preview_image(&image, ColorRange::Full).expect("convert");
+        assert_eq!(out.pixels, image.pixels);
+    }
+
+    #[test]
+    fn video_color_preview_shares_chroma_per_420_block() {
+        let image =
+            CpuRasterImage::new(2, 1, PixelFormat::Rgba8, vec![255, 0, 0, 77, 0, 0, 255, 88]);
+
+        let out = video_color_preview_image(&image, ColorRange::Full).expect("convert");
+        assert_eq!(out.width, 2);
+        assert_eq!(out.height, 1);
+        assert_eq!(out.format, PixelFormat::Rgba8);
+        assert_eq!(out.pixels[3], 77);
+        assert_eq!(out.pixels[7], 88);
+        assert_ne!(&out.pixels[..3], &image.pixels[..3]);
+        assert_ne!(&out.pixels[4..7], &image.pixels[4..7]);
     }
 
     #[test]

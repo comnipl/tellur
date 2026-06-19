@@ -263,6 +263,19 @@ impl Node {
             children: Vec::new(),
         })
     }
+
+    /// `true` iff this node cannot produce visible ink.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            Node::Group(group) => group.opacity <= 0.0 || group.children.iter().all(Node::is_empty),
+            Node::SingleGroup(group) => group.opacity <= 0.0 || group.child.is_empty(),
+            Node::ClipGroup(group) => group.child.is_empty(),
+            Node::Path(path) => {
+                !path.fill.as_ref().is_some_and(Fill::is_visible)
+                    && !path.stroke.as_ref().is_some_and(Stroke::is_visible)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Keyable)]

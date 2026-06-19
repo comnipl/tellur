@@ -5,8 +5,13 @@
 //! strokes, the output remains ordinary vector paths and can be further
 //! transformed or rasterized through the existing pipeline.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, LazyLock, Mutex};
+
 use clipper2::{difference, inflate, intersect, simplify, union, EndType, FillRule, JoinType};
 use kurbo::{BezPath, PathEl, Point};
+use lru::LruCache;
 
 use crate::builder::VectorBuilder;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
@@ -16,8 +21,32 @@ use crate::Keyable;
 const DEFAULT_TOLERANCE: f32 = 0.2;
 const DEFAULT_MITER_LIMIT: f32 = 4.0;
 const MAX_CURVE_STEPS: usize = 96;
+const OUTLINE_CACHE_ENTRIES: usize = 512;
 
 type ClipperPaths = clipper2::Paths<clipper2::Milli>;
+
+static OUTLINE_CACHE: LazyLock<Mutex<LruCache<OutlineCacheKey, OutlineCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(LruCache::unbounded()));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OutlineCacheKey {
+    content_hash: u64,
+    size_x_bits: u32,
+    size_y_bits: u32,
+}
+
+#[derive(Clone)]
+struct OutlineCacheEntry {
+    view_box: Rect,
+    paths: Option<Arc<ClipperPaths>>,
+}
+
+#[cfg(test)]
+fn clear_outline_cache_for_tests() {
+    if let Ok(mut cache) = OUTLINE_CACHE.lock() {
+        cache.clear();
+    }
+}
 
 /// Which side of the original silhouette the outline band occupies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -114,25 +143,21 @@ impl VectorComponent for Outlined {
     }
 
     fn paint_bounds(&self, size: Vec2) -> Rect {
-        let inner = self.child.render(size);
-        let paths = self.outline_paths(&inner.root);
-        outline_view_box(size, &inner.view_box, paths.as_ref())
+        self.outline_entry(size).view_box
     }
 
     fn render(&self, size: Vec2) -> VectorGraphic {
-        let inner = self.child.render(size);
-        let paths = self.outline_paths(&inner.root);
-        let view_box = outline_view_box(size, &inner.view_box, paths.as_ref());
-        let Some(paths) = paths else {
+        let entry = self.outline_entry(size);
+        let Some(paths) = entry.paths else {
             return VectorGraphic {
-                view_box,
+                view_box: entry.view_box,
                 root: Node::empty(),
             };
         };
 
         VectorGraphic {
-            view_box,
-            root: paths_to_node(paths, self.paint.clone()),
+            view_box: entry.view_box,
+            root: paths_to_node(&paths, self.paint.clone()),
         }
     }
 }
@@ -156,7 +181,42 @@ pub trait VectorBuilderOutline: VectorBuilder {
 impl<B: VectorBuilder> VectorBuilderOutline for B {}
 
 impl Outlined {
-    fn outline_paths(&self, root: &Node) -> Option<ClipperPaths> {
+    fn outline_entry(&self, size: Vec2) -> OutlineCacheEntry {
+        let key = self.outline_cache_key(size);
+        if let Some(entry) = OUTLINE_CACHE
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get(&key).cloned())
+        {
+            return entry;
+        }
+
+        let inner = self.child.render(size);
+        let paths = self.compute_outline_paths(&inner.root).map(Arc::new);
+        let entry = OutlineCacheEntry {
+            view_box: outline_view_box(size, &inner.view_box, paths.as_deref()),
+            paths,
+        };
+        if let Ok(mut cache) = OUTLINE_CACHE.lock() {
+            cache.put(key, entry.clone());
+            while cache.len() > OUTLINE_CACHE_ENTRIES {
+                cache.pop_lru();
+            }
+        }
+        entry
+    }
+
+    fn outline_cache_key(&self, size: Vec2) -> OutlineCacheKey {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        OutlineCacheKey {
+            content_hash: hasher.finish(),
+            size_x_bits: size.0.to_bits(),
+            size_y_bits: size.1.to_bits(),
+        }
+    }
+
+    fn compute_outline_paths(&self, root: &Node) -> Option<ClipperPaths> {
         if self.width <= 0.0 || !self.paint.is_visible() {
             return None;
         }
@@ -485,7 +545,7 @@ fn flatten_bez_path(path: &BezPath, tolerance: f32) -> Vec<Vec<Vec2>> {
     flatten_commands(&commands, Transform::IDENTITY, tolerance, true)
 }
 
-fn paths_to_node(paths: ClipperPaths, paint: Paint) -> Node {
+fn paths_to_node(paths: &ClipperPaths, paint: Paint) -> Node {
     let commands = paths_to_commands(paths);
     if commands.is_empty() {
         return Node::empty();
@@ -499,8 +559,8 @@ fn paths_to_node(paths: ClipperPaths, paint: Paint) -> Node {
     })
 }
 
-fn paths_to_commands(paths: ClipperPaths) -> Vec<PathCommand> {
-    let raw: Vec<Vec<(f64, f64)>> = paths.into();
+fn paths_to_commands(paths: &ClipperPaths) -> Vec<PathCommand> {
+    let raw: Vec<Vec<(f64, f64)>> = paths.clone().into();
     let mut commands = Vec::new();
     for path in raw {
         let mut iter = path.into_iter();
@@ -638,6 +698,7 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::shapes::Rectangle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn red() -> Paint {
         Paint::solid(Color::rgb_u8(255, 0, 0))
@@ -645,6 +706,40 @@ mod tests {
 
     fn blue() -> Paint {
         Paint::solid(Color::rgb_u8(0, 0, 255))
+    }
+
+    struct CountingRect {
+        renders: Arc<AtomicUsize>,
+    }
+
+    impl PartialEq for CountingRect {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.renders, &other.renders)
+        }
+    }
+
+    impl Eq for CountingRect {}
+
+    impl Hash for CountingRect {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            Arc::as_ptr(&self.renders).hash(state);
+        }
+    }
+
+    impl VectorComponent for CountingRect {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(10.0, 6.0))
+        }
+
+        fn render(&self, _size: Vec2) -> VectorGraphic {
+            self.renders.fetch_add(1, Ordering::Relaxed);
+            Rectangle {
+                size: Vec2(10.0, 6.0),
+                fill: Some(red().into()),
+                stroke: None,
+            }
+            .render(Vec2(10.0, 6.0))
+        }
     }
 
     #[test]
@@ -726,5 +821,21 @@ mod tests {
         assert!(bounds.origin.1 <= -0.99, "{bounds:?}");
         assert!(bounds.size.0 >= 11.9, "{bounds:?}");
         assert!(bounds.size.1 >= 7.9, "{bounds:?}");
+    }
+
+    #[test]
+    fn outline_reuses_geometry_between_bounds_and_render() {
+        clear_outline_cache_for_tests();
+        let renders = Arc::new(AtomicUsize::new(0));
+        let outlined = CountingRect {
+            renders: Arc::clone(&renders),
+        }
+        .outlined(2.0, blue());
+
+        let _ = outlined.paint_bounds(Vec2(10.0, 6.0));
+        let _ = outlined.render(Vec2(10.0, 6.0));
+
+        assert_eq!(renders.load(Ordering::Relaxed), 1);
+        clear_outline_cache_for_tests();
     }
 }

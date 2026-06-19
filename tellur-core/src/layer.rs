@@ -21,11 +21,90 @@
 //! source-over compositing it onto the output at the corresponding pixel
 //! offset.
 
+use std::sync::{LazyLock, Mutex};
+
+use lru::LruCache;
+
 use crate::composite::composite_at;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
-use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterStorageId, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
+
+const COMPOSITE_CHILDREN_CACHE_ENTRIES: usize = 32;
+
+static COMPOSITE_CHILDREN_CACHE: LazyLock<
+    Mutex<LruCache<CompositeChildrenCacheKey, CompositeChildrenCacheEntry>>,
+> = LazyLock::new(|| Mutex::new(LruCache::unbounded()));
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CompositeChildrenCacheInput {
+    image: RasterStorageId,
+    offset_x: i32,
+    offset_y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CompositeChildrenCacheKey {
+    target: Resolution,
+    inputs: Vec<CompositeChildrenCacheInput>,
+}
+
+#[derive(Clone)]
+struct CompositeChildrenCacheEntry {
+    _inputs: Vec<RasterImage>,
+    output: RasterImage,
+}
+
+#[cfg(test)]
+fn clear_composite_children_cache_for_tests() {
+    if let Ok(mut cache) = COMPOSITE_CHILDREN_CACHE.lock() {
+        cache.clear();
+    }
+}
+
+fn composite_children_cache_key(
+    rendered: &[(RasterImage, i32, i32)],
+    target: Resolution,
+) -> CompositeChildrenCacheKey {
+    CompositeChildrenCacheKey {
+        target,
+        inputs: rendered
+            .iter()
+            .map(|(image, offset_x, offset_y)| CompositeChildrenCacheInput {
+                image: image.storage_id(),
+                offset_x: *offset_x,
+                offset_y: *offset_y,
+            })
+            .collect(),
+    }
+}
+
+fn cached_composite_children(key: &CompositeChildrenCacheKey) -> Option<RasterImage> {
+    COMPOSITE_CHILDREN_CACHE
+        .lock()
+        .ok()
+        .and_then(|mut cache| cache.get(key).map(|entry| entry.output.clone()))
+}
+
+fn cache_composite_children(
+    key: CompositeChildrenCacheKey,
+    inputs: Vec<RasterImage>,
+    output: RasterImage,
+) {
+    if let Ok(mut cache) = COMPOSITE_CHILDREN_CACHE.lock() {
+        cache.put(
+            key,
+            CompositeChildrenCacheEntry {
+                _inputs: inputs,
+                output,
+            },
+        );
+        while cache.len() > COMPOSITE_CHILDREN_CACHE_ENTRIES {
+            cache.pop_lru();
+        }
+    }
+}
 
 #[crate::component(vector)]
 #[derive(PartialEq, Hash)]
@@ -101,9 +180,10 @@ pub(crate) fn render_vector_children(
 ) -> VectorGraphic {
     let nodes: Vec<Node> = children
         .iter()
-        .map(|child| {
+        .filter_map(|child| {
             let child_size = child.layout(child_constraints);
-            child.render(child_size).root
+            let node = child.render(child_size).root;
+            (!node.is_empty()).then_some(node)
         })
         .collect();
     VectorGraphic {
@@ -228,20 +308,29 @@ pub(crate) fn composite_children(
     let scale_y = target.height as f32 / paint_rect.size.1;
     let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
 
-    if gpu_available {
-        let mut rendered = Vec::with_capacity(placed.len());
-        for (position, child_size, child) in placed {
-            let bounds = child.paint_bounds(*child_size);
-            let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
-            let child_px_h = (bounds.size.1 * scale_y).round().max(1.0) as u32;
-            let paint_x = position.0 + bounds.origin.0 - paint_rect.origin.0;
-            let paint_y = position.1 + bounds.origin.1 - paint_rect.origin.1;
-            let offset_x = (paint_x * scale_x).round() as i32;
-            let offset_y = (paint_y * scale_y).round() as i32;
-            let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
-            rendered.push((image, offset_x, offset_y));
-        }
+    let mut rendered = Vec::with_capacity(placed.len());
+    for (position, child_size, child) in placed {
+        let bounds = child.paint_bounds(*child_size);
+        let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
+        let child_px_h = (bounds.size.1 * scale_y).round().max(1.0) as u32;
+        let paint_x = position.0 + bounds.origin.0 - paint_rect.origin.0;
+        let paint_y = position.1 + bounds.origin.1 - paint_rect.origin.1;
+        let offset_x = (paint_x * scale_x).round() as i32;
+        let offset_y = (paint_y * scale_y).round() as i32;
+        let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
+        rendered.push((image, offset_x, offset_y));
+    }
 
+    let cache_key = composite_children_cache_key(&rendered, target);
+    if let Some(image) = cached_composite_children(&cache_key) {
+        return image;
+    }
+    let cache_inputs = rendered
+        .iter()
+        .map(|(image, _, _)| image.clone())
+        .collect::<Vec<_>>();
+
+    if gpu_available {
         let inputs: Vec<CompositeInput<'_>> = rendered
             .iter()
             .map(|(image, offset_x, offset_y)| CompositeInput {
@@ -252,37 +341,21 @@ pub(crate) fn composite_children(
             .collect();
         if let Some(gpu) = ctx.gpu_backend() {
             if let Some(image) = gpu.composite(target, &inputs) {
+                cache_composite_children(cache_key, cache_inputs, image.clone());
                 return image;
             }
         }
-
-        let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
-        for (image, offset_x, offset_y) in rendered {
-            let image = ctx.readback(image);
-            composite_at(&mut accum, target, &image, offset_x, offset_y);
-        }
-
-        return RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum);
     }
 
     let mut accum = vec![0u8; (target.width as usize) * (target.height as usize) * 4];
-    for (position, child_size, child) in placed {
-        let bounds = child.paint_bounds(*child_size);
-        let child_px_w = (bounds.size.0 * scale_x).round().max(1.0) as u32;
-        let child_px_h = (bounds.size.1 * scale_y).round().max(1.0) as u32;
-        let paint_x = position.0 + bounds.origin.0 - paint_rect.origin.0;
-        let paint_y = position.1 + bounds.origin.1 - paint_rect.origin.1;
-        let offset_x = (paint_x * scale_x).round() as i32;
-        let offset_y = (paint_y * scale_y).round() as i32;
-
-        // Route the child render through the context so cache lookups
-        // can intercept it before the underlying `render` runs.
-        let image = ctx.render(*child, *child_size, Resolution::new(child_px_w, child_px_h));
+    for (image, offset_x, offset_y) in rendered {
         let image = ctx.readback(image);
         composite_at(&mut accum, target, &image, offset_x, offset_y);
     }
 
-    RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
+    let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum);
+    cache_composite_children(cache_key, cache_inputs, image.clone());
+    image
 }
 
 /// Smallest axis-aligned rectangle containing both `a` and `b`.
@@ -310,8 +383,10 @@ mod tests {
     use super::*;
     use crate::color::Color;
     use crate::placement::VectorPlacement;
+    use crate::raster::CpuRasterImage;
+    use crate::render_context::{DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput};
     use crate::shapes::Rectangle;
-    use crate::vector::Paint;
+    use crate::vector::{Node, Paint};
 
     fn rect(w: f32, h: f32) -> Rectangle {
         Rectangle {
@@ -328,5 +403,168 @@ mod tests {
             children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0)).into()],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(500.0, 300.0));
+    }
+
+    #[test]
+    fn vector_layer_prunes_empty_child_nodes() {
+        let invisible = Rectangle {
+            size: Vec2(10.0, 10.0),
+            fill: Paint::Solid(Color::rgba_u8(255, 0, 0, 0)).into(),
+            stroke: None,
+        };
+        let layer = VectorLayer {
+            size: Vec2(100.0, 100.0),
+            children: vec![invisible.into(), rect(10.0, 10.0).into()],
+        };
+
+        let graphic = layer.render(Vec2(100.0, 100.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("vector layer should render a root group");
+        };
+        assert_eq!(root.children.len(), 1);
+        assert!(matches!(root.children[0], Node::Path(_)));
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    struct DummyRaster;
+
+    impl RasterComponent for DummyRaster {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(1.0, 1.0))
+        }
+
+        fn render(
+            &self,
+            _size: Vec2,
+            _target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            panic!("test context intercepts renders")
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeGpu {
+        composites: usize,
+    }
+
+    impl GpuRasterBackend for FakeGpu {
+        fn composite(
+            &mut self,
+            target: Resolution,
+            _inputs: &[CompositeInput<'_>],
+        ) -> Option<RasterImage> {
+            self.composites += 1;
+            Some(RasterImage::cpu(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                vec![7u8; (target.width as usize) * (target.height as usize) * 4],
+            ))
+        }
+
+        fn drop_shadow(&mut self, _input: DropShadowInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn outline(&mut self, _input: OutlineInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn rasterize(
+            &mut self,
+            _graphic: &VectorGraphic,
+            _target: Resolution,
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn solid_fill(&mut self, _target: Resolution, _color: Color) -> Option<RasterImage> {
+            None
+        }
+
+        fn temporal_average(
+            &mut self,
+            _target: Resolution,
+            _frames: &[&RasterImage],
+            _total: u32,
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn readback(&mut self, _image: RasterImage) -> Option<CpuRasterImage> {
+            None
+        }
+    }
+
+    struct FakeContext {
+        image: RasterImage,
+        gpu: FakeGpu,
+        renders: usize,
+        readbacks: usize,
+    }
+
+    impl FakeContext {
+        fn new() -> Self {
+            Self {
+                image: RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 255]),
+                gpu: FakeGpu::default(),
+                renders: 0,
+                readbacks: 0,
+            }
+        }
+    }
+
+    impl RenderContext for FakeContext {
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn gpu_preference(&self) -> GpuPreference {
+            GpuPreference::PreferGpu
+        }
+
+        fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
+            Some(&mut self.gpu)
+        }
+
+        fn render(
+            &mut self,
+            _component: &dyn RasterComponent,
+            _size: Vec2,
+            _target: Resolution,
+        ) -> RasterImage {
+            self.renders += 1;
+            self.image.clone()
+        }
+
+        fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
+            self.readbacks += 1;
+            image
+                .into_cpu()
+                .expect("fake context only returns CPU images")
+        }
+    }
+
+    #[test]
+    fn composite_children_reuses_cached_batch_for_same_input_storage() {
+        clear_composite_children_cache_for_tests();
+        let child = DummyRaster;
+        let placed = [(Vec2::ZERO, Vec2(1.0, 1.0), &child as &dyn RasterComponent)];
+        let paint_rect = Rect {
+            origin: Vec2::ZERO,
+            size: Vec2(1.0, 1.0),
+        };
+        let mut ctx = FakeContext::new();
+
+        let first = composite_children(paint_rect, Resolution::new(1, 1), &placed, &mut ctx);
+        let second = composite_children(paint_rect, Resolution::new(1, 1), &placed, &mut ctx);
+
+        assert_eq!(first.into_cpu().unwrap().pixels.as_ref(), &[7, 7, 7, 7]);
+        assert_eq!(second.into_cpu().unwrap().pixels.as_ref(), &[7, 7, 7, 7]);
+        assert_eq!(ctx.renders, 2);
+        assert_eq!(ctx.gpu.composites, 1);
+        assert_eq!(ctx.readbacks, 0);
+        clear_composite_children_cache_for_tests();
     }
 }

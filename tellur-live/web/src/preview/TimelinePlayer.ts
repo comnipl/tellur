@@ -15,11 +15,12 @@ const PLAY_AHEAD = 10;
 // Buffered history kept behind the playhead before eviction frees it. The persistent
 // green bar comes from IndexedDB, so evicting MSE never shrinks it.
 const KEEP_BEHIND = 6;
-// Max seconds streamed (and cached) per paused/priming /api/video.mp4 request. Active
-// playback uses a much larger cap so ordinary short previews stream as one request, while
-// long timelines still retain a bounded memory/cache footprint.
+// Max seconds streamed (and cached) per /api/video.mp4 request. Active playback
+// uses a modestly larger cap than priming: long chunks delay durable cache
+// commits and make slow first-pass renders expensive to abort/retry, while very
+// small chunks pay too much ffmpeg/audio setup overhead.
 const PRIME_STREAM_PIECE = 3;
-const PLAY_STREAM_PIECE = 30;
+const PLAY_STREAM_PIECE = 5;
 // Minimum length for a cached segment row to be worth re-appending from IndexedDB.
 // Shorter rows (shards from the old lookahead-clamped frontier) are streamed over in
 // full pieces instead — putSegment's subsume then deletes them, so a fragmented store
@@ -104,7 +105,10 @@ export type DisplayMode = "video" | "still";
 //               recognizable stale frame — then show the fresh still when it decodes.
 // - "trailing": mount. Show the still layer immediately and refine it once the first
 //               frame loads.
-export type StillCover = "hold" | "blank" | "trailing";
+// - "hold-video": keep the current surface up without fetching a PNG still. Used when
+//                 the next reveal should come from MP4/video decode too, avoiding a
+//                 PNG/RGBA -> H.264/YUV color jump on play.
+export type StillCover = "hold" | "hold-video" | "blank" | "trailing";
 
 export interface TimelinePlayerEvents {
   onTime?: (seconds: number) => void;
@@ -300,12 +304,13 @@ export class TimelinePlayer {
         this.pendingReveal = { target, fillGen: this.fillGen };
         void this.revealFromCache(target, this.fillGen);
       } else {
-        // Cold frame: keep the current display (trailing still or held video
-        // frame) up for drag continuity and swap in the fresh server still once
-        // it decodes. The prime fetch is debounced so a drag doesn't storm the
-        // server.
-        this.pendingReveal = null;
-        this.setDisplayMode("still", target, "hold");
+        // Cold frame: keep the current display up for drag continuity, but do
+        // not fetch a PNG still. Instead, prime a short MP4 segment and reveal
+        // the parked <video> frame once it lands. That keeps paused and playing
+        // frames on the same browser decode path, so there is no PNG/RGBA ->
+        // H.264/YUV color jump when playback starts.
+        this.pendingReveal = { target, fillGen: this.fillGen };
+        this.setDisplayMode("still", target, "hold-video");
       }
       this.scheduleDebouncedFill();
     }
@@ -338,9 +343,9 @@ export class TimelinePlayer {
     this.mode = "playing";
     this.events.onPlaying?.(true);
     this.pendingReveal = { target: this.position, fillGen: this.fillGen };
-    // The element is parked on the play frame: hold it (don't flash the previous still)
-    // and let revealAt swap straight to running video, usually before any still loads.
-    this.setDisplayMode("still", this.position, "hold");
+    // Keep the current surface up without fetching a PNG still; revealAt swaps
+    // straight to running video once enough MP4 is buffered.
+    this.setDisplayMode("still", this.position, "hold-video");
     this.tryResolveReveal();
     this.kickFill();
   }
@@ -352,6 +357,7 @@ export class TimelinePlayer {
 
   pause(): void {
     if (this.disposed) return;
+    const hadPendingReveal = this.pendingReveal != null;
     this.position = this.currentPlaybackSeconds();
     this.video.pause();
     this.stopTicker();
@@ -360,9 +366,21 @@ export class TimelinePlayer {
     this.pendingReveal = null;
     this.events.onPlaying?.(false);
     this.emitTime(this.position);
-    // The video is parked on the correct frame: hold it and swap to the still only once a
-    // fresh still for THIS time decodes, so pausing never flashes a stale frame.
-    this.setDisplayMode("still", this.position, "hold");
+    // During normal playback the video is already parked on the correct frame.
+    // Keep displaying that decoded frame instead of swapping to a PNG still:
+    // H.264/YUV and PNG/RGBA are not byte-identical, so switching surfaces on
+    // pause creates a subtle color jump. If pause lands while a reveal is still
+    // pending, the element may be showing an old frame; use the still fallback.
+    const videoFrameStep = 1 / Math.max(this.config.fps, 1);
+    const videoOnFrame =
+      !hadPendingReveal &&
+      this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      Math.abs(this.video.currentTime - this.position) <= videoFrameStep * 2;
+    if (videoOnFrame) {
+      this.setDisplayMode("video", this.position);
+    } else {
+      this.setDisplayMode("still", this.position, "hold");
+    }
     // Let short priming pieces finish and persist, but stop a long playback stream
     // when the user pauses. Otherwise pausing near the start of a long timeline would keep
     // the server encoding far past the now-still playhead.

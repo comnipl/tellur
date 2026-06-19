@@ -168,12 +168,8 @@ impl AudioFile {
         // A trim fixes the length regardless of the source, as long as the
         // source is at least that long — but we still need the source length to
         // clamp. Decode to read the true length; fall back gracefully.
-        match audio::decode_file(&self.path, self.trim) {
-            Ok(buf) => {
-                let ch = buf.channels.max(1) as usize;
-                let frames = buf.samples.len() / ch;
-                frames as f32 / buf.rate.max(1) as f32
-            }
+        match audio::decoded_duration(&self.path, self.trim) {
+            Ok(duration) => duration,
             Err(_) => self
                 .trim
                 .map(|(a, b)| (b - a).max(0.0))
@@ -194,9 +190,9 @@ impl TimelineComponent for AudioFile {
     }
 
     fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
-        // Decode only the source span that can land inside the current mix
-        // window, conform it to the mix's fixed rate / channel layout, and sum
-        // it in at the visible destination start. Decode failure ⇒ silence.
+        // Reuse a full-source conformed audio buffer, slice the part that can
+        // land inside this mix window, and sum it at the visible destination
+        // start. Decode/conform failure ⇒ silence.
         let speed = if speed.is_finite() && speed > 0.0 {
             speed
         } else {
@@ -219,9 +215,21 @@ impl TimelineComponent for AudioFile {
             return;
         }
 
-        if let Ok(buf) = audio::decode_file(&self.path, Some((decode_start, decode_end))) {
-            let conformed = audio::conform(buf, mix.rate(), mix.channels(), self.gain, speed);
-            mix.add(&conformed, visible_start);
+        if let Ok(buf) = audio::conform_file_cached(
+            &self.path,
+            self.trim,
+            mix.rate(),
+            mix.channels(),
+            self.gain,
+            speed,
+        ) {
+            let output_start = source_offset / speed;
+            let output_duration = (mix_duration - visible_start).max(0.0);
+            let window = audio::slice_audio_buffer(
+                &buf,
+                Some((output_start, output_start + output_duration)),
+            );
+            mix.add(&window.samples, visible_start);
         }
     }
 

@@ -2052,6 +2052,7 @@ dependencies = [
 name = "tellur-live"
 version = "0.1.0"
 dependencies = [
+ "lru",
  "png",
  "tellur-core",
  "tellur-plugin",
@@ -2085,6 +2086,7 @@ dependencies = [
  "indicatif",
  "lru",
  "pollster",
+ "rustc-hash",
  "sysinfo",
  "tellur-core",
  "thiserror 2.0.18",

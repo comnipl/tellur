@@ -13,15 +13,15 @@
 //! further compositing) hold the same buffer the cache holds.
 
 use std::any::TypeId;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+use rustc_hash::FxHasher;
 use sysinfo::System;
-use tellur_core::dyn_compare::DynEq;
+use tellur_core::dyn_compare::{DynEq, DynHash};
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{CachePolicy, GpuPreference, GpuRasterBackend, RenderContext};
@@ -36,6 +36,28 @@ pub const DEFAULT_CAPACITY_BYTES: usize = 1024 * 1024 * 1024;
 /// admitting new entries and starts shedding existing ones.
 pub const MEMORY_PRESSURE_THRESHOLD: f32 = 0.90;
 
+const DEFAULT_PROBATION_ENTRIES: usize = 4096;
+const VOLATILE_LARGE_IMAGE_BYTES: usize = 1024 * 1024;
+const VOLATILE_MIN_MISSES: u64 = 8;
+const VOLATILE_MAX_HIT_RATE: f64 = 0.75;
+
+/// Controls when a freshly-rendered image becomes a cache entry.
+///
+/// `Immediate` is the export-oriented default: every miss is admitted while
+/// capacity allows. `SecondUse` admits only keys that appear at least twice.
+/// `SkipVolatileLarge` starts with immediate admission, but stops admitting
+/// large images for component types that build up many misses with a weak hit
+/// rate. That keeps live previews from filling the cache with per-frame
+/// full-screen animation states while still letting static large entries warm
+/// immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CacheAdmissionPolicy {
+    #[default]
+    Immediate,
+    SecondUse,
+    SkipVolatileLarge,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct CacheKey {
     type_id: TypeId,
@@ -49,15 +71,16 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    fn of(c: &dyn RasterComponent, size: Vec2, target: Resolution) -> Self {
-        // `dyn RasterComponent` implements `Hash` by mixing the concrete
-        // `TypeId` with the component's own content hash; reuse that
-        // exact hash for the cache key's `content_hash` slot.
-        let mut hasher = DefaultHasher::new();
-        c.hash(&mut hasher);
+    fn of(c: &dyn RasterComponent, type_id: TypeId, size: Vec2, target: Resolution) -> Self {
+        // The cache key stores `type_id` separately, so only hash the
+        // component's own fields here. Cache keys are internal and not exposed
+        // to untrusted input, so a fast non-cryptographic hasher is appropriate
+        // for this hot path.
+        let mut hasher = FxHasher::default();
+        DynHash::dyn_hash(c, &mut hasher);
         let content_hash = hasher.finish();
         Self {
-            type_id: c.as_any().type_id(),
+            type_id,
             content_hash,
             size_x_bits: size.0.to_bits(),
             size_y_bits: size.1.to_bits(),
@@ -127,6 +150,9 @@ pub struct CacheMetrics {
     /// Misses where the freshly-produced image was not admitted
     /// because a single image exceeded the configured cap.
     pub oversize_skips: u64,
+    /// Misses where the freshly-produced image was not admitted by the
+    /// configured admission policy.
+    pub admission_skips: u64,
     /// Current GPU policy for this context.
     pub gpu_preference: GpuPreference,
     /// Whether the context has tried to create a GPU backend.
@@ -161,7 +187,7 @@ impl fmt::Display for CacheMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips",
+            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips, {} admission skips",
             self.hits,
             self.misses,
             self.hit_rate() * 100.0,
@@ -169,6 +195,7 @@ impl fmt::Display for CacheMetrics {
             format_bytes(self.bytes_evicted),
             self.pressure_skips,
             self.oversize_skips,
+            self.admission_skips,
         )?;
         writeln!(
             f,
@@ -252,6 +279,7 @@ fn pixel_stride(format: PixelFormat) -> usize {
 /// frames so any time-invariant subtree only re-renders once.
 pub struct CachingRenderContext {
     cache: LruCache<CacheKey, RasterImage>,
+    probation: LruCache<CacheKey, ()>,
     cur_bytes: usize,
     cap_bytes: usize,
     system: System,
@@ -263,7 +291,9 @@ pub struct CachingRenderContext {
     bytes_evicted: u64,
     pressure_skips: u64,
     oversize_skips: u64,
+    admission_skips: u64,
     per_type: HashMap<TypeId, (TypeStats, &'static str)>,
+    admission_policy: CacheAdmissionPolicy,
     gpu_preference: GpuPreference,
     gpu: Option<GpuRenderer>,
     gpu_init_attempted: bool,
@@ -287,6 +317,7 @@ impl CachingRenderContext {
     pub fn with_capacity_bytes(cap_bytes: usize) -> Self {
         Self {
             cache: LruCache::unbounded(),
+            probation: LruCache::unbounded(),
             cur_bytes: 0,
             cap_bytes,
             system: System::new(),
@@ -295,7 +326,9 @@ impl CachingRenderContext {
             bytes_evicted: 0,
             pressure_skips: 0,
             oversize_skips: 0,
+            admission_skips: 0,
             per_type: HashMap::new(),
+            admission_policy: CacheAdmissionPolicy::Immediate,
             gpu_preference: GpuPreference::Auto,
             gpu: None,
             gpu_init_attempted: false,
@@ -308,6 +341,19 @@ impl CachingRenderContext {
     pub fn with_gpu_preference(mut self, gpu_preference: GpuPreference) -> Self {
         self.gpu_preference = gpu_preference;
         self
+    }
+
+    pub fn with_cache_admission_policy(mut self, policy: CacheAdmissionPolicy) -> Self {
+        self.admission_policy = policy;
+        self
+    }
+
+    pub fn with_second_use_admission(self) -> Self {
+        self.with_cache_admission_policy(CacheAdmissionPolicy::SecondUse)
+    }
+
+    pub fn with_volatile_large_admission(self) -> Self {
+        self.with_cache_admission_policy(CacheAdmissionPolicy::SkipVolatileLarge)
     }
 
     pub fn set_gpu_preference(&mut self, gpu_preference: GpuPreference) {
@@ -377,6 +423,7 @@ impl CachingRenderContext {
             bytes_evicted: self.bytes_evicted,
             pressure_skips: self.pressure_skips,
             oversize_skips: self.oversize_skips,
+            admission_skips: self.admission_skips,
             gpu_preference: self.gpu_preference,
             gpu_init_attempted: self.gpu_init_attempted,
             gpu_available: self.gpu.is_some(),
@@ -396,6 +443,7 @@ impl CachingRenderContext {
         self.bytes_evicted = 0;
         self.pressure_skips = 0;
         self.oversize_skips = 0;
+        self.admission_skips = 0;
         self.per_type.clear();
         self.total_render_time = Duration::ZERO;
     }
@@ -403,7 +451,45 @@ impl CachingRenderContext {
     /// Drop all cached entries.
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.probation.clear();
         self.cur_bytes = 0;
+    }
+
+    fn should_admit(&mut self, key: CacheKey, type_id: TypeId, bytes: usize) -> bool {
+        match self.admission_policy {
+            CacheAdmissionPolicy::Immediate => true,
+            CacheAdmissionPolicy::SecondUse => {
+                if self.probation.pop(&key).is_some() {
+                    true
+                } else {
+                    self.probation.put(key, ());
+                    while self.probation.len() > DEFAULT_PROBATION_ENTRIES {
+                        let _ = self.probation.pop_lru();
+                    }
+                    self.admission_skips = self.admission_skips.saturating_add(1);
+                    false
+                }
+            }
+            CacheAdmissionPolicy::SkipVolatileLarge => {
+                if bytes < VOLATILE_LARGE_IMAGE_BYTES {
+                    return true;
+                }
+                let volatile = self
+                    .per_type
+                    .get(&type_id)
+                    .map(|(stats, _)| {
+                        stats.misses >= VOLATILE_MIN_MISSES
+                            && stats.hit_rate() <= VOLATILE_MAX_HIT_RATE
+                    })
+                    .unwrap_or(false);
+                if volatile {
+                    self.admission_skips = self.admission_skips.saturating_add(1);
+                    false
+                } else {
+                    true
+                }
+            }
+        }
     }
 
     /// Refresh and check system-wide memory utilization.
@@ -513,7 +599,7 @@ impl RenderContext for CachingRenderContext {
         // visible and the child's time is attributed to the child.
         let key = match component.cache_policy() {
             CachePolicy::Transparent => None,
-            CachePolicy::Memoize => Some(CacheKey::of(component, size, target)),
+            CachePolicy::Memoize => Some(CacheKey::of(component, type_id, size, target)),
         };
 
         // `counted` gates the hit/miss tally so transparent passes (which
@@ -534,6 +620,7 @@ impl RenderContext for CachingRenderContext {
 
                     if bytes > self.cap_bytes {
                         self.oversize_skips += 1;
+                    } else if !self.should_admit(key, type_id, bytes) {
                     } else {
                         self.evict_to_fit(bytes);
                         if self.under_memory_pressure() {
@@ -577,15 +664,15 @@ impl RenderContext for CachingRenderContext {
 #[cfg(test)]
 mod tests {
     use tellur_core::color::Color;
-    use tellur_core::geometry::Vec2;
+    use tellur_core::geometry::{Constraints, Vec2};
     use tellur_core::layer::Layer;
     use tellur_core::placement::RasterPlacement;
-    use tellur_core::raster::{RasterComponent, Resolution};
+    use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
     use tellur_core::render_context::{CachePolicy, GpuPreference, PassThrough, RenderContext};
     use tellur_core::shapes::Rectangle;
     use tellur_core::vector::Paint;
 
-    use super::CachingRenderContext;
+    use super::{CachingRenderContext, VOLATILE_MIN_MISSES};
     use crate::rasterize::Rasterizable;
 
     fn scene() -> Layer {
@@ -642,5 +729,97 @@ mod tests {
 
         assert_eq!(a.pixels, first.pixels);
         assert_eq!(a.pixels, second.pixels);
+    }
+
+    #[derive(PartialEq, Hash)]
+    struct SolidRaster {
+        id: u8,
+    }
+
+    impl RasterComponent for SolidRaster {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(1.0, 1.0))
+        }
+
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            let pixels = (target.width as usize) * (target.height as usize);
+            let mut buf = Vec::with_capacity(pixels * 4);
+            for _ in 0..pixels {
+                buf.extend_from_slice(&[self.id, 0, 0, 255]);
+            }
+            RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
+        }
+    }
+
+    #[test]
+    fn second_use_admission_skips_one_off_keys() {
+        let size = Vec2(1.0, 1.0);
+        let target = Resolution::new(1, 1);
+        let one = SolidRaster { id: 1 };
+        let two = SolidRaster { id: 2 };
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled)
+            .with_second_use_admission();
+
+        render_and_readback(&mut cache, &one, size, target);
+        render_and_readback(&mut cache, &two, size, target);
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.admission_skips, 2);
+        assert_eq!(metrics.bytes_cached, 0);
+
+        render_and_readback(&mut cache, &one, size, target);
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 3);
+        assert_eq!(metrics.admission_skips, 2);
+        assert!(metrics.bytes_cached > 0);
+
+        render_and_readback(&mut cache, &one, size, target);
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 3);
+        assert_eq!(metrics.admission_skips, 2);
+    }
+
+    #[test]
+    fn volatile_large_admission_skips_repeated_large_misses() {
+        let size = Vec2(1.0, 1.0);
+        let target = Resolution::new(512, 512);
+        let mut cache = CachingRenderContext::with_capacity_bytes(64 * 1024 * 1024)
+            .with_gpu_preference(GpuPreference::Disabled)
+            .with_volatile_large_admission();
+
+        for id in 0..VOLATILE_MIN_MISSES {
+            render_and_readback(&mut cache, &SolidRaster { id: id as u8 }, size, target);
+        }
+        let warmed = cache.metrics();
+        assert_eq!(warmed.hits, 0);
+        assert_eq!(warmed.misses, VOLATILE_MIN_MISSES);
+        assert_eq!(warmed.admission_skips, 0);
+        assert!(warmed.bytes_cached > 0);
+
+        render_and_readback(&mut cache, &SolidRaster { id: 99 }, size, target);
+        let skipped = cache.metrics();
+        assert_eq!(skipped.hits, 0);
+        assert_eq!(skipped.misses, VOLATILE_MIN_MISSES + 1);
+        assert_eq!(skipped.admission_skips, 1);
+        assert_eq!(skipped.bytes_cached, warmed.bytes_cached);
+    }
+
+    fn render_and_readback(
+        cache: &mut CachingRenderContext,
+        component: &dyn RasterComponent,
+        size: Vec2,
+        target: Resolution,
+    ) {
+        let image = cache.render(component, size, target);
+        let _ = cache.readback(image);
     }
 }

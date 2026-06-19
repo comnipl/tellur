@@ -7,6 +7,7 @@ use std::time::Duration;
 use tellur_core::raster::Resolution;
 use tellur_core::render_context::GpuPreference;
 use tellur_live::{serve, AutoBuildOptions, ServerOptions};
+use tellur_renderer::ColorRange;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -32,6 +33,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
     let mut port = 4317u16;
     let mut resolution = Resolution::new(1280, 720);
     let mut fps = 30u32;
+    let mut color_range = ColorRange::Full;
     let mut gpu_preference = GpuPreference::Auto;
     let mut verbose = false;
     let mut auto_build_requested = false;
@@ -73,6 +75,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
                 if fps == 0 {
                     return Err("--fps must be greater than zero".into());
                 }
+            }
+            "--color-range" => {
+                color_range =
+                    parse_color_range(&args.next().ok_or("--color-range requires a value")?)?;
             }
             "--verbose" => {
                 verbose = true;
@@ -149,6 +155,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
         bind: bind.unwrap_or_else(|| format!("{host}:{port}")),
         resolution,
         fps,
+        color_range,
         gpu_preference,
         verbose,
         auto_build,
@@ -158,6 +165,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
 fn parse_resolution(s: &str) -> Result<Resolution, Box<dyn Error>> {
     let (w, h) = s.split_once('x').ok_or("resolution must be WIDTHxHEIGHT")?;
     Ok(Resolution::new(w.parse()?, h.parse()?))
+}
+
+fn parse_color_range(s: &str) -> Result<ColorRange, Box<dyn Error>> {
+    s.parse().map_err(|e: String| e.into())
 }
 
 fn infer_example_name(path: &Path) -> Option<String> {
@@ -345,5 +356,5 @@ fn push_if_exists(paths: &mut Vec<PathBuf>, path: PathBuf) {
 }
 
 fn usage() -> String {
-    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--fps 30] [--gpu|--no-gpu] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
+    "usage: tellur-live serve (--plugin <path-to-cdylib> | -p <package> --example <example>) [--host 127.0.0.1] [--port 4317] [--bind 127.0.0.1:4317] [--fps 30] [--color-range full|limited] [--gpu|--no-gpu] [--verbose] [--watch] [--watch-path <path>] [--build-manifest <Cargo.toml>]".to_owned()
 }

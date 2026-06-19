@@ -57,7 +57,8 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
   const duration = timeline?.duration ?? 0;
   const width = Math.max(1, Math.round(resolution.width));
   const height = Math.max(1, Math.round(resolution.height));
-  const gop = Math.max(1, Math.floor(fps / 4));
+  // Keep preview fragments short so MSE can reveal/play cold segments quickly.
+  const gop = Math.max(1, Math.floor(fps / 10));
 
   const groupKey = useMemo(
     () =>
@@ -181,6 +182,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
         fps,
         motionBlur,
         cacheKey: pluginKey,
+        videoColor: true,
       });
       const token = ++stillTokenRef.current;
       cancelStillRequest();
@@ -261,6 +263,12 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
               // Invalidate any in-flight still load so a late "hold"/"trailing" decode
               // (e.g. the still requested as play() began) can't re-cover the now-running
               // video by firing its revealOnLoad after we switched to video.
+              stillTokenRef.current++;
+              cancelStillRequest();
+            } else if (cover === "hold-video") {
+              // Hold the current surface but do NOT fetch a PNG still. The
+              // TimelinePlayer is priming/revealing an MP4 frame for this time,
+              // and staying on the video decode path avoids the PNG<->MP4 color jump.
               stillTokenRef.current++;
               cancelStillRequest();
             } else if (cover === "hold") {
