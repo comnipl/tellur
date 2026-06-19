@@ -697,6 +697,24 @@ impl CachingRenderContext {
         }
         self.evict_gpu_cache_to_fit(0);
     }
+
+    fn evict_gpu_cache_until_vram_available(&mut self, needed: usize) {
+        if vram_used_bytes().saturating_add(needed) <= configured_vram_bytes() {
+            return;
+        }
+
+        let mut keep = Vec::with_capacity(self.cache.len());
+        while vram_used_bytes().saturating_add(needed) > configured_vram_bytes() {
+            match self.cache.pop_lru() {
+                Some((_, entry)) if entry.is_gpu() => self.account_evicted(&entry),
+                Some((key, entry)) => keep.push((key, entry)),
+                None => break,
+            }
+        }
+        for (key, entry) in keep {
+            self.cache.put(key, entry);
+        }
+    }
 }
 
 fn gpu_cache_limits() -> (usize, usize) {
@@ -728,6 +746,38 @@ impl RenderContext for CachingRenderContext {
 
     fn motion_blur_enabled(&self) -> bool {
         self.motion_blur_enabled
+    }
+
+    fn readback(&mut self, image: RasterImage) -> tellur_core::raster::CpuRasterImage {
+        match image {
+            RasterImage::Cpu(image) => image,
+            image @ RasterImage::Gpu(_) => {
+                let readback_bytes = Self::image_bytes(&image);
+                let backend = match &image {
+                    RasterImage::Gpu(surface) => surface.backend(),
+                    RasterImage::Cpu(_) => unreachable!(),
+                };
+                if let Some(gpu) = self.gpu.as_mut() {
+                    if let Some(image) = gpu.readback(image.clone()) {
+                        return image;
+                    }
+                }
+
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.release_cached_resources();
+                }
+                self.evict_gpu_cache_until_vram_available(readback_bytes);
+                if let Some(gpu) = self.gpu.as_mut() {
+                    if let Some(image) = gpu.readback(image) {
+                        return image;
+                    }
+                }
+
+                panic!(
+                    "render context could not read back GPU image for backend '{backend}' after freeing {readback_bytes} bytes for readback",
+                )
+            }
+        }
     }
 
     fn render(
@@ -1062,6 +1112,66 @@ mod tests {
         cache.shrink_gpu_cache_budget();
 
         assert_eq!(cache.gpu_cache_cap_bytes, 768);
+    }
+
+    #[test]
+    fn evict_gpu_cache_until_vram_available_stops_after_needed_bytes() {
+        use tellur_core::cache_budget::{configured_vram_bytes, try_reserve_vram};
+
+        struct FakeGpuHandle {
+            _reservation: tellur_core::cache_budget::BudgetReservation,
+        }
+
+        let limit = configured_vram_bytes();
+        if limit < 16 * 1024 {
+            return;
+        }
+        let entry_bytes = limit / 16;
+        let needed = entry_bytes + entry_bytes / 2;
+        let background_bytes = limit - (entry_bytes * 3) - (entry_bytes / 2);
+        let _background =
+            try_reserve_vram(background_bytes).expect("background reservation should fit");
+
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024 * 1024)
+            .with_gpu_preference(GpuPreference::PreferGpu);
+        for content_hash in 1..=3 {
+            let reservation =
+                try_reserve_vram(entry_bytes).expect("cache entry reservation should fit");
+            let image = RasterImage::Gpu(GpuSurface::new(
+                1,
+                1,
+                PixelFormat::Rgba8,
+                "test",
+                Arc::new(FakeGpuHandle {
+                    _reservation: reservation,
+                }),
+            ));
+            let key = CacheKey {
+                type_id: TypeId::of::<SolidRaster>(),
+                content_hash,
+                size_x_bits: 1,
+                size_y_bits: 1,
+                target_width: 1,
+                target_height: 1,
+            };
+            cache.cache.put(
+                key,
+                CachedRasterImage {
+                    image,
+                    bytes: entry_bytes,
+                    _ram_reservation: None,
+                },
+            );
+        }
+        cache.cur_bytes = entry_bytes * 3;
+        cache.gpu_cache_bytes = entry_bytes * 3;
+
+        cache.evict_gpu_cache_until_vram_available(needed);
+
+        assert_eq!(cache.cache.len(), 2);
+        assert_eq!(cache.cur_bytes, entry_bytes * 2);
+        assert_eq!(cache.gpu_cache_bytes, entry_bytes * 2);
+        assert_eq!(cache.bytes_evicted, entry_bytes as u64);
     }
 
     fn render_and_readback(
