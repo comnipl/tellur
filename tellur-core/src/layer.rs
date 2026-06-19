@@ -180,9 +180,10 @@ pub(crate) fn render_vector_children(
 ) -> VectorGraphic {
     let nodes: Vec<Node> = children
         .iter()
-        .map(|child| {
+        .filter_map(|child| {
             let child_size = child.layout(child_constraints);
-            child.render(child_size).root
+            let node = child.render(child_size).root;
+            (!node.is_empty()).then_some(node)
         })
         .collect();
     VectorGraphic {
@@ -385,7 +386,7 @@ mod tests {
     use crate::raster::CpuRasterImage;
     use crate::render_context::{DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput};
     use crate::shapes::Rectangle;
-    use crate::vector::Paint;
+    use crate::vector::{Node, Paint};
 
     fn rect(w: f32, h: f32) -> Rectangle {
         Rectangle {
@@ -402,6 +403,26 @@ mod tests {
             children: vec![rect(80.0, 40.0).place_at(Vec2(10.0, 20.0)).into()],
         };
         assert_eq!(layer.layout(Constraints::UNBOUNDED), Vec2(500.0, 300.0));
+    }
+
+    #[test]
+    fn vector_layer_prunes_empty_child_nodes() {
+        let invisible = Rectangle {
+            size: Vec2(10.0, 10.0),
+            fill: Paint::Solid(Color::rgba_u8(255, 0, 0, 0)).into(),
+            stroke: None,
+        };
+        let layer = VectorLayer {
+            size: Vec2(100.0, 100.0),
+            children: vec![invisible.into(), rect(10.0, 10.0).into()],
+        };
+
+        let graphic = layer.render(Vec2(100.0, 100.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("vector layer should render a root group");
+        };
+        assert_eq!(root.children.len(), 1);
+        assert!(matches!(root.children[0], Node::Path(_)));
     }
 
     #[derive(PartialEq, Eq, Hash)]

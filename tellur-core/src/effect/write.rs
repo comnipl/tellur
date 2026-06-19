@@ -180,7 +180,7 @@ impl VectorComponent for Write {
             fallback_stroke_width: self.stroke_width,
         };
         let fill = fill_node(inner.root.clone(), &mut fill_state);
-        if !node_is_empty(&fill) {
+        if !fill.is_empty() {
             children.push(fill);
         }
 
@@ -192,7 +192,7 @@ impl VectorComponent for Write {
                 fallback_stroke_width: self.stroke_width,
             };
             let stroke = stroke_node(inner.root, &mut stroke_state);
-            if !node_is_empty(&stroke) {
+            if !stroke.is_empty() {
                 children.push(stroke);
             }
         }
@@ -344,7 +344,7 @@ impl VectorComponent for TimedWrite {
             fallback_stroke_width: self.stroke_width,
         };
         let fill = timed_fill_node(inner.root.clone(), &mut fill_state);
-        if !node_is_empty(&fill) {
+        if !fill.is_empty() {
             children.push(fill);
         }
 
@@ -355,7 +355,7 @@ impl VectorComponent for TimedWrite {
             fallback_stroke_width: self.stroke_width,
         };
         let stroke = stroke_node(inner.root, &mut stroke_state);
-        if !node_is_empty(&stroke) {
+        if !stroke.is_empty() {
             children.push(stroke);
         }
 
@@ -973,21 +973,6 @@ fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn node_is_empty(node: &Node) -> bool {
-    match node {
-        Node::Group(group) => group.opacity <= 0.0 || group.children.iter().all(node_is_empty),
-        Node::SingleGroup(group) => group.opacity <= 0.0 || node_is_empty(&group.child),
-        Node::ClipGroup(group) => node_is_empty(&group.child),
-        Node::Path(path) => {
-            !path.fill.as_ref().is_some_and(|fill| fill.is_visible())
-                && !path
-                    .stroke
-                    .as_ref()
-                    .is_some_and(|stroke| stroke.is_visible())
-        }
-    }
-}
-
 fn distance(a: Vec2, b: Vec2) -> f32 {
     ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt()
 }
@@ -1276,7 +1261,7 @@ mod tests {
             panic!("first child should be the per-path fill layer");
         };
         assert!(matches!(fill.children[0], Node::SingleGroup(_)));
-        assert!(node_is_empty(&fill.children[1]));
+        assert!(fill.children[1].is_empty());
 
         let Node::Group(stroke) = &root.children[1] else {
             panic!("second child should be the stroke reveal layer");
