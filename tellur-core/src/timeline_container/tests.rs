@@ -1168,6 +1168,26 @@ fn gain_scales_audio() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn gain_can_exceed_unit_range_before_ffmpeg_output() {
+    let frames = (TEST_RATE / 2) as usize;
+    let level = (0.8 * i16::MAX as f32) as i16;
+    let path = const_wav("hot_gain", TEST_RATE, frames, level);
+
+    let tl = Timeline::builder()
+        .child(AudioFile::builder().path(path.to_str().unwrap()).gain(2.0))
+        .build();
+    let resolved = resolve_audio(tl).expect("media-backed");
+    let mixed = resolved.render_audio(TEST_RATE, 1);
+
+    let mid = mixed.samples[frames / 2];
+    assert!(
+        (mid - 1.6).abs() < 0.04,
+        "gain 2.0 over 0.8 should keep f32 headroom (~1.6), got {mid}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
 // (mix) `.at(window)` speed changes the SAMPLE COUNT: a 1.0s source placed
 // into a 0.5s window plays at 2× (half as many output frames for that clip).
 #[test]

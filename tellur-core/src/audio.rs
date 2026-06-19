@@ -615,7 +615,7 @@ pub fn conform(buf: AudioBuffer, rate: u32, channels: u16, gain: f32, speed: f32
 
 /// The eager mix-down target: one interleaved f32 buffer at a fixed `rate` /
 /// `channels`, sized to the resolved timeline length. Leaves [`add`](Self::add)
-/// their conformed buffers at a resolved sample offset; sums clamp on overflow.
+/// their conformed buffers at a resolved sample offset; sums keep f32 headroom.
 #[derive(Debug, Clone)]
 pub struct AudioMix {
     samples: Vec<f32>,
@@ -652,10 +652,10 @@ impl AudioMix {
     }
 
     /// Sums an already-conformed (rate/channels/gain/speed-matched) interleaved
-    /// buffer into the mix starting at `start_secs`, clamping each summed sample
-    /// to `[-1, 1]` so overlapping tracks never wrap. Frames before the mix
-    /// start and past the mix end are dropped (the resolved length is
-    /// authoritative).
+    /// buffer into the mix starting at `start_secs`. Values may exceed
+    /// `[-1, 1]`; limiting/clipping belongs at the ffmpeg output stage. Frames
+    /// before the mix start and past the mix end are dropped (the resolved
+    /// length is authoritative).
     pub fn add(&mut self, conformed: &[f32], start_secs: f32) {
         let ch = self.channels.max(1) as usize;
         let start_frame = (start_secs * self.rate as f32).round() as isize;
@@ -670,7 +670,7 @@ impl AudioMix {
             if idx >= self.samples.len() {
                 break;
             }
-            self.samples[idx] = (self.samples[idx] + s).clamp(-1.0, 1.0);
+            self.samples[idx] += s;
         }
     }
 
@@ -753,14 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn mix_add_sums_and_clamps() {
+    fn mix_add_preserves_float_headroom() {
         let mut mix = AudioMix::new(1.0, 4, 1);
-        // Two unit tracks at frame 0 sum to 2.0 then clamp to 1.0.
+        // Two unit tracks at frame 0 sum to 2.0; output limiting is a later
+        // encoder concern, not a mix-stage concern.
         mix.add(&[1.0, 1.0], 0.0);
         mix.add(&[1.0, 1.0], 0.0);
         let buf = mix.into_buffer();
-        assert_eq!(buf.samples[0], 1.0);
-        assert_eq!(buf.samples[1], 1.0);
+        assert_eq!(buf.samples[0], 2.0);
+        assert_eq!(buf.samples[1], 2.0);
     }
 
     #[test]

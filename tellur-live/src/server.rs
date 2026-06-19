@@ -928,8 +928,9 @@ impl Drop for TempFile {
     }
 }
 
-/// Writes `buf` (interleaved f32) as a 16-bit PCM WAV to a unique temp path, so
-/// ffmpeg can take it as a second input and mux it into the preview stream.
+/// Writes `buf` (interleaved f32) as a 32-bit IEEE float WAV to a unique temp
+/// path, so ffmpeg can take it as a second input and mux it into the preview
+/// stream.
 fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
     let seq = AUDIO_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut path = std::env::temp_dir();
@@ -941,18 +942,19 @@ fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
 
     let channels = buf.channels.max(1);
     let rate = buf.rate.max(1);
-    let bits: u16 = 16;
-    let byte_rate = rate * channels as u32 * (bits as u32 / 8);
-    let block_align = channels * (bits / 8);
-    let data_bytes = (buf.samples.len() * 2) as u32;
+    let bits: u16 = 32;
+    let bytes_per_sample = (bits as u32 / 8) as usize;
+    let byte_rate = rate * channels as u32 * bytes_per_sample as u32;
+    let block_align = channels * bytes_per_sample as u16;
+    let data_bytes = (buf.samples.len() * bytes_per_sample) as u32;
 
-    let mut bytes = Vec::with_capacity(44 + buf.samples.len() * 2);
+    let mut bytes = Vec::with_capacity(44 + buf.samples.len() * bytes_per_sample);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
     bytes.extend_from_slice(b"WAVE");
     bytes.extend_from_slice(b"fmt ");
     bytes.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    bytes.extend_from_slice(&3u16.to_le_bytes()); // audio format = IEEE float
     bytes.extend_from_slice(&channels.to_le_bytes());
     bytes.extend_from_slice(&rate.to_le_bytes());
     bytes.extend_from_slice(&byte_rate.to_le_bytes());
@@ -961,8 +963,7 @@ fn write_temp_wav(buf: &AudioBuffer) -> std::io::Result<PathBuf> {
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&data_bytes.to_le_bytes());
     for &s in &buf.samples {
-        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&s.to_le_bytes());
     }
     std::fs::write(&path, &bytes)?;
     Ok(path)
@@ -2186,6 +2187,25 @@ fn json_escape(s: &str) -> String {
 mod tests {
     use super::*;
     use tellur_core::timeline_component::{SourceLoc, TriggerMark};
+
+    #[test]
+    fn temp_wav_uses_f32le_and_preserves_headroom() {
+        let buf = AudioBuffer {
+            samples: vec![1.5, -2.0],
+            rate: 48_000,
+            channels: 1,
+        };
+        let path = write_temp_wav(&buf).expect("write temp float wav");
+        let bytes = std::fs::read(&path).expect("read temp float wav");
+
+        assert_eq!(&bytes[20..22], &3u16.to_le_bytes());
+        assert_eq!(&bytes[34..36], &32u16.to_le_bytes());
+        assert_eq!(&bytes[40..44], &8u32.to_le_bytes());
+        assert_eq!(&bytes[44..48], &1.5_f32.to_le_bytes());
+        assert_eq!(&bytes[48..52], &(-2.0_f32).to_le_bytes());
+
+        let _ = std::fs::remove_file(path);
+    }
 
     // A request for exactly `duration` must clamp into the half-open renderable
     // range: `< duration` (so the core's `t < end` clip gate stays active) AND
