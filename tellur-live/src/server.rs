@@ -576,6 +576,7 @@ impl PreviewApp {
         self.ctx.set_motion_blur_enabled(motion_blur);
         let before = collect_stats.then(|| self.ctx.metrics());
         let render_start = Instant::now();
+        let build_start = Instant::now();
         let image = self
             .plugin
             .collection()?
@@ -586,7 +587,10 @@ impl PreviewApp {
                 &mut self.ctx,
             )
             .ok_or("timeline did not produce a frame")?;
+        let build_time = build_start.elapsed();
+        let readback_start = Instant::now();
         let image = self.ctx.readback(image);
+        let readback_time = readback_start.elapsed();
         let render_time = render_start.elapsed();
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
@@ -621,6 +625,8 @@ impl PreviewApp {
         Ok(VideoFrame {
             image,
             render_time,
+            build_time,
+            readback_time,
             cache_hits,
             cache_misses,
             bytes_cached,
@@ -816,6 +822,8 @@ fn write_video_stream_headers(
 struct VideoFrame {
     image: CpuRasterImage,
     render_time: Duration,
+    build_time: Duration,
+    readback_time: Duration,
     cache_hits: u64,
     cache_misses: u64,
     bytes_cached: usize,
@@ -1261,7 +1269,7 @@ fn handle_video_stream(
             )?;
             if verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms build={:.2}ms readback={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -1269,6 +1277,8 @@ fn handle_video_stream(
                     setup.fps,
                     setup.gop,
                     ms(frame.render_time),
+                    ms(frame.build_time),
+                    ms(frame.readback_time),
                     frame.image.pixels.len(),
                     frame.cache_hits,
                     frame.cache_misses,
