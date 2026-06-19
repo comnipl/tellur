@@ -136,6 +136,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         run_build_once(auto_build).map_err(|e| -> Box<dyn Error> { e.into() })?;
     }
 
+    let prewarm_gpu = options.gpu_preference.prefers_gpu();
     let compile_state = options
         .auto_build
         .clone()
@@ -160,6 +161,9 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
         app.reload_plugin_if_changed()?;
     }
+    if prewarm_gpu {
+        start_preview_prewarm(Arc::clone(&app));
+    }
 
     let video_epochs: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -180,6 +184,67 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+fn start_preview_prewarm(app: Arc<Mutex<PreviewApp>>) {
+    thread::spawn(move || {
+        let prewarm_start = Instant::now();
+        match preview_prewarm(&app) {
+            Ok(Some((timeline_id, audio_time, render_time, build_time, readback_time, true))) => {
+                println!(
+                    "preview-prewarm timeline={} audio={:.2}ms render={:.2}ms build={:.2}ms readback={:.2}ms total={:.2}ms",
+                    timeline_id,
+                    ms(audio_time),
+                    ms(render_time),
+                    ms(build_time),
+                    ms(readback_time),
+                    ms(prewarm_start.elapsed()),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("preview prewarm failed: {e}"),
+        }
+    });
+}
+
+type PreviewPrewarmStats = (String, Duration, Duration, Duration, Duration, bool);
+
+fn preview_prewarm(
+    app: &Arc<Mutex<PreviewApp>>,
+) -> Result<Option<PreviewPrewarmStats>, Box<dyn Error>> {
+    let mut app = app
+        .lock()
+        .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+    app.reload_plugin_if_changed()?;
+    let Some(info) = app
+        .plugin
+        .collection()?
+        .timelines()
+        .into_iter()
+        .find(|info| info.error.is_none() && info.duration > 0.0)
+    else {
+        return Ok(None);
+    };
+    let verbose = app.verbose;
+    let resolution = app.resolution;
+    let audio_start = Instant::now();
+    let _ = app.plugin.collection()?.render_audio_window(
+        &info.id,
+        0.0,
+        info.duration.min(1.0),
+        AUDIO_RATE,
+        AUDIO_CHANNELS,
+    );
+    let audio_time = audio_start.elapsed();
+    let frame = app.render_video_rgba(&info.id, 0.0, resolution, false, false)?;
+    Ok(Some((
+        info.id,
+        audio_time,
+        frame.render_time,
+        frame.build_time,
+        frame.readback_time,
+        verbose,
+    )))
 }
 
 fn handle_connection(
