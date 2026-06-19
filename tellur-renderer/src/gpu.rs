@@ -68,6 +68,7 @@ struct GpuBufferImage {
     width: u32,
     height: u32,
     format: PixelFormat,
+    known_opaque: bool,
     buffer: wgpu::Buffer,
 }
 
@@ -293,6 +294,7 @@ impl GpuRenderer {
             width: image.width,
             height: image.height,
             format: image.format,
+            known_opaque: false,
             buffer,
         });
         self.cpu_upload_cache.put(key, Arc::clone(&uploaded));
@@ -331,6 +333,14 @@ impl GpuRenderer {
     /// transparency from zero-init; the full-overwrite `texture_to_buffer` copy
     /// never depended on the contents at all).
     fn empty_image(&self, resolution: Resolution) -> Arc<GpuBufferImage> {
+        self.empty_image_with_opacity(resolution, false)
+    }
+
+    fn empty_image_with_opacity(
+        &self,
+        resolution: Resolution,
+        known_opaque: bool,
+    ) -> Arc<GpuBufferImage> {
         let len = (resolution.width as usize) * (resolution.height as usize) * 4;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-target"),
@@ -344,6 +354,7 @@ impl GpuRenderer {
             width: resolution.width,
             height: resolution.height,
             format: PixelFormat::Rgba8,
+            known_opaque,
             buffer,
         })
     }
@@ -362,6 +373,7 @@ impl GpuRenderer {
             width,
             height,
             format: PixelFormat::Rgba8,
+            known_opaque: false,
             buffer,
         }
     }
@@ -659,6 +671,7 @@ impl GpuRenderer {
             width: target.width,
             height: target.height,
             format: PixelFormat::Rgba8,
+            known_opaque: (packed >> 24) == 255,
             buffer,
         });
 
@@ -720,25 +733,47 @@ impl GpuRasterBackend for GpuRenderer {
         target: Resolution,
         inputs: &[CompositeInput<'_>],
     ) -> Option<RasterImage> {
-        let target_image = self.empty_image(target);
+        let mut sources = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let src = self.image_ref(input.image)?;
+            if src.format != PixelFormat::Rgba8 {
+                return None;
+            }
+            sources.push((src, input.offset_x, input.offset_y));
+        }
+
+        let fills_target = |src: &GpuBufferImage, offset_x: i32, offset_y: i32| {
+            src.known_opaque
+                && offset_x == 0
+                && offset_y == 0
+                && src.width == target.width
+                && src.height == target.height
+        };
+        let first_fills_target = sources
+            .first()
+            .is_some_and(|(src, offset_x, offset_y)| fills_target(src, *offset_x, *offset_y));
+        let known_opaque = sources
+            .iter()
+            .any(|(src, offset_x, offset_y)| fills_target(src, *offset_x, *offset_y));
+
+        let target_image = self.empty_image_with_opacity(target, known_opaque);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("tellur-gpu-composite"),
             });
 
-        for input in inputs {
-            let src = self.image_ref(input.image)?;
-            if src.format != PixelFormat::Rgba8 {
-                return None;
-            }
-            self.composite_one(
-                &mut encoder,
-                &target_image,
-                &src,
-                input.offset_x,
-                input.offset_y,
-            );
+        let start = if first_fills_target {
+            let (src, _, _) = &sources[0];
+            let len = (target.width as u64) * (target.height as u64) * 4;
+            encoder.copy_buffer_to_buffer(&src.buffer, 0, &target_image.buffer, 0, len);
+            1
+        } else {
+            0
+        };
+
+        for (src, offset_x, offset_y) in sources.iter().skip(start) {
+            self.composite_one(&mut encoder, &target_image, src, *offset_x, *offset_y);
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -1792,6 +1827,51 @@ mod tests {
         let rendered = readback(&mut gpu, rendered);
 
         let mut expected = vec![0u8; 3 * 2 * 4];
+        let src = match src {
+            RasterImage::Cpu(src) => src,
+            RasterImage::Gpu(_) => unreachable!(),
+        };
+        composite_at(&mut expected, target, &src, 1, 1);
+        assert_eq!(rendered.pixels.as_ref(), expected.as_slice());
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn composite_matches_cpu_with_opaque_full_frame_base() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let target = Resolution::new(3, 2);
+        let base = GpuRasterBackend::solid_fill(&mut gpu, target, Color::rgb_u8(10, 20, 30))
+            .expect("solid fill should use GPU");
+        let src = image(
+            2,
+            1,
+            &[
+                100, 0, 0, 128, //
+                0, 255, 0, 255,
+            ],
+        );
+        let inputs = [
+            CompositeInput {
+                image: &base,
+                offset_x: 0,
+                offset_y: 0,
+            },
+            CompositeInput {
+                image: &src,
+                offset_x: 1,
+                offset_y: 1,
+            },
+        ];
+
+        let rendered = GpuRasterBackend::composite(&mut gpu, target, &inputs).unwrap();
+        let rendered = readback(&mut gpu, rendered);
+
+        let mut expected = Vec::new();
+        for _ in 0..(target.width as usize * target.height as usize) {
+            expected.extend_from_slice(&[10, 20, 30, 255]);
+        }
         let src = match src {
             RasterImage::Cpu(src) => src,
             RasterImage::Gpu(_) => unreachable!(),
