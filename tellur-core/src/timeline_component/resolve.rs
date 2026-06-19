@@ -287,8 +287,8 @@ impl ResolvedTimeline {
     /// then walks the source tree via [`mix_into`](TimelineComponent::mix_into):
     /// each [`AudioFile`](crate::timeline_container::AudioFile) decodes (honoring
     /// its `.trim`), resamples / re-channels / gain-scales into the fixed layout
-    /// at the placement speed, and SUMS into the mix at its resolved start
-    /// (clamping on overflow). The encoder feeds the result to ffmpeg as a temp
+    /// at the placement speed, and SUMS into the mix at its resolved start while
+    /// preserving f32 headroom. The encoder feeds the result to ffmpeg as a temp
     /// WAV second input.
     pub fn render_audio(&self, rate: u32, channels: u16) -> AudioBuffer {
         let mut mix = crate::audio::AudioMix::new(self.duration, rate, channels);

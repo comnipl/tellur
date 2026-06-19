@@ -223,7 +223,7 @@ impl FfmpegEncoder {
     /// A/V encode for the timeline subsystem (`.sketch/01` A.7 / B4 v1). Does NOT
     /// touch the old [`encode`](Self::encode) path.
     ///
-    /// Pre-renders the whole mixed audio track to a temp WAV
+    /// Pre-renders the whole mixed audio track to a temp 32-bit float WAV
     /// ([`ResolvedTimeline::render_audio`]), then spawns ffmpeg with the video on
     /// stdin (`-i -`, as today) AND the temp WAV as a SECOND input — the audio
     /// `-i <tmp.wav>` plus the `-c:a aac` / `-map` flags are injected through the
@@ -260,7 +260,7 @@ impl FfmpegEncoder {
             video_seconds,
         );
         let wav_path = unique_temp_wav();
-        write_wav_s16le(&wav_path, &mixed.samples, AUDIO_RATE, AUDIO_CHANNELS)
+        write_wav_f32le(&wav_path, &mixed.samples, AUDIO_RATE, AUDIO_CHANNELS)
             .map_err(FfmpegError::Spawn)?;
 
         // The second input + stream maps, injected through the SAME arg slot the
@@ -570,20 +570,21 @@ fn fit_audio_to_seconds(samples: &mut Vec<f32>, rate: u32, channels: u16, second
     samples.resize(target_frames * ch, 0.0);
 }
 
-/// Writes interleaved f32 `samples` as a canonical 44-byte-header s16le PCM WAV.
-fn write_wav_s16le(path: &Path, samples: &[f32], rate: u32, channels: u16) -> std::io::Result<()> {
-    let bits: u16 = 16;
-    let byte_rate = rate * channels as u32 * (bits as u32 / 8);
-    let block_align = channels * (bits / 8);
-    let data_bytes = (samples.len() * 2) as u32;
+/// Writes interleaved f32 `samples` as a 32-bit IEEE float WAV.
+fn write_wav_f32le(path: &Path, samples: &[f32], rate: u32, channels: u16) -> std::io::Result<()> {
+    let bits: u16 = 32;
+    let bytes_per_sample = (bits as u32 / 8) as usize;
+    let byte_rate = rate * channels as u32 * bytes_per_sample as u32;
+    let block_align = channels * bytes_per_sample as u16;
+    let data_bytes = (samples.len() * bytes_per_sample) as u32;
 
-    let mut bytes = Vec::with_capacity(44 + samples.len() * 2);
+    let mut bytes = Vec::with_capacity(44 + samples.len() * bytes_per_sample);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + data_bytes).to_le_bytes());
     bytes.extend_from_slice(b"WAVE");
     bytes.extend_from_slice(b"fmt ");
     bytes.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    bytes.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
+    bytes.extend_from_slice(&3u16.to_le_bytes()); // audio format = IEEE float
     bytes.extend_from_slice(&channels.to_le_bytes());
     bytes.extend_from_slice(&rate.to_le_bytes());
     bytes.extend_from_slice(&byte_rate.to_le_bytes());
@@ -592,8 +593,7 @@ fn write_wav_s16le(path: &Path, samples: &[f32], rate: u32, channels: u16) -> st
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&data_bytes.to_le_bytes());
     for &s in samples {
-        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-        bytes.extend_from_slice(&v.to_le_bytes());
+        bytes.extend_from_slice(&s.to_le_bytes());
     }
     std::fs::write(path, &bytes)
 }
@@ -806,7 +806,7 @@ mod av_mux_tests {
         }
     }
 
-    // Synthesizes a 1s 440 Hz mono sine WAV (s16le) to a temp path.
+    // Synthesizes a 1s 440 Hz mono sine WAV (f32le) to a temp path.
     fn sine_wav() -> PathBuf {
         let rate = 48_000u32;
         let frames = rate as usize;
@@ -814,16 +814,30 @@ mod av_mux_tests {
         for i in 0..frames {
             let t = i as f32 / rate as f32;
             let v = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5;
-            samples.push((v * i16::MAX as f32) as i16);
-        }
-        let mut f32_samples = Vec::with_capacity(frames);
-        for s in &samples {
-            f32_samples.push(*s as f32 / i16::MAX as f32);
+            samples.push(v);
         }
         let mut path = std::env::temp_dir();
         path.push(format!("tellur_av_src_{}.wav", std::process::id()));
-        write_wav_s16le(&path, &f32_samples, rate, 1).expect("write sine wav");
+        write_wav_f32le(&path, &samples, rate, 1).expect("write sine wav");
         path
+    }
+
+    #[test]
+    fn wav_f32le_preserves_samples_outside_unit_range() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("tellur_float_wav_{}.wav", std::process::id()));
+
+        let samples = [1.5_f32, -2.0_f32];
+        write_wav_f32le(&path, &samples, 48_000, 1).expect("write float wav");
+        let bytes = std::fs::read(&path).expect("read float wav");
+
+        assert_eq!(&bytes[20..22], &3u16.to_le_bytes());
+        assert_eq!(&bytes[34..36], &32u16.to_le_bytes());
+        assert_eq!(&bytes[40..44], &8u32.to_le_bytes());
+        assert_eq!(&bytes[44..48], &1.5_f32.to_le_bytes());
+        assert_eq!(&bytes[48..52], &(-2.0_f32).to_le_bytes());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     // Asserts the encoded mp4 has a stream of `kind` ("a" audio / "v" video).
