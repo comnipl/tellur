@@ -118,7 +118,7 @@ impl TimelineComponent for VideoFile {
 }
 
 /// Decoded audio — the audio channel. Built with
-/// `AudioFile::builder().path("v.wav").gain(0.25)`.
+/// `AudioFile::builder().path("v.wav").gain(0.25).fade_out(0.4)`.
 ///
 /// Its intrinsic length is the file's, read once by the resolve pass via a
 /// `symphonia` decode (`probe`). An injected `duration` (or, if decode
@@ -135,6 +135,15 @@ pub struct AudioFile {
     /// Linear gain applied to the decoded samples (`1.0` = unity).
     #[builder(default = 1.0)]
     pub gain: f32,
+    /// Linear fade-in duration in clip-local output seconds. A non-positive or
+    /// non-finite value disables the fade.
+    #[builder(default = 0.0)]
+    pub fade_in: f32,
+    /// Linear fade-out duration in clip-local output seconds, ending at the
+    /// clip's resolved audio end. A non-positive or non-finite value disables
+    /// the fade.
+    #[builder(default = 0.0)]
+    pub fade_out: f32,
     /// Optional override for the probed duration. Test-injectable; `None` reads
     /// the real decoded length (with the stub as a last-resort fallback).
     #[builder(into)]
@@ -224,12 +233,31 @@ impl TimelineComponent for AudioFile {
             speed,
         ) {
             let output_start = source_offset / speed;
-            let output_duration = (mix_duration - visible_start).max(0.0);
+            let clip_duration = self
+                .duration
+                .map(|duration| (duration / speed).max(0.0))
+                .unwrap_or_else(|| audio_buffer_duration(&buf));
+            let output_duration = (mix_duration - visible_start)
+                .max(0.0)
+                .min((clip_duration - output_start).max(0.0));
+            if output_duration <= 0.0 {
+                return;
+            }
             let window = audio::slice_audio_buffer(
                 &buf,
                 Some((output_start, output_start + output_duration)),
             );
-            mix.add(&window.samples, visible_start);
+            let mut samples = window.samples;
+            apply_audio_fade(
+                &mut samples,
+                mix.rate(),
+                mix.channels(),
+                output_start,
+                clip_duration,
+                self.fade_in,
+                self.fade_out,
+            );
+            mix.add(&samples, visible_start);
         }
     }
 
@@ -246,6 +274,61 @@ impl TimelineComponent for AudioFile {
             children: Vec::new(),
         }
     }
+}
+
+fn audio_buffer_duration(buffer: &AudioBuffer) -> f32 {
+    let channels = buffer.channels.max(1) as usize;
+    let frames = buffer.samples.len() / channels;
+    frames as f32 / buffer.rate.max(1) as f32
+}
+
+fn apply_audio_fade(
+    samples: &mut [f32],
+    rate: u32,
+    channels: u16,
+    local_start: f32,
+    clip_duration: f32,
+    fade_in: f32,
+    fade_out: f32,
+) {
+    let fade_in = fade_seconds(fade_in);
+    let fade_out = fade_seconds(fade_out);
+    if fade_in == 0.0 && fade_out == 0.0 {
+        return;
+    }
+
+    let channels = channels.max(1) as usize;
+    let frames = samples.len() / channels;
+    let rate = rate.max(1) as f32;
+    for frame in 0..frames {
+        let local_time = local_start + frame as f32 / rate;
+        let gain = audio_fade_gain(local_time, clip_duration, fade_in, fade_out);
+        for channel in 0..channels {
+            samples[frame * channels + channel] *= gain;
+        }
+    }
+}
+
+fn fade_seconds(seconds: f32) -> f32 {
+    if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn audio_fade_gain(local_time: f32, clip_duration: f32, fade_in: f32, fade_out: f32) -> f32 {
+    let rise = if fade_in <= 0.0 {
+        1.0
+    } else {
+        (local_time / fade_in).clamp(0.0, 1.0)
+    };
+    let fall = if fade_out <= 0.0 {
+        1.0
+    } else {
+        ((clip_duration - local_time) / fade_out).clamp(0.0, 1.0)
+    };
+    rise.min(fall)
 }
 
 /// 字幕 — the subtitle channel only (written to .srt/.vtt, NOT a burned-in
