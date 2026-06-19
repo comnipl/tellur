@@ -13,15 +13,15 @@
 //! further compositing) hold the same buffer the cache holds.
 
 use std::any::TypeId;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
+use rustc_hash::FxHasher;
 use sysinfo::System;
-use tellur_core::dyn_compare::DynEq;
+use tellur_core::dyn_compare::{DynEq, DynHash};
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{CachePolicy, GpuPreference, GpuRasterBackend, RenderContext};
@@ -71,15 +71,16 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    fn of(c: &dyn RasterComponent, size: Vec2, target: Resolution) -> Self {
-        // `dyn RasterComponent` implements `Hash` by mixing the concrete
-        // `TypeId` with the component's own content hash; reuse that
-        // exact hash for the cache key's `content_hash` slot.
-        let mut hasher = DefaultHasher::new();
-        c.hash(&mut hasher);
+    fn of(c: &dyn RasterComponent, type_id: TypeId, size: Vec2, target: Resolution) -> Self {
+        // The cache key stores `type_id` separately, so only hash the
+        // component's own fields here. Cache keys are internal and not exposed
+        // to untrusted input, so a fast non-cryptographic hasher is appropriate
+        // for this hot path.
+        let mut hasher = FxHasher::default();
+        DynHash::dyn_hash(c, &mut hasher);
         let content_hash = hasher.finish();
         Self {
-            type_id: c.as_any().type_id(),
+            type_id,
             content_hash,
             size_x_bits: size.0.to_bits(),
             size_y_bits: size.1.to_bits(),
@@ -598,7 +599,7 @@ impl RenderContext for CachingRenderContext {
         // visible and the child's time is attributed to the child.
         let key = match component.cache_policy() {
             CachePolicy::Transparent => None,
-            CachePolicy::Memoize => Some(CacheKey::of(component, size, target)),
+            CachePolicy::Memoize => Some(CacheKey::of(component, type_id, size, target)),
         };
 
         // `counted` gates the hit/miss tally so transparent passes (which

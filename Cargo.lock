@@ -2086,6 +2086,7 @@ dependencies = [
  "indicatif",
  "lru",
  "pollster",
+ "rustc-hash",
  "sysinfo",
  "tellur-core",
  "thiserror 2.0.18",
