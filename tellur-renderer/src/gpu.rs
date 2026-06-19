@@ -3,6 +3,9 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use lru::LruCache;
+use tellur_core::cache_budget::{
+    configured_vram_bytes, try_reserve_vram, vram_used_bytes, BudgetReservation,
+};
 use tellur_core::color::Color;
 use tellur_core::geometry::{Transform, Vec2};
 use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, Resolution};
@@ -18,6 +21,13 @@ use wgpu::util::DeviceExt;
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
 const WORKGROUP: u32 = 16;
 const CPU_UPLOAD_CACHE_ENTRIES: usize = 64;
+const CPU_UPLOAD_CACHE_INITIAL_FRACTION_DIVISOR: usize = 8;
+const CPU_UPLOAD_CACHE_MAX_FRACTION_DIVISOR: usize = 4;
+const GPU_CACHE_SHRINK_NUMERATOR: usize = 3;
+const GPU_CACHE_SHRINK_DENOMINATOR: usize = 4;
+const GPU_CACHE_GROW_SUCCESS_STREAK: u8 = 64;
+const GPU_CACHE_GROW_FRACTION_DIVISOR: usize = 64;
+const MIB: usize = 1024 * 1024;
 
 pub struct GpuRenderer {
     device: wgpu::Device,
@@ -37,9 +47,13 @@ pub struct GpuRenderer {
     // call: the vello render-target texture and the readback staging buffer.
     // Both are fully overwritten on every use, so reuse is byte-identical; only
     // their size has to match (recreated when the resolution changes).
-    vello_target: Option<(u32, u32, wgpu::Texture)>,
-    readback_staging: Option<wgpu::Buffer>,
+    vello_target: Option<(u32, u32, wgpu::Texture, BudgetReservation)>,
+    readback_staging: Option<(wgpu::Buffer, BudgetReservation)>,
     cpu_upload_cache: LruCache<CpuUploadCacheKey, Arc<GpuBufferImage>>,
+    cpu_upload_cache_bytes: usize,
+    cpu_upload_cache_cap_bytes: usize,
+    cpu_upload_cache_max_bytes: usize,
+    vram_spare_successes: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +65,8 @@ pub struct GpuRenderStats {
     pub fills: u64,
     pub temporal_averages: u64,
     pub readbacks: u64,
+    pub vram_reserve_failures: u64,
+    pub vram_cache_evictions: u64,
 }
 
 impl GpuRenderStats {
@@ -70,6 +86,7 @@ struct GpuBufferImage {
     format: PixelFormat,
     known_opaque: bool,
     buffer: wgpu::Buffer,
+    _reservation: BudgetReservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,6 +107,20 @@ impl CpuUploadCacheKey {
             ptr: image.pixels.as_ptr() as usize,
             len: image.pixels.len(),
         }
+    }
+}
+
+fn upload_cache_limits() -> (usize, usize) {
+    let limit = configured_vram_bytes();
+    let max = limit / CPU_UPLOAD_CACHE_MAX_FRACTION_DIVISOR;
+    let cap = (limit / CPU_UPLOAD_CACHE_INITIAL_FRACTION_DIVISOR).min(max);
+    (cap, max)
+}
+
+fn pixel_stride(format: PixelFormat) -> usize {
+    match format {
+        PixelFormat::Rgba8 => 4,
+        PixelFormat::Rgba16Float => 8,
     }
 }
 
@@ -221,6 +252,7 @@ impl GpuRenderer {
             )
             .await
             .map_err(|e| format!("failed to create GPU device: {e}"))?;
+        let (cpu_upload_cache_cap_bytes, cpu_upload_cache_max_bytes) = upload_cache_limits();
 
         Ok(Self {
             composite_pipeline: compute_pipeline(
@@ -266,11 +298,105 @@ impl GpuRenderer {
                 NonZeroUsize::new(CPU_UPLOAD_CACHE_ENTRIES)
                     .expect("CPU upload cache capacity must be non-zero"),
             ),
+            cpu_upload_cache_bytes: 0,
+            cpu_upload_cache_cap_bytes,
+            cpu_upload_cache_max_bytes,
+            vram_spare_successes: 0,
         })
     }
 
     pub fn stats(&self) -> GpuRenderStats {
         self.stats
+    }
+
+    fn reserve_render_vram(&mut self, bytes: usize) -> Option<BudgetReservation> {
+        if let Some(reservation) = try_reserve_vram(bytes) {
+            self.note_vram_reserve_success();
+            return Some(reservation);
+        }
+
+        self.stats.vram_reserve_failures = self.stats.vram_reserve_failures.saturating_add(1);
+        self.shrink_upload_cache_budget();
+        if let Some(reservation) = try_reserve_vram(bytes) {
+            self.note_vram_reserve_success();
+            return Some(reservation);
+        }
+
+        self.cpu_upload_cache_cap_bytes = 0;
+        self.evict_upload_cache_to_fit(0);
+        let reservation = try_reserve_vram(bytes)?;
+        self.note_vram_reserve_success();
+        Some(reservation)
+    }
+
+    fn note_vram_reserve_success(&mut self) {
+        let limit = configured_vram_bytes();
+        let used = vram_used_bytes();
+        if self.cpu_upload_cache_cap_bytes >= self.cpu_upload_cache_max_bytes
+            || used.saturating_mul(4) >= limit.saturating_mul(3)
+        {
+            self.vram_spare_successes = 0;
+            return;
+        }
+
+        self.vram_spare_successes = self.vram_spare_successes.saturating_add(1);
+        if self.vram_spare_successes >= GPU_CACHE_GROW_SUCCESS_STREAK {
+            let step = (limit / GPU_CACHE_GROW_FRACTION_DIVISOR).max(MIB);
+            self.cpu_upload_cache_cap_bytes = self
+                .cpu_upload_cache_cap_bytes
+                .saturating_add(step)
+                .min(self.cpu_upload_cache_max_bytes);
+            self.vram_spare_successes = 0;
+        }
+    }
+
+    fn shrink_upload_cache_budget(&mut self) {
+        self.vram_spare_successes = 0;
+        let old = self.cpu_upload_cache_cap_bytes;
+        self.cpu_upload_cache_cap_bytes =
+            old.saturating_mul(GPU_CACHE_SHRINK_NUMERATOR) / GPU_CACHE_SHRINK_DENOMINATOR;
+        if old > 0 && self.cpu_upload_cache_cap_bytes == old {
+            self.cpu_upload_cache_cap_bytes = old - 1;
+        }
+        self.evict_upload_cache_to_fit(0);
+    }
+
+    fn evict_upload_cache_to_fit(&mut self, needed: usize) {
+        while self.cpu_upload_cache_bytes.saturating_add(needed) > self.cpu_upload_cache_cap_bytes {
+            match self.cpu_upload_cache.pop_lru() {
+                Some((_, image)) => {
+                    self.cpu_upload_cache_bytes = self
+                        .cpu_upload_cache_bytes
+                        .saturating_sub(Self::buffer_image_bytes(&image));
+                    self.stats.vram_cache_evictions =
+                        self.stats.vram_cache_evictions.saturating_add(1);
+                }
+                None => break,
+            }
+        }
+    }
+
+    fn insert_upload_cache(&mut self, key: CpuUploadCacheKey, image: Arc<GpuBufferImage>) {
+        let bytes = Self::buffer_image_bytes(&image);
+        if bytes > self.cpu_upload_cache_cap_bytes {
+            return;
+        }
+        self.evict_upload_cache_to_fit(bytes);
+        if self.cpu_upload_cache_bytes.saturating_add(bytes) > self.cpu_upload_cache_cap_bytes {
+            return;
+        }
+        if let Some(old) = self.cpu_upload_cache.put(key, image) {
+            self.cpu_upload_cache_bytes = self
+                .cpu_upload_cache_bytes
+                .saturating_sub(Self::buffer_image_bytes(&old));
+        }
+        self.cpu_upload_cache_bytes = self.cpu_upload_cache_bytes.saturating_add(bytes);
+    }
+
+    fn buffer_image_bytes(image: &GpuBufferImage) -> usize {
+        (image.width as usize)
+            .saturating_mul(image.height as usize)
+            .saturating_mul(pixel_stride(image.format))
     }
 
     fn upload(&mut self, image: &CpuRasterImage) -> Option<Arc<GpuBufferImage>> {
@@ -281,6 +407,7 @@ impl GpuRenderer {
         if let Some(cached) = self.cpu_upload_cache.get(&key) {
             return Some(Arc::clone(cached));
         }
+        let reservation = self.reserve_render_vram(image.pixels.len())?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-upload"),
             size: image.pixels.len() as u64,
@@ -296,8 +423,9 @@ impl GpuRenderer {
             format: image.format,
             known_opaque: false,
             buffer,
+            _reservation: reservation,
         });
-        self.cpu_upload_cache.put(key, Arc::clone(&uploaded));
+        self.insert_upload_cache(key, Arc::clone(&uploaded));
         Some(uploaded)
     }
 
@@ -332,16 +460,17 @@ impl GpuRenderer {
     /// the GPU render path, and it was entirely redundant (the blend paths get
     /// transparency from zero-init; the full-overwrite `texture_to_buffer` copy
     /// never depended on the contents at all).
-    fn empty_image(&self, resolution: Resolution) -> Arc<GpuBufferImage> {
+    fn empty_image(&mut self, resolution: Resolution) -> Option<Arc<GpuBufferImage>> {
         self.empty_image_with_opacity(resolution, false)
     }
 
     fn empty_image_with_opacity(
-        &self,
+        &mut self,
         resolution: Resolution,
         known_opaque: bool,
-    ) -> Arc<GpuBufferImage> {
+    ) -> Option<Arc<GpuBufferImage>> {
         let len = (resolution.width as usize) * (resolution.height as usize) * 4;
+        let reservation = self.reserve_render_vram(len)?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-target"),
             size: len as u64,
@@ -350,17 +479,19 @@ impl GpuRenderer {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        Arc::new(GpuBufferImage {
+        Some(Arc::new(GpuBufferImage {
             width: resolution.width,
             height: resolution.height,
             format: PixelFormat::Rgba8,
             known_opaque,
             buffer,
-        })
+            _reservation: reservation,
+        }))
     }
 
-    fn alpha_image(&self, width: u32, height: u32) -> GpuBufferImage {
+    fn alpha_image(&mut self, width: u32, height: u32) -> Option<GpuBufferImage> {
         let len = (width as usize) * (height as usize) * 4;
+        let reservation = self.reserve_render_vram(len)?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-alpha"),
             size: len as u64,
@@ -369,13 +500,14 @@ impl GpuRenderer {
                 | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        GpuBufferImage {
+        Some(GpuBufferImage {
             width,
             height,
             format: PixelFormat::Rgba8,
             known_opaque: false,
             buffer,
-        }
+            _reservation: reservation,
+        })
     }
 
     fn composite_one(
@@ -551,9 +683,11 @@ impl GpuRenderer {
         // Reuse a persisted vello render target; the resolution is stable across
         // frames, so the texture is allocated once. vello overwrites the whole
         // target each call (base_color TRANSPARENT), so reuse is byte-identical.
-        if self.vello_target.as_ref().map(|(w, h, _)| (*w, *h))
+        if self.vello_target.as_ref().map(|(w, h, _, _)| (*w, *h))
             != Some((target.width, target.height))
         {
+            let texture_bytes = (target.width as usize) * (target.height as usize) * 4;
+            let reservation = self.reserve_render_vram(texture_bytes)?;
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("tellur-vello-target"),
                 size: wgpu::Extent3d {
@@ -568,7 +702,7 @@ impl GpuRenderer {
                 usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
-            self.vello_target = Some((target.width, target.height, texture));
+            self.vello_target = Some((target.width, target.height, texture, reservation));
         }
         let view = self
             .vello_target
@@ -594,7 +728,7 @@ impl GpuRenderer {
             )
             .ok()?;
 
-        let target_image = self.empty_image(target);
+        let target_image = self.empty_image(target)?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -657,8 +791,9 @@ impl GpuRenderer {
         );
     }
 
-    fn filled_image(&self, target: Resolution, packed: u32) -> Arc<GpuBufferImage> {
+    fn filled_image(&mut self, target: Resolution, packed: u32) -> Option<Arc<GpuBufferImage>> {
         let len = (target.width as usize) * (target.height as usize) * 4;
+        let reservation = self.reserve_render_vram(len)?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-fill"),
             size: len as u64,
@@ -673,6 +808,7 @@ impl GpuRenderer {
             format: PixelFormat::Rgba8,
             known_opaque: (packed >> 24) == 255,
             buffer,
+            _reservation: reservation,
         });
 
         let params = FillParams {
@@ -723,7 +859,7 @@ impl GpuRenderer {
             );
         }
         self.queue.submit(Some(encoder.finish()));
-        image
+        Some(image)
     }
 }
 
@@ -756,7 +892,7 @@ impl GpuRasterBackend for GpuRenderer {
             .iter()
             .any(|(src, offset_x, offset_y)| fills_target(src, *offset_x, *offset_y));
 
-        let target_image = self.empty_image_with_opacity(target, known_opaque);
+        let target_image = self.empty_image_with_opacity(target, known_opaque)?;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -789,9 +925,9 @@ impl GpuRasterBackend for GpuRenderer {
         let pad = input.blur_radius.saturating_mul(3);
         let shadow_w = child.width.checked_add(pad.checked_mul(2)?)?;
         let shadow_h = child.height.checked_add(pad.checked_mul(2)?)?;
-        let alpha_a = self.alpha_image(shadow_w, shadow_h);
-        let alpha_b = self.alpha_image(shadow_w, shadow_h);
-        let target = self.empty_image(input.target);
+        let alpha_a = self.alpha_image(shadow_w, shadow_h)?;
+        let alpha_b = self.alpha_image(shadow_w, shadow_h)?;
+        let target = self.empty_image(input.target)?;
 
         let mut encoder = self
             .device
@@ -826,8 +962,8 @@ impl GpuRasterBackend for GpuRenderer {
         if child.format != PixelFormat::Rgba8 {
             return None;
         }
-        let alpha = self.alpha_image(input.target.width, input.target.height);
-        let target = self.empty_image(input.target);
+        let alpha = self.alpha_image(input.target.width, input.target.height)?;
+        let target = self.empty_image(input.target)?;
 
         let mut encoder = self
             .device
@@ -871,7 +1007,7 @@ impl GpuRasterBackend for GpuRenderer {
     fn solid_fill(&mut self, target: Resolution, color: Color) -> Option<RasterImage> {
         let [r, g, b, a] = color_u8(color);
         let packed = r | (g << 8) | (b << 16) | (a << 24);
-        let image = self.filled_image(target, packed);
+        let image = self.filled_image(target, packed)?;
         self.stats.fills = self.stats.fills.saturating_add(1);
         Some(self.raster_image(image))
     }
@@ -903,13 +1039,14 @@ impl GpuRasterBackend for GpuRenderer {
         // buffer is zero-initialized, so accumulation starts from zero
         // without an explicit clear pass.
         let acc_len = (target.width as u64) * (target.height as u64) * 16;
+        let _acc_reservation = self.reserve_render_vram(acc_len as usize)?;
         let acc = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tellur-gpu-motion-acc"),
             size: acc_len,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let out = self.empty_image(target);
+        let out = self.empty_image(target)?;
 
         let params = MotionPassParams {
             width: target.width,
@@ -954,16 +1091,24 @@ impl GpuRasterBackend for GpuRenderer {
                 // Reuse a persisted MAP_READ staging buffer across frames (the
                 // resolution is stable), so this allocates once instead of every
                 // readback. The copy below fully overwrites it each time.
-                if self.readback_staging.as_ref().map(wgpu::Buffer::size) != Some(byte_len as u64) {
-                    self.readback_staging =
-                        Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                if self
+                    .readback_staging
+                    .as_ref()
+                    .map(|(buffer, _)| buffer.size())
+                    != Some(byte_len as u64)
+                {
+                    let reservation = self.reserve_render_vram(byte_len)?;
+                    self.readback_staging = Some((
+                        self.device.create_buffer(&wgpu::BufferDescriptor {
                             label: Some("tellur-gpu-readback"),
                             size: byte_len as u64,
                             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                             mapped_at_creation: false,
-                        }));
+                        }),
+                        reservation,
+                    ));
                 }
-                let staging = self.readback_staging.as_ref()?;
+                let staging = &self.readback_staging.as_ref()?.0;
                 let mut encoder =
                     self.device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {

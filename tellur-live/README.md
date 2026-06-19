@@ -49,6 +49,16 @@ Open `http://127.0.0.1:4317/` for the minimal browser client.
 Use `--host 0.0.0.0` when the preview server should be reachable from other
 devices on the network.
 Pass `--verbose` to print per-frame timing and cache statistics to stdout.
+Set `TELLUR_CACHE_RAM` to cap Tellur-managed RAM caches (render images, audio
+decode/conform buffers, and server-side MP4 segment reuse). Set `TELLUR_VRAM` to
+cap large GPU backend allocations, including cached uploads, render targets,
+readback staging, and scratch buffers. Both accept byte counts with optional
+`k`, `m`, or `g` suffixes, for example `TELLUR_CACHE_RAM=1g TELLUR_VRAM=2g`.
+When unset, both default to 1 GiB. `TELLUR_VRAM` is the total Tellur-managed GPU
+allocation budget; GPU raster/upload caches keep separate internal byte caps
+inside that total. If render-critical GPU allocation fails, those cache caps are
+shrunk and LRU cache entries are evicted for subsequent frames. When VRAM stays
+spare across many successful allocations, the caps grow gradually again.
 
 Passing `-p <package> --example <example>` makes `tellur-live` infer the release
 cdylib path (`target/release/examples/lib<example>.so`) and run

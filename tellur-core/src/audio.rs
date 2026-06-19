@@ -33,6 +33,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time as SymphoniaTime;
 
+use crate::cache_budget::{cache_ram_capacity, try_reserve_cache_ram, BudgetReservation};
 use crate::timeline_component::AudioBuffer;
 
 const AUDIO_CACHE_CAPACITY_BYTES: usize = 512 * 1024 * 1024;
@@ -51,8 +52,13 @@ struct AudioCacheKey {
 }
 
 struct AudioDecodeCache {
-    entries: LruCache<AudioCacheKey, Arc<AudioBuffer>>,
+    entries: LruCache<AudioCacheKey, CachedAudioBuffer>,
     bytes: usize,
+}
+
+struct CachedAudioBuffer {
+    buffer: Arc<AudioBuffer>,
+    _reservation: BudgetReservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,7 +72,7 @@ struct ConformedAudioCacheKey {
 }
 
 struct ConformedAudioCache {
-    entries: LruCache<ConformedAudioCacheKey, Arc<AudioBuffer>>,
+    entries: LruCache<ConformedAudioCacheKey, CachedAudioBuffer>,
     bytes: usize,
 }
 
@@ -81,24 +87,32 @@ impl Default for AudioDecodeCache {
 
 impl AudioDecodeCache {
     fn get(&mut self, key: &AudioCacheKey) -> Option<Arc<AudioBuffer>> {
-        self.entries.get(key).cloned()
+        self.entries.get(key).map(|entry| Arc::clone(&entry.buffer))
     }
 
     fn insert(&mut self, key: AudioCacheKey, buffer: Arc<AudioBuffer>) {
         let bytes = audio_buffer_bytes(&buffer);
-        if bytes > AUDIO_CACHE_CAPACITY_BYTES {
+        let capacity = cache_ram_capacity(AUDIO_CACHE_CAPACITY_BYTES);
+        if bytes > capacity {
             return;
         }
 
-        while self.bytes + bytes > AUDIO_CACHE_CAPACITY_BYTES {
+        while self.bytes + bytes > capacity {
             let Some((_, old)) = self.entries.pop_lru() else {
                 break;
             };
-            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old.buffer));
         }
 
-        if let Some(old) = self.entries.put(key, buffer) {
-            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        let Some(reservation) = try_reserve_cache_ram(bytes) else {
+            return;
+        };
+        let entry = CachedAudioBuffer {
+            buffer,
+            _reservation: reservation,
+        };
+        if let Some(old) = self.entries.put(key, entry) {
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old.buffer));
         }
         self.bytes += bytes;
     }
@@ -115,24 +129,32 @@ impl Default for ConformedAudioCache {
 
 impl ConformedAudioCache {
     fn get(&mut self, key: &ConformedAudioCacheKey) -> Option<Arc<AudioBuffer>> {
-        self.entries.get(key).cloned()
+        self.entries.get(key).map(|entry| Arc::clone(&entry.buffer))
     }
 
     fn insert(&mut self, key: ConformedAudioCacheKey, buffer: Arc<AudioBuffer>) {
         let bytes = audio_buffer_bytes(&buffer);
-        if bytes > AUDIO_CACHE_CAPACITY_BYTES {
+        let capacity = cache_ram_capacity(AUDIO_CACHE_CAPACITY_BYTES);
+        if bytes > capacity {
             return;
         }
 
-        while self.bytes + bytes > AUDIO_CACHE_CAPACITY_BYTES {
+        while self.bytes + bytes > capacity {
             let Some((_, old)) = self.entries.pop_lru() else {
                 break;
             };
-            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old.buffer));
         }
 
-        if let Some(old) = self.entries.put(key, buffer) {
-            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old));
+        let Some(reservation) = try_reserve_cache_ram(bytes) else {
+            return;
+        };
+        let entry = CachedAudioBuffer {
+            buffer,
+            _reservation: reservation,
+        };
+        if let Some(old) = self.entries.put(key, entry) {
+            self.bytes = self.bytes.saturating_sub(audio_buffer_bytes(&old.buffer));
         }
         self.bytes += bytes;
     }

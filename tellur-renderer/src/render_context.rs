@@ -21,6 +21,10 @@ use std::time::{Duration, Instant};
 use lru::LruCache;
 use rustc_hash::FxHasher;
 use sysinfo::System;
+use tellur_core::cache_budget::{
+    cache_ram_capacity, configured_vram_bytes, try_reserve_cache_ram, vram_used_bytes,
+    BudgetReservation,
+};
 use tellur_core::dyn_compare::{DynEq, DynHash};
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
@@ -40,6 +44,13 @@ const DEFAULT_PROBATION_ENTRIES: usize = 4096;
 const VOLATILE_LARGE_IMAGE_BYTES: usize = 1024 * 1024;
 const VOLATILE_MIN_MISSES: u64 = 8;
 const VOLATILE_MAX_HIT_RATE: f64 = 0.75;
+const GPU_CACHE_INITIAL_FRACTION_DIVISOR: usize = 4;
+const GPU_CACHE_MAX_FRACTION_DIVISOR: usize = 2;
+const GPU_CACHE_SHRINK_NUMERATOR: usize = 3;
+const GPU_CACHE_SHRINK_DENOMINATOR: usize = 4;
+const GPU_CACHE_GROW_SUCCESS_STREAK: u8 = 64;
+const GPU_CACHE_GROW_FRACTION_DIVISOR: usize = 64;
+const MIB: usize = 1024 * 1024;
 
 /// Controls when a freshly-rendered image becomes a cache entry.
 ///
@@ -87,6 +98,18 @@ impl CacheKey {
             target_width: target.width,
             target_height: target.height,
         }
+    }
+}
+
+struct CachedRasterImage {
+    image: RasterImage,
+    bytes: usize,
+    _ram_reservation: Option<BudgetReservation>,
+}
+
+impl CachedRasterImage {
+    fn is_gpu(&self) -> bool {
+        matches!(self.image, RasterImage::Gpu(_))
     }
 }
 
@@ -153,6 +176,9 @@ pub struct CacheMetrics {
     /// Misses where the freshly-produced image was not admitted by the
     /// configured admission policy.
     pub admission_skips: u64,
+    /// Misses where the freshly-produced image was not admitted because the
+    /// process-wide cache RAM budget was exhausted.
+    pub budget_skips: u64,
     /// Current GPU policy for this context.
     pub gpu_preference: GpuPreference,
     /// Whether the context has tried to create a GPU backend.
@@ -187,7 +213,7 @@ impl fmt::Display for CacheMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips, {} admission skips",
+            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips, {} admission skips, {} budget skips",
             self.hits,
             self.misses,
             self.hit_rate() * 100.0,
@@ -196,10 +222,11 @@ impl fmt::Display for CacheMetrics {
             self.pressure_skips,
             self.oversize_skips,
             self.admission_skips,
+            self.budget_skips,
         )?;
         writeln!(
             f,
-            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, rasterize {}, fill {}, temporal_avg {}, readback {})",
+            "GPU    preference={:?}, attempted={}, available={}, ops={} (composite {}, shadow {}, outline {}, rasterize {}, fill {}, temporal_avg {}, readback {}, vram_failures {}, cache_evictions {})",
             self.gpu_preference,
             self.gpu_init_attempted,
             self.gpu_available,
@@ -211,6 +238,8 @@ impl fmt::Display for CacheMetrics {
             self.gpu.fills,
             self.gpu.temporal_averages,
             self.gpu.readbacks,
+            self.gpu.vram_reserve_failures,
+            self.gpu.vram_cache_evictions,
         )?;
         if !self.per_type.is_empty() {
             writeln!(f, "Cache by type (sorted by self_time, descending):")?;
@@ -278,10 +307,16 @@ fn pixel_stride(format: PixelFormat) -> usize {
 /// [`tellur_core::timeline::Timeline::build`]; the cache persists across
 /// frames so any time-invariant subtree only re-renders once.
 pub struct CachingRenderContext {
-    cache: LruCache<CacheKey, RasterImage>,
+    cache: LruCache<CacheKey, CachedRasterImage>,
     probation: LruCache<CacheKey, ()>,
     cur_bytes: usize,
+    cpu_cache_bytes: usize,
     cap_bytes: usize,
+    gpu_cache_bytes: usize,
+    gpu_cache_cap_bytes: usize,
+    gpu_cache_max_bytes: usize,
+    gpu_cache_spare_successes: u8,
+    gpu_vram_failures_seen: u64,
     system: System,
     // Aggregate counters; `per_type` is keyed by `TypeId` for cheap
     // updates inside `render`, then projected onto `&'static str` names
@@ -292,6 +327,7 @@ pub struct CachingRenderContext {
     pressure_skips: u64,
     oversize_skips: u64,
     admission_skips: u64,
+    budget_skips: u64,
     per_type: HashMap<TypeId, (TypeStats, &'static str)>,
     admission_policy: CacheAdmissionPolicy,
     gpu_preference: GpuPreference,
@@ -315,11 +351,18 @@ impl CachingRenderContext {
 
     /// Create a context with a custom byte capacity.
     pub fn with_capacity_bytes(cap_bytes: usize) -> Self {
+        let (gpu_cache_cap_bytes, gpu_cache_max_bytes) = gpu_cache_limits();
         Self {
             cache: LruCache::unbounded(),
             probation: LruCache::unbounded(),
             cur_bytes: 0,
-            cap_bytes,
+            cpu_cache_bytes: 0,
+            cap_bytes: cache_ram_capacity(cap_bytes),
+            gpu_cache_bytes: 0,
+            gpu_cache_cap_bytes,
+            gpu_cache_max_bytes,
+            gpu_cache_spare_successes: 0,
+            gpu_vram_failures_seen: 0,
             system: System::new(),
             hits: 0,
             misses: 0,
@@ -327,6 +370,7 @@ impl CachingRenderContext {
             pressure_skips: 0,
             oversize_skips: 0,
             admission_skips: 0,
+            budget_skips: 0,
             per_type: HashMap::new(),
             admission_policy: CacheAdmissionPolicy::Immediate,
             gpu_preference: GpuPreference::Auto,
@@ -424,6 +468,7 @@ impl CachingRenderContext {
             pressure_skips: self.pressure_skips,
             oversize_skips: self.oversize_skips,
             admission_skips: self.admission_skips,
+            budget_skips: self.budget_skips,
             gpu_preference: self.gpu_preference,
             gpu_init_attempted: self.gpu_init_attempted,
             gpu_available: self.gpu.is_some(),
@@ -444,6 +489,7 @@ impl CachingRenderContext {
         self.pressure_skips = 0;
         self.oversize_skips = 0;
         self.admission_skips = 0;
+        self.budget_skips = 0;
         self.per_type.clear();
         self.total_render_time = Duration::ZERO;
     }
@@ -453,6 +499,8 @@ impl CachingRenderContext {
         self.cache.clear();
         self.probation.clear();
         self.cur_bytes = 0;
+        self.cpu_cache_bytes = 0;
+        self.gpu_cache_bytes = 0;
     }
 
     fn should_admit(&mut self, key: CacheKey, type_id: TypeId, bytes: usize) -> bool {
@@ -514,18 +562,63 @@ impl CachingRenderContext {
         }
     }
 
-    /// Evict least-recently-used entries until `needed` more bytes fit
-    /// under the configured cap.
-    fn evict_to_fit(&mut self, needed: usize) {
-        while self.cur_bytes + needed > self.cap_bytes {
+    fn cache_entry(image: RasterImage, bytes: usize) -> Option<CachedRasterImage> {
+        let ram_reservation = match &image {
+            RasterImage::Cpu(_) => Some(try_reserve_cache_ram(bytes)?),
+            RasterImage::Gpu(_) => None,
+        };
+        Some(CachedRasterImage {
+            image,
+            bytes,
+            _ram_reservation: ram_reservation,
+        })
+    }
+
+    fn account_evicted(&mut self, entry: &CachedRasterImage) {
+        self.cur_bytes = self.cur_bytes.saturating_sub(entry.bytes);
+        if entry.is_gpu() {
+            self.gpu_cache_bytes = self.gpu_cache_bytes.saturating_sub(entry.bytes);
+        } else {
+            self.cpu_cache_bytes = self.cpu_cache_bytes.saturating_sub(entry.bytes);
+        }
+        self.bytes_evicted = self.bytes_evicted.saturating_add(entry.bytes as u64);
+    }
+
+    fn evict_gpu_cache_to_fit(&mut self, needed: usize) {
+        if self.gpu_cache_bytes.saturating_add(needed) <= self.gpu_cache_cap_bytes {
+            return;
+        }
+
+        let mut keep = Vec::with_capacity(self.cache.len());
+        while self.gpu_cache_bytes.saturating_add(needed) > self.gpu_cache_cap_bytes {
             match self.cache.pop_lru() {
-                Some((_, img)) => {
-                    let b = Self::image_bytes(&img);
-                    self.cur_bytes = self.cur_bytes.saturating_sub(b);
-                    self.bytes_evicted = self.bytes_evicted.saturating_add(b as u64);
-                }
+                Some((_, entry)) if entry.is_gpu() => self.account_evicted(&entry),
+                Some((key, entry)) => keep.push((key, entry)),
                 None => break,
             }
+        }
+        for (key, entry) in keep {
+            self.cache.put(key, entry);
+        }
+    }
+
+    /// Evict least-recently-used entries until `needed` more bytes fit
+    /// under the configured cap.
+    fn evict_cpu_cache_to_fit(&mut self, needed: usize) {
+        if self.cpu_cache_bytes.saturating_add(needed) <= self.cap_bytes {
+            return;
+        }
+
+        let mut keep = Vec::with_capacity(self.cache.len());
+        while self.cpu_cache_bytes.saturating_add(needed) > self.cap_bytes {
+            match self.cache.pop_lru() {
+                Some((_, entry)) if !entry.is_gpu() => self.account_evicted(&entry),
+                Some((key, entry)) => keep.push((key, entry)),
+                None => break,
+            }
+        }
+        for (key, entry) in keep {
+            self.cache.put(key, entry);
         }
     }
 
@@ -533,16 +626,84 @@ impl CachingRenderContext {
     /// is empty.
     fn shed_under_pressure(&mut self) {
         while self.under_memory_pressure() {
+            let mut keep = Vec::with_capacity(self.cache.len());
+            let mut evicted = false;
             match self.cache.pop_lru() {
-                Some((_, img)) => {
-                    let b = Self::image_bytes(&img);
-                    self.cur_bytes = self.cur_bytes.saturating_sub(b);
-                    self.bytes_evicted = self.bytes_evicted.saturating_add(b as u64);
+                Some((_, entry)) if !entry.is_gpu() => {
+                    self.account_evicted(&entry);
+                    evicted = true;
                 }
+                Some((key, entry)) => keep.push((key, entry)),
                 None => break,
+            }
+            while !evicted {
+                match self.cache.pop_lru() {
+                    Some((_, entry)) if !entry.is_gpu() => {
+                        self.account_evicted(&entry);
+                        evicted = true;
+                    }
+                    Some((key, entry)) => keep.push((key, entry)),
+                    None => break,
+                }
+            }
+            for (key, entry) in keep {
+                self.cache.put(key, entry);
+            }
+            if !evicted {
+                break;
             }
         }
     }
+
+    fn adjust_gpu_cache_budget_after_render(&mut self) {
+        let failures = self
+            .gpu
+            .as_ref()
+            .map(|gpu| gpu.stats().vram_reserve_failures)
+            .unwrap_or(0);
+        if failures > self.gpu_vram_failures_seen {
+            self.gpu_vram_failures_seen = failures;
+            self.shrink_gpu_cache_budget();
+            return;
+        }
+
+        let limit = configured_vram_bytes();
+        let used = vram_used_bytes();
+        if self.gpu_cache_cap_bytes >= self.gpu_cache_max_bytes
+            || used.saturating_mul(4) >= limit.saturating_mul(3)
+        {
+            self.gpu_cache_spare_successes = 0;
+            return;
+        }
+
+        self.gpu_cache_spare_successes = self.gpu_cache_spare_successes.saturating_add(1);
+        if self.gpu_cache_spare_successes >= GPU_CACHE_GROW_SUCCESS_STREAK {
+            let step = (limit / GPU_CACHE_GROW_FRACTION_DIVISOR).max(MIB);
+            self.gpu_cache_cap_bytes = self
+                .gpu_cache_cap_bytes
+                .saturating_add(step)
+                .min(self.gpu_cache_max_bytes);
+            self.gpu_cache_spare_successes = 0;
+        }
+    }
+
+    fn shrink_gpu_cache_budget(&mut self) {
+        self.gpu_cache_spare_successes = 0;
+        let old = self.gpu_cache_cap_bytes;
+        self.gpu_cache_cap_bytes =
+            old.saturating_mul(GPU_CACHE_SHRINK_NUMERATOR) / GPU_CACHE_SHRINK_DENOMINATOR;
+        if old > 0 && self.gpu_cache_cap_bytes == old {
+            self.gpu_cache_cap_bytes = old - 1;
+        }
+        self.evict_gpu_cache_to_fit(0);
+    }
+}
+
+fn gpu_cache_limits() -> (usize, usize) {
+    let limit = configured_vram_bytes();
+    let max = limit / GPU_CACHE_MAX_FRACTION_DIVISOR;
+    let cap = (limit / GPU_CACHE_INITIAL_FRACTION_DIVISOR).min(max);
+    (cap, max)
 }
 
 impl Default for CachingRenderContext {
@@ -608,27 +769,47 @@ impl RenderContext for CachingRenderContext {
         let (img, was_hit, counted) = match key {
             None => (component.render(size, target, self), false, false),
             Some(key) => {
-                if let Some(img) = self.cache.get(&key).cloned() {
-                    (img, true, true)
+                if let Some(entry) = self.cache.get(&key) {
+                    (entry.image.clone(), true, true)
                 } else {
                     // Miss path: produce the image, then decide whether to
                     // admit it. Nested `ctx.render` calls happen inside
                     // `component.render`, which is why timing is wrapped
                     // around the whole block.
                     let img = component.render(size, target, self);
+                    self.adjust_gpu_cache_budget_after_render();
                     let bytes = Self::image_bytes(&img);
+                    let is_gpu = matches!(img, RasterImage::Gpu(_));
 
-                    if bytes > self.cap_bytes {
+                    if !is_gpu && bytes > self.cap_bytes {
                         self.oversize_skips += 1;
                     } else if !self.should_admit(key, type_id, bytes) {
                     } else {
-                        self.evict_to_fit(bytes);
-                        if self.under_memory_pressure() {
-                            self.shed_under_pressure();
-                            self.pressure_skips += 1;
+                        if is_gpu {
+                            self.evict_gpu_cache_to_fit(bytes);
+                        }
+                        if is_gpu
+                            && self.gpu_cache_bytes.saturating_add(bytes) > self.gpu_cache_cap_bytes
+                        {
+                            self.budget_skips += 1;
                         } else {
-                            self.cache.put(key, img.clone());
-                            self.cur_bytes += bytes;
+                            if !is_gpu {
+                                self.evict_cpu_cache_to_fit(bytes);
+                            }
+                            if self.under_memory_pressure() {
+                                self.shed_under_pressure();
+                                self.pressure_skips += 1;
+                            } else if let Some(entry) = Self::cache_entry(img.clone(), bytes) {
+                                self.cache.put(key, entry);
+                                self.cur_bytes += bytes;
+                                if is_gpu {
+                                    self.gpu_cache_bytes += bytes;
+                                } else {
+                                    self.cpu_cache_bytes += bytes;
+                                }
+                            } else {
+                                self.budget_skips += 1;
+                            }
                         }
                     }
                     (img, false, true)
@@ -663,16 +844,19 @@ impl RenderContext for CachingRenderContext {
 
 #[cfg(test)]
 mod tests {
+    use std::any::TypeId;
+    use std::sync::Arc;
+
     use tellur_core::color::Color;
     use tellur_core::geometry::{Constraints, Vec2};
     use tellur_core::layer::Layer;
     use tellur_core::placement::RasterPlacement;
-    use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+    use tellur_core::raster::{GpuSurface, PixelFormat, RasterComponent, RasterImage, Resolution};
     use tellur_core::render_context::{CachePolicy, GpuPreference, PassThrough, RenderContext};
     use tellur_core::shapes::Rectangle;
     use tellur_core::vector::Paint;
 
-    use super::{CachingRenderContext, VOLATILE_MIN_MISSES};
+    use super::{CacheKey, CachedRasterImage, CachingRenderContext, VOLATILE_MIN_MISSES};
     use crate::rasterize::Rasterizable;
 
     fn scene() -> Layer {
@@ -811,6 +995,73 @@ mod tests {
         assert_eq!(skipped.misses, VOLATILE_MIN_MISSES + 1);
         assert_eq!(skipped.admission_skips, 1);
         assert_eq!(skipped.bytes_cached, warmed.bytes_cached);
+    }
+
+    #[test]
+    fn gpu_cache_cap_eviction_drops_only_gpu_entries() {
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024 * 1024)
+            .with_gpu_preference(GpuPreference::PreferGpu);
+        let cpu = RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]);
+        let gpu = RasterImage::Gpu(GpuSurface::new(
+            10,
+            10,
+            PixelFormat::Rgba8,
+            "test",
+            Arc::new(()),
+        ));
+        let cpu_key = CacheKey {
+            type_id: TypeId::of::<SolidRaster>(),
+            content_hash: 1,
+            size_x_bits: 1,
+            size_y_bits: 1,
+            target_width: 1,
+            target_height: 1,
+        };
+        let gpu_key = CacheKey {
+            type_id: TypeId::of::<SolidRaster>(),
+            content_hash: 2,
+            size_x_bits: 1,
+            size_y_bits: 1,
+            target_width: 10,
+            target_height: 10,
+        };
+        cache.cache.put(
+            cpu_key,
+            CachedRasterImage {
+                image: cpu,
+                bytes: 4,
+                _ram_reservation: None,
+            },
+        );
+        cache.cache.put(
+            gpu_key,
+            CachedRasterImage {
+                image: gpu,
+                bytes: 400,
+                _ram_reservation: None,
+            },
+        );
+        cache.cur_bytes = 404;
+        cache.gpu_cache_bytes = 400;
+        cache.gpu_cache_cap_bytes = 128;
+
+        cache.evict_gpu_cache_to_fit(1);
+
+        assert_eq!(cache.cache.len(), 1);
+        assert_eq!(cache.cur_bytes, 4);
+        assert_eq!(cache.gpu_cache_bytes, 0);
+        assert_eq!(cache.bytes_evicted, 400);
+    }
+
+    #[test]
+    fn gpu_cache_budget_shrinks_after_vram_pressure() {
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024 * 1024)
+            .with_gpu_preference(GpuPreference::PreferGpu);
+        cache.gpu_cache_cap_bytes = 1024;
+
+        cache.shrink_gpu_cache_budget();
+
+        assert_eq!(cache.gpu_cache_cap_bytes, 768);
     }
 
     fn render_and_readback(
