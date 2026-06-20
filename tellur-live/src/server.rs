@@ -685,6 +685,20 @@ impl PreviewApp {
                 format!("{:?}", after.gpu_preference),
                 after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
                 after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+                after
+                    .gpu
+                    .vram_reserve_failures
+                    .saturating_sub(before.gpu.vram_reserve_failures),
+                after
+                    .gpu
+                    .vram_cache_evictions
+                    .saturating_sub(before.gpu.vram_cache_evictions),
+                after.gpu_cache_bytes,
+                after.gpu_cache_cap_bytes,
+                after.gpu.upload_cache_bytes,
+                after.gpu.upload_cache_cap_bytes,
+                after.vram_used_bytes,
+                after.vram_budget_bytes,
             )
         });
         let (
@@ -697,7 +711,35 @@ impl PreviewApp {
             gpu_preference,
             gpu_ops,
             gpu_readbacks,
-        ) = stats.unwrap_or_else(|| (0, 0, 0, false, false, None, String::new(), 0, 0));
+            gpu_vram_failures,
+            gpu_cache_evictions,
+            gpu_cache_bytes,
+            gpu_cache_cap_bytes,
+            gpu_upload_cache_bytes,
+            gpu_upload_cache_cap_bytes,
+            vram_used_bytes,
+            vram_budget_bytes,
+        ) = stats.unwrap_or_else(|| {
+            (
+                0,
+                0,
+                0,
+                false,
+                false,
+                None,
+                String::new(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        });
 
         Ok(VideoFrame {
             image,
@@ -713,6 +755,14 @@ impl PreviewApp {
             gpu_preference,
             gpu_ops,
             gpu_readbacks,
+            gpu_vram_failures,
+            gpu_cache_evictions,
+            gpu_cache_bytes,
+            gpu_cache_cap_bytes,
+            gpu_upload_cache_bytes,
+            gpu_upload_cache_cap_bytes,
+            vram_used_bytes,
+            vram_budget_bytes,
         })
     }
 
@@ -828,6 +878,20 @@ impl PreviewApp {
                 gpu_preference: format!("{:?}", after.gpu_preference),
                 gpu_ops: after.gpu.total_ops().saturating_sub(before.gpu.total_ops()),
                 gpu_readbacks: after.gpu.readbacks.saturating_sub(before.gpu.readbacks),
+                gpu_vram_failures: after
+                    .gpu
+                    .vram_reserve_failures
+                    .saturating_sub(before.gpu.vram_reserve_failures),
+                gpu_cache_evictions: after
+                    .gpu
+                    .vram_cache_evictions
+                    .saturating_sub(before.gpu.vram_cache_evictions),
+                gpu_cache_bytes: after.gpu_cache_bytes,
+                gpu_cache_cap_bytes: after.gpu_cache_cap_bytes,
+                gpu_upload_cache_bytes: after.gpu.upload_cache_bytes,
+                gpu_upload_cache_cap_bytes: after.gpu.upload_cache_cap_bytes,
+                vram_used_bytes: after.vram_used_bytes,
+                vram_budget_bytes: after.vram_budget_bytes,
             },
             total_start,
         })
@@ -910,6 +974,14 @@ struct VideoFrame {
     gpu_preference: String,
     gpu_ops: u64,
     gpu_readbacks: u64,
+    gpu_vram_failures: u64,
+    gpu_cache_evictions: u64,
+    gpu_cache_bytes: usize,
+    gpu_cache_cap_bytes: usize,
+    gpu_upload_cache_bytes: usize,
+    gpu_upload_cache_cap_bytes: usize,
+    vram_used_bytes: usize,
+    vram_budget_bytes: usize,
 }
 
 /// The fixed audio layout the preview mux uses (matches the encoder boundary).
@@ -1347,7 +1419,7 @@ fn handle_video_stream(
             )?;
             if verbose {
                 println!(
-                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms build={:.2}ms readback={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+                    "video timeline={} t={:.3}s size={}x{} fps={} gop={} render={:.2}ms build={:.2}ms readback={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={} gpu_vram_failures={} gpu_cache_evictions={} gpu_cache={}/{} gpu_upload_cache={}/{} vram={}/{}",
                     setup.timeline_id,
                     seconds,
                     setup.resolution.width,
@@ -1367,6 +1439,14 @@ fn handle_video_stream(
                     frame.gpu_available,
                     frame.gpu_ops,
                     frame.gpu_readbacks,
+                    frame.gpu_vram_failures,
+                    frame.gpu_cache_evictions,
+                    format_bytes(frame.gpu_cache_bytes as u64),
+                    format_bytes(frame.gpu_cache_cap_bytes as u64),
+                    format_bytes(frame.gpu_upload_cache_bytes as u64),
+                    format_bytes(frame.gpu_upload_cache_cap_bytes as u64),
+                    format_bytes(frame.vram_used_bytes as u64),
+                    format_bytes(frame.vram_budget_bytes as u64),
                 );
             }
             render_total += frame.render_time;
@@ -1470,6 +1550,14 @@ struct FrameRenderStats {
     gpu_available: bool,
     gpu_ops: u64,
     gpu_readbacks: u64,
+    gpu_vram_failures: u64,
+    gpu_cache_evictions: u64,
+    gpu_cache_bytes: usize,
+    gpu_cache_cap_bytes: usize,
+    gpu_upload_cache_bytes: usize,
+    gpu_upload_cache_cap_bytes: usize,
+    vram_used_bytes: usize,
+    vram_budget_bytes: usize,
 }
 
 impl FrameRenderStats {
@@ -1496,6 +1584,32 @@ impl FrameRenderStats {
             ("X-Tellur-GPU-Active", (self.gpu_ops > 0).to_string()),
             ("X-Tellur-GPU-Ops", self.gpu_ops.to_string()),
             ("X-Tellur-GPU-Readbacks", self.gpu_readbacks.to_string()),
+            (
+                "X-Tellur-GPU-VRAM-Failures",
+                self.gpu_vram_failures.to_string(),
+            ),
+            (
+                "X-Tellur-GPU-Cache-Evictions",
+                self.gpu_cache_evictions.to_string(),
+            ),
+            ("X-Tellur-GPU-Cache-Bytes", self.gpu_cache_bytes.to_string()),
+            (
+                "X-Tellur-GPU-Cache-Cap-Bytes",
+                self.gpu_cache_cap_bytes.to_string(),
+            ),
+            (
+                "X-Tellur-GPU-Upload-Cache-Bytes",
+                self.gpu_upload_cache_bytes.to_string(),
+            ),
+            (
+                "X-Tellur-GPU-Upload-Cache-Cap-Bytes",
+                self.gpu_upload_cache_cap_bytes.to_string(),
+            ),
+            ("X-Tellur-VRAM-Used-Bytes", self.vram_used_bytes.to_string()),
+            (
+                "X-Tellur-VRAM-Budget-Bytes",
+                self.vram_budget_bytes.to_string(),
+            ),
         ];
         if let Some(error) = &self.gpu_init_error {
             headers.push(("X-Tellur-GPU-Init-Error", sanitize_header_value(error)));
@@ -1528,7 +1642,7 @@ impl FrameFormat {
 
 fn log_frame_stats(stats: &FrameRenderStats) {
     println!(
-        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={}",
+        "frame timeline={} t={:.3}s size={}x{} format={} render={:.2}ms encode={:.2}ms total={:.2}ms bytes={} cache_delta={}h/{}m cache_size={} gpu_preference={} gpu_init_attempted={} gpu_init_error={} gpu_available={} gpu_ops={} gpu_readbacks={} gpu_vram_failures={} gpu_cache_evictions={} gpu_cache={}/{} gpu_upload_cache={}/{} vram={}/{}",
         stats.timeline_id,
         stats.seconds,
         stats.resolution.width,
@@ -1547,6 +1661,14 @@ fn log_frame_stats(stats: &FrameRenderStats) {
         stats.gpu_available,
         stats.gpu_ops,
         stats.gpu_readbacks,
+        stats.gpu_vram_failures,
+        stats.gpu_cache_evictions,
+        format_bytes(stats.gpu_cache_bytes as u64),
+        format_bytes(stats.gpu_cache_cap_bytes as u64),
+        format_bytes(stats.gpu_upload_cache_bytes as u64),
+        format_bytes(stats.gpu_upload_cache_cap_bytes as u64),
+        format_bytes(stats.vram_used_bytes as u64),
+        format_bytes(stats.vram_budget_bytes as u64),
     );
 }
 
@@ -1585,7 +1707,7 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
     let gpu_before = &before.gpu;
     let gpu_after = &after.gpu;
     println!(
-        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} budget_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={}",
+        "video-stream-cache-delta hits={} misses={} hit_rate={:.1}% cache_size={} evicted_delta={} pressure_skips_delta={} oversize_skips_delta={} admission_skips_delta={} budget_skips_delta={} gpu_ops={} gpu_composites={} gpu_shadows={} gpu_outlines={} gpu_rasterizes={} gpu_fills={} gpu_temporal_avg={} gpu_readbacks={} gpu_vram_failures={} gpu_cache_evictions={} gpu_cache={}/{} gpu_upload_cache={}/{} vram={}/{}",
         hits,
         misses,
         hit_rate * 100.0,
@@ -1605,6 +1727,18 @@ fn log_cache_metrics_delta(before: &CacheMetrics, after: &CacheMetrics) {
             .temporal_averages
             .saturating_sub(gpu_before.temporal_averages),
         gpu_after.readbacks.saturating_sub(gpu_before.readbacks),
+        gpu_after
+            .vram_reserve_failures
+            .saturating_sub(gpu_before.vram_reserve_failures),
+        gpu_after
+            .vram_cache_evictions
+            .saturating_sub(gpu_before.vram_cache_evictions),
+        format_bytes(after.gpu_cache_bytes as u64),
+        format_bytes(after.gpu_cache_cap_bytes as u64),
+        format_bytes(gpu_after.upload_cache_bytes as u64),
+        format_bytes(gpu_after.upload_cache_cap_bytes as u64),
+        format_bytes(after.vram_used_bytes as u64),
+        format_bytes(after.vram_budget_bytes as u64),
     );
 
     let mut rows: Vec<(&'static str, TypeStatsDelta)> = after

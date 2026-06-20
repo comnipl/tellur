@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::hash::{BuildHasher, Hash};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -67,6 +68,10 @@ pub struct GpuRenderStats {
     pub readbacks: u64,
     pub vram_reserve_failures: u64,
     pub vram_cache_evictions: u64,
+    pub upload_cache_entries: usize,
+    pub upload_cache_bytes: usize,
+    pub upload_cache_cap_bytes: usize,
+    pub upload_cache_max_bytes: usize,
 }
 
 impl GpuRenderStats {
@@ -122,6 +127,28 @@ fn pixel_stride(format: PixelFormat) -> usize {
         PixelFormat::Rgba8 => 4,
         PixelFormat::Rgba16Float => 8,
     }
+}
+
+fn push_lru_accounted<K, V, S, F>(
+    cache: &mut LruCache<K, V, S>,
+    current_bytes: &mut usize,
+    key: K,
+    value: V,
+    value_bytes: usize,
+    old_bytes: F,
+) -> bool
+where
+    K: Hash + Eq,
+    S: BuildHasher,
+    F: FnOnce(&V) -> usize,
+{
+    let evicted = cache.push(key, value);
+    let had_eviction = evicted.is_some();
+    if let Some((_, old)) = evicted {
+        *current_bytes = current_bytes.saturating_sub(old_bytes(&old));
+    }
+    *current_bytes = current_bytes.saturating_add(value_bytes);
+    had_eviction
 }
 
 #[repr(C)]
@@ -306,7 +333,12 @@ impl GpuRenderer {
     }
 
     pub fn stats(&self) -> GpuRenderStats {
-        self.stats
+        let mut stats = self.stats;
+        stats.upload_cache_entries = self.cpu_upload_cache.len();
+        stats.upload_cache_bytes = self.cpu_upload_cache_bytes;
+        stats.upload_cache_cap_bytes = self.cpu_upload_cache_cap_bytes;
+        stats.upload_cache_max_bytes = self.cpu_upload_cache_max_bytes;
+        stats
     }
 
     /// Drops reusable GPU allocations so a later required allocation, usually
@@ -315,8 +347,7 @@ impl GpuRenderer {
     pub fn release_cached_resources(&mut self) {
         self.vello_target = None;
         self.readback_staging = None;
-        self.cpu_upload_cache_cap_bytes = 0;
-        self.evict_upload_cache_to_fit(0);
+        self.clear_upload_cache();
     }
 
     fn reserve_render_vram(&mut self, bytes: usize) -> Option<BudgetReservation> {
@@ -333,7 +364,7 @@ impl GpuRenderer {
         }
 
         self.cpu_upload_cache_cap_bytes = 0;
-        self.evict_upload_cache_to_fit(0);
+        self.clear_upload_cache();
         let reservation = try_reserve_vram(bytes)?;
         self.note_vram_reserve_success();
         Some(reservation)
@@ -381,9 +412,19 @@ impl GpuRenderer {
                     self.stats.vram_cache_evictions =
                         self.stats.vram_cache_evictions.saturating_add(1);
                 }
-                None => break,
+                None => {
+                    self.cpu_upload_cache_bytes = 0;
+                    break;
+                }
             }
         }
+    }
+
+    fn clear_upload_cache(&mut self) {
+        let evicted = self.cpu_upload_cache.len() as u64;
+        self.cpu_upload_cache.clear();
+        self.cpu_upload_cache_bytes = 0;
+        self.stats.vram_cache_evictions = self.stats.vram_cache_evictions.saturating_add(evicted);
     }
 
     fn insert_upload_cache(&mut self, key: CpuUploadCacheKey, image: Arc<GpuBufferImage>) {
@@ -395,12 +436,16 @@ impl GpuRenderer {
         if self.cpu_upload_cache_bytes.saturating_add(bytes) > self.cpu_upload_cache_cap_bytes {
             return;
         }
-        if let Some(old) = self.cpu_upload_cache.put(key, image) {
-            self.cpu_upload_cache_bytes = self
-                .cpu_upload_cache_bytes
-                .saturating_sub(Self::buffer_image_bytes(&old));
+        if push_lru_accounted(
+            &mut self.cpu_upload_cache,
+            &mut self.cpu_upload_cache_bytes,
+            key,
+            image,
+            bytes,
+            |image| Self::buffer_image_bytes(image.as_ref()),
+        ) {
+            self.stats.vram_cache_evictions = self.stats.vram_cache_evictions.saturating_add(1);
         }
-        self.cpu_upload_cache_bytes = self.cpu_upload_cache_bytes.saturating_add(bytes);
     }
 
     fn buffer_image_bytes(image: &GpuBufferImage) -> usize {
@@ -1916,6 +1961,43 @@ mod tests {
 
     fn readback(gpu: &mut GpuRenderer, image: RasterImage) -> CpuRasterImage {
         GpuRasterBackend::readback(gpu, image).expect("GPU image should read back")
+    }
+
+    #[test]
+    fn accounted_lru_subtracts_capacity_evictions() {
+        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
+        let mut bytes = 0usize;
+
+        assert!(!push_lru_accounted(
+            &mut cache,
+            &mut bytes,
+            1u8,
+            10usize,
+            10,
+            |v| *v
+        ));
+        assert!(!push_lru_accounted(
+            &mut cache,
+            &mut bytes,
+            2u8,
+            20usize,
+            20,
+            |v| *v
+        ));
+        assert_eq!(bytes, 30);
+
+        assert!(push_lru_accounted(
+            &mut cache,
+            &mut bytes,
+            3u8,
+            30usize,
+            30,
+            |v| *v
+        ));
+
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&1).is_none());
+        assert_eq!(bytes, 50);
     }
 
     #[test]

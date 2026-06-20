@@ -165,6 +165,16 @@ pub struct CacheMetrics {
     pub misses: u64,
     /// Bytes currently held by the cache.
     pub bytes_cached: usize,
+    /// Bytes currently held by cached GPU render entries.
+    pub gpu_cache_bytes: usize,
+    /// Current Tellur-managed VRAM allowance for cached GPU render entries.
+    pub gpu_cache_cap_bytes: usize,
+    /// Maximum Tellur-managed VRAM allowance the GPU render cache can grow back to.
+    pub gpu_cache_max_bytes: usize,
+    /// Process-wide Tellur-managed VRAM currently reserved.
+    pub vram_used_bytes: usize,
+    /// Configured process-wide Tellur-managed VRAM budget.
+    pub vram_budget_bytes: usize,
     /// Bytes released through LRU eviction (capacity-driven).
     pub bytes_evicted: u64,
     /// Misses where the freshly-produced image was not admitted
@@ -240,6 +250,19 @@ impl fmt::Display for CacheMetrics {
             self.gpu.readbacks,
             self.gpu.vram_reserve_failures,
             self.gpu.vram_cache_evictions,
+        )?;
+        writeln!(
+            f,
+            "VRAM   used {} / {}, render_cache {} / {} (max {}), upload_cache {} / {} ({} entries, max {})",
+            format_bytes(self.vram_used_bytes as u64),
+            format_bytes(self.vram_budget_bytes as u64),
+            format_bytes(self.gpu_cache_bytes as u64),
+            format_bytes(self.gpu_cache_cap_bytes as u64),
+            format_bytes(self.gpu_cache_max_bytes as u64),
+            format_bytes(self.gpu.upload_cache_bytes as u64),
+            format_bytes(self.gpu.upload_cache_cap_bytes as u64),
+            self.gpu.upload_cache_entries,
+            format_bytes(self.gpu.upload_cache_max_bytes as u64),
         )?;
         if !self.per_type.is_empty() {
             writeln!(f, "Cache by type (sorted by self_time, descending):")?;
@@ -464,6 +487,11 @@ impl CachingRenderContext {
             hits: self.hits,
             misses: self.misses,
             bytes_cached: self.cur_bytes,
+            gpu_cache_bytes: self.gpu_cache_bytes,
+            gpu_cache_cap_bytes: self.gpu_cache_cap_bytes,
+            gpu_cache_max_bytes: self.gpu_cache_max_bytes,
+            vram_used_bytes: vram_used_bytes(),
+            vram_budget_bytes: configured_vram_bytes(),
             bytes_evicted: self.bytes_evicted,
             pressure_skips: self.pressure_skips,
             oversize_skips: self.oversize_skips,
@@ -688,17 +716,26 @@ impl CachingRenderContext {
     }
 
     fn shrink_gpu_cache_budget(&mut self) {
+        self.shrink_gpu_cache_budget_for_pressure(0);
+    }
+
+    fn shrink_gpu_cache_budget_for_pressure(&mut self, needed: usize) {
         self.gpu_cache_spare_successes = 0;
         let old = self.gpu_cache_cap_bytes;
-        self.gpu_cache_cap_bytes =
+        let mut next =
             old.saturating_mul(GPU_CACHE_SHRINK_NUMERATOR) / GPU_CACHE_SHRINK_DENOMINATOR;
-        if old > 0 && self.gpu_cache_cap_bytes == old {
-            self.gpu_cache_cap_bytes = old - 1;
+        if old > 0 && next == old {
+            next = old - 1;
         }
+        let non_cache_vram = vram_used_bytes().saturating_sub(self.gpu_cache_bytes);
+        let pressure_cap =
+            configured_vram_bytes().saturating_sub(non_cache_vram.saturating_add(needed));
+        self.gpu_cache_cap_bytes = next.min(pressure_cap);
         self.evict_gpu_cache_to_fit(0);
     }
 
     fn evict_gpu_cache_until_vram_available(&mut self, needed: usize) {
+        self.shrink_gpu_cache_budget_for_pressure(needed);
         if vram_used_bytes().saturating_add(needed) <= configured_vram_bytes() {
             return;
         }
