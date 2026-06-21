@@ -29,7 +29,7 @@
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdout, Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,6 +49,7 @@ use crate::render_context::CachingRenderContext;
 const AUDIO_RATE: u32 = 48_000;
 /// Fixed audio output channel layout for the A/V mux (stereo).
 const AUDIO_CHANNELS: u16 = 2;
+const FFMPEG_STDERR_TAIL_BYTES: usize = 64 * 1024;
 
 /// The YUV range the rendered full-range RGB is converted to (and tagged as)
 /// when encoding. The conversion and the color tag are always derived from the
@@ -376,6 +377,9 @@ impl FfmpegEncoder {
             .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(FfmpegError::Spawn)?;
+        // Drain stderr concurrently; ffmpeg can block before exit if this pipe fills.
+        let stderr = child.stderr.take().expect("stderr piped");
+        let stderr_thread = thread::spawn(move || drain_ffmpeg_stderr(stderr));
         let mut stdin = child.stdin.take().expect("stdin piped");
 
         // Set up the three-row progress display and a thread that drains
@@ -482,19 +486,17 @@ impl FfmpegEncoder {
             bar.finish();
         }
 
+        let status = child.wait().map_err(FfmpegError::Wait)?;
+
         if let Some(handle) = progress_thread {
             // Join is best-effort: a panic in the parsing thread should not
             // shadow the actual ffmpeg outcome below.
             let _ = handle.join();
         }
-
-        let mut stderr_buf = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            stderr
-                .read_to_string(&mut stderr_buf)
-                .map_err(FfmpegError::ReadStderr)?;
-        }
-        let status = child.wait().map_err(FfmpegError::Wait)?;
+        let stderr_buf = match stderr_thread.join() {
+            Ok(result) => result.map_err(FfmpegError::ReadStderr)?,
+            Err(_) => String::new(),
+        };
 
         if let Some(bar) = &encode_bar {
             // ffmpeg's last `frame=` might lag the actual final count; snap to
@@ -638,6 +640,41 @@ fn drive_encode_progress(stdout: ChildStdout, encode_bar: ProgressBar, info_bar:
             _ => {}
         }
     }
+}
+
+fn drain_ffmpeg_stderr(mut stderr: ChildStderr) -> std::io::Result<String> {
+    let mut tail = Vec::new();
+    let mut truncated = false;
+    let mut buf = [0; 8192];
+
+    loop {
+        let n = stderr.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        truncated |= append_bounded_tail(&mut tail, &buf[..n], FFMPEG_STDERR_TAIL_BYTES);
+    }
+
+    let stderr = String::from_utf8_lossy(&tail).into_owned();
+    if truncated {
+        Ok(format!(
+            "<ffmpeg stderr truncated; showing last {} bytes>\n{}",
+            FFMPEG_STDERR_TAIL_BYTES, stderr
+        ))
+    } else {
+        Ok(stderr)
+    }
+}
+
+fn append_bounded_tail(tail: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> bool {
+    tail.extend_from_slice(chunk);
+    if tail.len() <= max_bytes {
+        return false;
+    }
+
+    let excess = tail.len() - max_bytes;
+    tail.drain(..excess);
+    true
 }
 
 fn format_duration_short(d: Duration) -> String {
@@ -838,6 +875,20 @@ mod av_mux_tests {
         assert_eq!(&bytes[48..52], &(-2.0_f32).to_le_bytes());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bounded_stderr_tail_keeps_latest_bytes() {
+        let mut tail = Vec::new();
+
+        assert!(!append_bounded_tail(&mut tail, b"abcd", 6));
+        assert_eq!(tail.as_slice(), b"abcd");
+
+        assert!(append_bounded_tail(&mut tail, b"efgh", 6));
+        assert_eq!(tail.as_slice(), b"cdefgh");
+
+        assert!(append_bounded_tail(&mut tail, b"ijklmnop", 6));
+        assert_eq!(tail.as_slice(), b"klmnop");
     }
 
     // Asserts the encoded mp4 has a stream of `kind` ("a" audio / "v" video).
