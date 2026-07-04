@@ -333,6 +333,51 @@ fn media_leaf_probe_seam_is_injectable() {
     assert_eq!(Subtitle::builder().text("t").build().duration(), None);
 }
 
+// `TimeBox` — the timeless-side `SizedBox`'s temporal twin: a leaf with no
+// output of its own, just an explicit `duration`.
+#[test]
+fn time_box_reports_the_given_duration() {
+    let time_box = TimeBox::builder().duration(2.5).build();
+    assert_eq!(time_box.duration(), Some(2.5));
+    assert_eq!(time_box.measure(), Some(2.5));
+}
+
+#[test]
+fn time_box_arrangement_spans_its_duration_from_the_offset() {
+    let node = TimeBox::builder().duration(1.5).build().arrangement(10.0);
+    assert_eq!(node.kind, NodeKind::Timeline);
+    assert_eq!(node.start, 10.0);
+    assert_eq!(node.end, 11.5);
+    assert!(node.children.is_empty());
+}
+
+// A `TimeBox` gives a `Timeline` an explicit length exactly the way
+// `DialogueDuration` did in the ported source (`.sketch`-style: a non-fill
+// child with no media/visual of its own, just to set the container span).
+#[test]
+fn time_box_gives_a_timeline_an_explicit_length() {
+    let tl = Timeline::builder()
+        .child(TimeBox::builder().duration(4.0).build().at(0.0))
+        .build();
+    assert_eq!(tl.measure(), Some(4.0));
+    let resolved = resolve(tl).expect("windowed, not timeless");
+    assert_eq!(resolved.duration(), 4.0);
+}
+
+// A `TimeBox` is an ordinary `TimelineComponent`, so it can anchor a
+// `.trigger_at_end(..)` like any other clip a `Sequence` positions.
+#[test]
+fn time_box_can_carry_a_trigger() {
+    use crate::timeline_component::{Event, Triggers};
+
+    let e = Event::new();
+    let triggered = TimeBox::builder().duration(3.0).build().trigger_at_end(e);
+    let mut ctx = ResolveCtx::new();
+    triggered.resolve(2.0, &mut ctx);
+    let table = ctx.into_triggers();
+    assert_eq!(table.get(e.id()).seconds(), 5.0);
+}
+
 // The complete builders satisfy `TimelineBuilder` (the marker bound), so the
 // buildless `.child(..)` / `.at(..)` / `.fill()` paths work.
 #[test]
