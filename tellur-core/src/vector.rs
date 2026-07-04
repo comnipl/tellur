@@ -332,6 +332,9 @@ impl Fill {
 pub struct Stroke {
     pub paint: Paint,
     pub width: f32,
+    /// Optional dash pattern (SVG `stroke-dasharray`/`stroke-dashoffset`
+    /// equivalent). `None` strokes solid.
+    pub dash: Option<DashPattern>,
 }
 
 impl Stroke {
@@ -339,12 +342,63 @@ impl Stroke {
         Self {
             paint: paint.into(),
             width,
+            dash: None,
         }
     }
 
     /// `true` iff this stroke can produce visible ink.
     pub fn is_visible(&self) -> bool {
         self.width > 0.0 && self.paint.is_visible()
+    }
+
+    /// Returns this stroke with the given dash pattern.
+    pub fn with_dash(mut self, dash: DashPattern) -> Self {
+        self.dash = Some(dash);
+        self
+    }
+}
+
+/// A dash pattern for [`Stroke`], mirroring SVG's `stroke-dasharray` /
+/// `stroke-dashoffset`: `lengths` alternates visible ("on") and gap ("off")
+/// run lengths in logical units, starting `offset` units into the pattern.
+///
+/// An odd number of lengths is a valid SVG dasharray (it is conceptually
+/// repeated once so the pattern still alternates on/off) — renderers should
+/// read the pattern through [`DashPattern::normalized_lengths`] rather than
+/// `lengths` directly, so they see the doubled, always-even sequence.
+#[derive(Debug, Clone, Keyable)]
+pub struct DashPattern {
+    pub lengths: Vec<f32>,
+    pub offset: f32,
+}
+
+impl DashPattern {
+    pub fn new(lengths: impl Into<Vec<f32>>, offset: f32) -> Self {
+        Self {
+            lengths: lengths.into(),
+            offset,
+        }
+    }
+
+    /// `lengths`, doubled if its length is odd (SVG's `stroke-dasharray`
+    /// rule) so the result always alternates on/off. `None` if the pattern
+    /// cannot draw any dashes: empty, containing a negative run length, or
+    /// summing to zero.
+    pub fn normalized_lengths(&self) -> Option<Vec<f32>> {
+        if self.lengths.is_empty() || self.lengths.iter().any(|&len| len < 0.0) {
+            return None;
+        }
+        let total: f32 = self.lengths.iter().sum();
+        if total <= 0.0 {
+            return None;
+        }
+        if self.lengths.len() % 2 == 0 {
+            Some(self.lengths.clone())
+        } else {
+            let mut doubled = self.lengths.clone();
+            doubled.extend_from_slice(&self.lengths);
+            Some(doubled)
+        }
     }
 }
 
@@ -405,7 +459,11 @@ impl From<Color> for Option<Fill> {
 impl From<Paint> for Stroke {
     fn from(paint: Paint) -> Self {
         // Default stroke width mirrors SVG's `stroke-width="1"`.
-        Self { paint, width: 1.0 }
+        Self {
+            paint,
+            width: 1.0,
+            dash: None,
+        }
     }
 }
 
@@ -461,6 +519,7 @@ mod tests {
             Some(Stroke {
                 paint: Paint::Solid(color),
                 width: 1.0,
+                dash: None,
             })
         );
     }
@@ -601,5 +660,59 @@ mod tests {
         };
         assert!(path.fill.is_none());
         assert!(path.stroke.is_some());
+    }
+
+    #[test]
+    fn stroke_new_has_no_dash() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0);
+        assert_eq!(stroke.dash, None);
+
+        let dashed = stroke.with_dash(DashPattern::new(vec![4.0, 2.0], 0.0));
+        assert!(dashed.dash.is_some());
+    }
+
+    #[test]
+    fn even_length_dash_pattern_is_unchanged() {
+        let dash = DashPattern::new(vec![4.0, 2.0, 1.0, 2.0], 0.0);
+        assert_eq!(dash.normalized_lengths(), Some(vec![4.0, 2.0, 1.0, 2.0]));
+    }
+
+    #[test]
+    fn odd_length_dash_pattern_is_doubled() {
+        // SVG's `stroke-dasharray` rule: an odd count is conceptually
+        // repeated once so the pattern still alternates on/off.
+        let dash = DashPattern::new(vec![18.0], 0.0);
+        assert_eq!(dash.normalized_lengths(), Some(vec![18.0, 18.0]));
+
+        let dash = DashPattern::new(vec![10.0, 5.0, 3.0], 0.0);
+        assert_eq!(
+            dash.normalized_lengths(),
+            Some(vec![10.0, 5.0, 3.0, 10.0, 5.0, 3.0])
+        );
+    }
+
+    #[test]
+    fn degenerate_dash_patterns_normalize_to_none() {
+        assert_eq!(DashPattern::new(vec![], 0.0).normalized_lengths(), None);
+        assert_eq!(
+            DashPattern::new(vec![0.0, 0.0], 0.0).normalized_lengths(),
+            None
+        );
+        assert_eq!(
+            DashPattern::new(vec![-1.0, 2.0], 0.0).normalized_lengths(),
+            None
+        );
+    }
+
+    #[test]
+    fn strokes_with_different_dash_patterns_compare_unequal() {
+        let solid = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0);
+        let dashed = solid
+            .clone()
+            .with_dash(DashPattern::new(vec![4.0, 2.0], 0.0));
+        assert_ne!(solid, dashed);
+
+        let same_dash = solid.with_dash(DashPattern::new(vec![4.0, 2.0], 0.0));
+        assert_eq!(dashed, same_dash);
     }
 }

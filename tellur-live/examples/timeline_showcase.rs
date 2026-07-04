@@ -125,6 +125,7 @@ fn stroke_rect(cx: f32, cy: f32, w: f32, h: f32, c: Color, width: f32) -> Positi
         .stroke(Stroke {
             paint: Paint::Solid(c),
             width,
+            dash: None,
         })
         .place_at(Vec2(cx - w * 0.5, cy - h * 0.5))
 }
@@ -144,6 +145,7 @@ fn stroke_circle(cx: f32, cy: f32, r: f32, c: Color, width: f32) -> Positioned {
         .stroke(Stroke {
             paint: Paint::Solid(c),
             width,
+            dash: None,
         })
         .place_at(Vec2(cx - r, cy - r))
 }

@@ -4,7 +4,9 @@ use tellur_core::color::Color;
 use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::RenderContext;
-use tellur_core::vector::{Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic};
+use tellur_core::vector::{
+    DashPattern, Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic,
+};
 
 /// A `RasterComponent` that rasterizes a `VectorComponent`. The layout
 /// protocol forwards to the wrapped vector: layout / paint_bounds /
@@ -224,10 +226,20 @@ fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Tr
         apply_paint(&mut paint, &stroke.paint);
         let skia_stroke = tiny_skia::Stroke {
             width: stroke.width,
+            dash: to_skia_dash(stroke.dash.as_ref()),
             ..Default::default()
         };
         pixmap.stroke_path(&skia_path, &paint, &skia_stroke, xform, None);
     }
+}
+
+/// Converts a [`DashPattern`] to tiny-skia's stroke-time dashing. `None` both
+/// when there is no pattern and when the pattern cannot draw any dashes (see
+/// [`DashPattern::normalized_lengths`]) — either way the stroke draws solid.
+fn to_skia_dash(dash: Option<&DashPattern>) -> Option<tiny_skia::StrokeDash> {
+    let dash = dash?;
+    let lengths = dash.normalized_lengths()?;
+    tiny_skia::StrokeDash::new(lengths, dash.offset)
 }
 
 fn build_skia_path(commands: &[PathCommand]) -> Option<tiny_skia::Path> {
@@ -271,3 +283,102 @@ fn to_skia_transform(t: &Transform) -> tiny_skia::Transform {
 
 // The compile-time dyn-safety guarantee for `Rasterize` is covered by the
 // `const _: Option<&dyn RasterComponent> = None;` assertion in `RasterComponent`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tellur_core::geometry::Rect;
+
+    fn alpha_at(image: &RasterImage, x: u32, y: u32, width: u32) -> u8 {
+        let cpu = image
+            .as_cpu()
+            .expect("rasterize() always returns a CPU image");
+        cpu.pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn to_skia_dash_is_none_without_a_pattern() {
+        assert!(to_skia_dash(None).is_none());
+    }
+
+    #[test]
+    fn to_skia_dash_is_none_for_a_degenerate_pattern() {
+        let dash = DashPattern::new(vec![0.0, 0.0], 0.0);
+        assert!(to_skia_dash(Some(&dash)).is_none());
+    }
+
+    #[test]
+    fn to_skia_dash_builds_from_a_valid_pattern() {
+        let dash = DashPattern::new(vec![4.0, 4.0], 0.0);
+        assert!(to_skia_dash(Some(&dash)).is_some());
+    }
+
+    #[test]
+    fn dashed_stroke_leaves_gaps_along_the_line() {
+        // 4-on/4-off dashes along a horizontal line spanning the full
+        // 20x10 view box (1 logical unit == 1 pixel, so sampled x positions
+        // land squarely inside a dash or a gap).
+        let stroke = tellur_core::vector::Stroke {
+            paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+            width: 2.0,
+            dash: Some(DashPattern::new(vec![4.0, 4.0], 0.0)),
+        };
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(20.0, 10.0),
+            },
+            root: Node::Path(Path {
+                commands: vec![
+                    PathCommand::MoveTo(Vec2(0.0, 5.0)),
+                    PathCommand::LineTo(Vec2(20.0, 5.0)),
+                ],
+                fill: None,
+                stroke: Some(stroke),
+                transform: Transform::IDENTITY,
+            }),
+        };
+
+        let image = rasterize(&graphic, 20, 10);
+        assert!(
+            alpha_at(&image, 2, 5, 20) > 0,
+            "x=2 sits inside the first dash (0..4)"
+        );
+        assert_eq!(
+            alpha_at(&image, 6, 5, 20),
+            0,
+            "x=6 sits inside the first gap (4..8)"
+        );
+        assert!(
+            alpha_at(&image, 10, 5, 20) > 0,
+            "x=10 sits inside the second dash (8..12)"
+        );
+    }
+
+    #[test]
+    fn undashed_stroke_paints_the_whole_line() {
+        let stroke = tellur_core::vector::Stroke {
+            paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+            width: 2.0,
+            dash: None,
+        };
+        let graphic = VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size: Vec2(20.0, 10.0),
+            },
+            root: Node::Path(Path {
+                commands: vec![
+                    PathCommand::MoveTo(Vec2(0.0, 5.0)),
+                    PathCommand::LineTo(Vec2(20.0, 5.0)),
+                ],
+                fill: None,
+                stroke: Some(stroke),
+                transform: Transform::IDENTITY,
+            }),
+        };
+
+        let image = rasterize(&graphic, 20, 10);
+        assert!(alpha_at(&image, 6, 5, 20) > 0, "a solid stroke has no gaps");
+    }
+}
