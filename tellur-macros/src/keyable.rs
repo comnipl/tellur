@@ -301,7 +301,7 @@ fn eq_for(ty: &Type, a: &TokenStream2, b: &TokenStream2) -> TokenStream2 {
         return quote!( #a == #b );
     }
     match classify(ty) {
-        Shape::Float(_) => quote!( #a.to_bits() == #b.to_bits() ),
+        Shape::Float(_) => quote!( (#a).to_bits() == (#b).to_bits() ),
         Shape::Opt(inner) => {
             let inner = eq_for(inner, &quote!(__a), &quote!(__b));
             quote!(
@@ -314,9 +314,15 @@ fn eq_for(ty: &Type, a: &TokenStream2, b: &TokenStream2) -> TokenStream2 {
         }
         Shape::Seq(inner) => {
             let inner = eq_for(inner, &quote!(__a), &quote!(__b));
+            // `a`/`b` may themselves be a `&expr` token stream (e.g. the
+            // struct-level `&self.field`), so parenthesize before chaining a
+            // method call — an unparenthesized `#a.iter()` splices to
+            // `&self.field.iter()`, which parses as `&(self.field.iter())`
+            // (method calls bind tighter than a prefix `&`) instead of
+            // `(&self.field).iter()`.
             quote!(
-                #a.len() == #b.len()
-                    && #a.iter().zip(#b.iter()).all(|(__a, __b)| #inner)
+                (#a).len() == (#b).len()
+                    && (#a).iter().zip((#b).iter()).all(|(__a, __b)| #inner)
             )
         }
         Shape::Tuple(elems) => {
@@ -359,9 +365,13 @@ fn hash_for(ty: &Type, v: &TokenStream2, state: &TokenStream2) -> TokenStream2 {
         }
         Shape::Seq(inner) => {
             let inner = hash_for(inner, &quote!(__v), state);
+            // See the matching note in `eq_for`'s `Shape::Seq` arm: `v` must
+            // be parenthesized before `.len()`/`.iter()` or an unparenthesized
+            // `&self.field.iter()` parses as `&(self.field.iter())` — a
+            // reference to an iterator, which is not itself an `Iterator`.
             quote!(
-                ::core::hash::Hash::hash(&#v.len(), #state);
-                for __v in #v.iter() { #inner }
+                ::core::hash::Hash::hash(&(#v).len(), #state);
+                for __v in (#v).iter() { #inner }
             )
         }
         Shape::Tuple(elems) => {
