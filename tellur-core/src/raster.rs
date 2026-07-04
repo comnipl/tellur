@@ -13,6 +13,7 @@ use crate::color::Color;
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Constraints, Rect, Vec2};
 use crate::render_context::{CachePolicy, RenderContext};
+use crate::scalar::clamp_unit;
 use crate::Keyable;
 
 #[derive(Debug, Clone)]
@@ -365,6 +366,85 @@ fn color_rgba8(color: Color) -> [u8; 4] {
     ]
 }
 
+/// A [`RasterComponent`] that fades its child to `opacity` of full alpha.
+///
+/// Raster counterpart of [`Transformed::opacity`](crate::vector::Transformed::opacity):
+/// `layout` and `paint_bounds` forward to the child unchanged, since fading
+/// never changes layout or the painted extent. `render` renders the child
+/// through `ctx` (so the child keeps its own cache slot), and — only when
+/// `opacity < 1.0` — reads the result back to CPU and scales every pixel's
+/// straight alpha channel. RGB channels are left untouched, since
+/// [`PixelFormat::Rgba8`] is non-premultiplied; the rounding matches the
+/// fixed-point scheme used throughout this crate's compositing
+/// (`(a * opacity_u16 + 127) / 255`).
+///
+/// `opacity` is clamped to `[0, 1]` at render time (out-of-range values and
+/// `NaN` behave as their clamped equivalent); the field itself is stored as
+/// authored so cache keys stay bit-exact with what was requested.
+///
+/// TODO(gpu-opacity): this always reads the child back to CPU once
+/// `opacity < 1.0`. A `GpuRasterBackend` hook for a shader-side alpha
+/// multiply (mirroring `composite` / `solid_fill`) would let a GPU-resident
+/// child stay on the GPU; add a `ctx.gpu_backend()` branch here, the same way
+/// [`Background::render`] does, once that hook exists.
+#[crate::component(raster)]
+#[derive(Keyable)]
+pub struct Opacity {
+    #[builder(default = 1.0)]
+    pub opacity: f32,
+    #[effect]
+    #[builder(into)]
+    pub child: Box<dyn RasterComponent>,
+}
+
+impl RasterComponent for Opacity {
+    fn layout(&self, constraints: Constraints) -> Vec2 {
+        self.child.layout(constraints)
+    }
+
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        self.child.paint_bounds(size)
+    }
+
+    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+        let rendered = ctx.render(self.child.as_ref(), size, target);
+        let alpha = clamp_unit(self.opacity);
+        if alpha >= 1.0 {
+            // Full opacity is a no-op: skip the readback entirely so a
+            // GPU-resident child image stays on the GPU untouched.
+            return rendered;
+        }
+
+        let mut image = ctx.readback(rendered);
+        assert_eq!(
+            image.format,
+            PixelFormat::Rgba8,
+            "Opacity only supports straight-alpha Rgba8 images",
+        );
+
+        let alpha_u16 = (alpha * 255.0).round() as u16;
+        let mut pixels = image.pixels.to_vec();
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = ((pixel[3] as u16 * alpha_u16 + 127) / 255) as u8;
+        }
+        image.pixels = pixels.into();
+        RasterImage::Cpu(image)
+    }
+}
+
+/// Extension trait adding opacity wrapping to raster components, mirroring
+/// [`VectorTransform`](crate::vector::VectorTransform) on the vector side.
+pub trait RasterTransform: RasterComponent + Sized + 'static {
+    fn opacity(self, opacity: f32) -> Opacity {
+        Opacity {
+            opacity,
+            child: Box::new(self),
+        }
+    }
+}
+
+impl<T: RasterComponent + 'static> RasterTransform for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,6 +484,139 @@ mod tests {
     fn complete_background_builder_boxes_as_raster_component() {
         let _boxed: Box<dyn RasterComponent> =
             Background::builder().color(Color::rgb_u8(1, 2, 3)).into();
+    }
+
+    #[derive(PartialEq, Hash)]
+    struct SolidAlpha {
+        rgba: [u8; 4],
+    }
+
+    impl RasterComponent for SolidAlpha {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(2.0, 2.0))
+        }
+
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            let pixels = (target.width as usize) * (target.height as usize);
+            let mut buf = Vec::with_capacity(pixels * 4);
+            for _ in 0..pixels {
+                buf.extend_from_slice(&self.rgba);
+            }
+            RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
+        }
+    }
+
+    #[test]
+    fn opacity_scales_alpha_channel_only() {
+        let solid = SolidAlpha {
+            rgba: [200, 100, 50, 255],
+        };
+        let faded = solid.opacity(0.5);
+        let mut ctx = PassThrough;
+        let image = faded
+            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+            .into_cpu()
+            .expect("opacity renders on CPU");
+
+        for pixel in image.pixels.chunks_exact(4) {
+            assert_eq!(
+                &pixel[..3],
+                &[200, 100, 50],
+                "RGB must stay untouched under straight (non-premultiplied) alpha"
+            );
+            assert_eq!(
+                pixel[3], 128,
+                "alpha scaled by 0.5 with (a * alpha_u16 + 127) / 255 rounding"
+            );
+        }
+    }
+
+    #[test]
+    fn opacity_clamps_out_of_range_and_nan() {
+        let solid = SolidAlpha {
+            rgba: [1, 2, 3, 200],
+        };
+        let mut ctx = PassThrough;
+
+        let over = solid.opacity(2.0).render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
+        assert_eq!(over.as_cpu().unwrap().pixels[3], 200, "opacity > 1 clamps to 1 (no-op)");
+
+        let solid = SolidAlpha {
+            rgba: [1, 2, 3, 200],
+        };
+        let nan = solid
+            .opacity(f32::NAN)
+            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
+        assert_eq!(nan.as_cpu().unwrap().pixels[3], 0, "NaN opacity clamps to 0");
+    }
+
+    /// A `RenderContext` stub that always answers `render` with a GPU-tagged
+    /// image, regardless of the requested component, and panics if
+    /// `readback` is ever called. Used to prove that `Opacity::render` skips
+    /// the readback path entirely at full opacity.
+    struct GpuOnlyContext {
+        readback_calls: usize,
+    }
+
+    impl RenderContext for GpuOnlyContext {
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+
+        fn render(
+            &mut self,
+            _component: &dyn RasterComponent,
+            _size: Vec2,
+            target: Resolution,
+        ) -> RasterImage {
+            RasterImage::Gpu(GpuSurface::new(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                "test",
+                std::sync::Arc::new(()),
+            ))
+        }
+
+        fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
+            self.readback_calls += 1;
+            match image {
+                RasterImage::Cpu(image) => image,
+                RasterImage::Gpu(_) => panic!("test stub cannot read back GPU images"),
+            }
+        }
+    }
+
+    #[test]
+    fn opacity_one_skips_readback_and_leaves_gpu_image_untouched() {
+        let mut ctx = GpuOnlyContext { readback_calls: 0 };
+        let faded = SolidAlpha { rgba: [0, 0, 0, 0] }.opacity(1.0);
+
+        let image = faded.render(Vec2(1.0, 1.0), Resolution::new(1, 1), &mut ctx);
+
+        assert!(matches!(image, RasterImage::Gpu(_)));
+        assert_eq!(ctx.readback_calls, 0);
+    }
+
+    #[test]
+    fn raster_transform_opacity_sets_the_field() {
+        let faded = Background::new(Color::rgb_u8(4, 5, 6)).opacity(0.75);
+        assert_eq!(faded.opacity, 0.75);
+    }
+
+    #[test]
+    fn raster_builder_transform_opacity_sets_the_field() {
+        use crate::builder::RasterBuilderTransform;
+
+        let faded = Background::builder()
+            .color(Color::rgb_u8(1, 2, 3))
+            .opacity(0.3);
+        assert_eq!(faded.opacity, 0.3);
     }
 
     fn sample_image() -> CpuRasterImage {
