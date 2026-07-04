@@ -392,7 +392,7 @@ impl DashPattern {
         if total <= 0.0 {
             return None;
         }
-        if self.lengths.len() % 2 == 0 {
+        if self.lengths.len().is_multiple_of(2) {
             Some(self.lengths.clone())
         } else {
             let mut doubled = self.lengths.clone();
