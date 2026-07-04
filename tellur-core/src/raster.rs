@@ -3,7 +3,9 @@ use std::fmt;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Cursor, Seek, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,14 +24,111 @@ pub enum RasterImage {
     Gpu(GpuSurface),
 }
 
+/// Identifies one pixel-storage allocation, assigned once when it's created
+/// (in [`CpuRasterImage::new`]) from a global monotonic counter.
+///
+/// A raw `Bytes` pointer looks like a stable identity but isn't: once the
+/// last clone of a `Bytes` drops, its allocation can be freed and a later,
+/// unrelated allocation can land at the exact same address (ABA). A
+/// `PixelStorageId` is never reused, so two `CpuRasterImage`s compare equal
+/// under this only when one was cloned from the other (or from a common
+/// ancestor) — never merely because they happen to share an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PixelStorageId(u64);
+
+impl PixelStorageId {
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Pixel storage for a [`CpuRasterImage`]: a `Bytes` allocation paired with
+/// the [`PixelStorageId`] minted for it.
+///
+/// The pairing — not a sibling field on `CpuRasterImage` — is what makes the
+/// id trustworthy: every route to a `PixelBytes` value is a `From` impl
+/// below, and each one mints a fresh id. So the common
+/// `image.pixels = new_pixels.into()` mutation pattern (in-place alpha
+/// multiply, etc. — see `Opacity::render`) can never leave a stale id
+/// paired with new content, which a plain `Bytes` field plus a separate id
+/// field on `CpuRasterImage` would allow (the assignment overwrites
+/// `pixels` but not the sibling id).
+///
+/// Derefs to `Bytes` so existing read-only call sites (`.len()`, `.as_ref()`,
+/// `.to_vec()`, `.chunks_exact(_)`, passing `&image.pixels` where `&[u8]` is
+/// expected, ...) keep working unchanged.
+#[derive(Debug, Clone)]
+pub struct PixelBytes {
+    bytes: Bytes,
+    id: PixelStorageId,
+}
+
+impl PixelBytes {
+    /// Identity of this allocation. Stable across `clone()`; distinct from
+    /// every other allocation, including ones the allocator later places at
+    /// the same address.
+    pub fn id(&self) -> PixelStorageId {
+        self.id
+    }
+
+    pub fn into_inner(self) -> Bytes {
+        self.bytes
+    }
+}
+
+impl From<Bytes> for PixelBytes {
+    fn from(bytes: Bytes) -> Self {
+        Self {
+            bytes,
+            id: PixelStorageId::next(),
+        }
+    }
+}
+
+impl From<Vec<u8>> for PixelBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Bytes::from(bytes).into()
+    }
+}
+
+impl Deref for PixelBytes {
+    type Target = Bytes;
+
+    fn deref(&self) -> &Bytes {
+        &self.bytes
+    }
+}
+
+impl AsRef<[u8]> for PixelBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
+// Content-based, deliberately ignoring `id`: two allocations with identical
+// bytes should still compare equal, exactly as plain `Bytes` would.
+impl PartialEq for PixelBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+}
+
+impl Eq for PixelBytes {}
+
+impl Hash for PixelBytes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.bytes.hash(state);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RasterStorageId {
     Cpu {
         width: u32,
         height: u32,
         format: PixelFormat,
-        ptr: usize,
-        len: usize,
+        id: PixelStorageId,
     },
     Gpu {
         width: u32,
@@ -42,12 +141,7 @@ pub(crate) enum RasterStorageId {
 
 impl RasterImage {
     pub fn cpu(width: u32, height: u32, format: PixelFormat, pixels: impl Into<Bytes>) -> Self {
-        Self::Cpu(CpuRasterImage {
-            width,
-            height,
-            format,
-            pixels: pixels.into(),
-        })
+        Self::Cpu(CpuRasterImage::new(width, height, format, pixels))
     }
 
     pub fn width(&self) -> u32 {
@@ -94,9 +188,7 @@ impl RasterImage {
     /// pixels in distinct buffers also compare `false`.
     pub fn shares_storage(&self, other: &RasterImage) -> bool {
         match (self, other) {
-            (Self::Cpu(a), Self::Cpu(b)) => {
-                a.pixels.len() == b.pixels.len() && a.pixels.as_ptr() == b.pixels.as_ptr()
-            }
+            (Self::Cpu(a), Self::Cpu(b)) => a.storage_id() == b.storage_id(),
             (Self::Gpu(a), Self::Gpu(b)) => {
                 // Compare the Arc data pointers as thin pointers so the
                 // (non-unique) trait-object vtable half never participates.
@@ -115,8 +207,7 @@ impl RasterImage {
                 width: image.width,
                 height: image.height,
                 format: image.format,
-                ptr: image.pixels.as_ptr() as usize,
-                len: image.pixels.len(),
+                id: image.storage_id(),
             },
             Self::Gpu(surface) => RasterStorageId::Gpu {
                 width: surface.width,
@@ -141,12 +232,16 @@ impl From<GpuSurface> for RasterImage {
     }
 }
 
+// `PixelBytes` carries its own content-based `PartialEq`/`Hash` (ignoring the
+// storage id), so deriving here gives `CpuRasterImage` the same "equal iff
+// same width/height/format/content" semantics it had before storage ids
+// existed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CpuRasterImage {
     pub width: u32,
     pub height: u32,
     pub format: PixelFormat,
-    pub pixels: Bytes,
+    pub pixels: PixelBytes,
 }
 
 /// Backend-owned GPU image handle.
@@ -629,6 +724,58 @@ mod tests {
         assert_eq!(faded.opacity, 0.3);
     }
 
+    #[test]
+    fn storage_id_is_unique_per_allocation_even_with_identical_content() {
+        let a = CpuRasterImage::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]);
+        let b = CpuRasterImage::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]);
+
+        // Two independently constructed images never share an id, even when
+        // their content (and, potentially, their address after `a`'s buffer
+        // frees and the allocator reuses the spot for `b`) is identical.
+        // This is what makes a `PixelStorageId`-keyed cache immune to the ABA
+        // collision a raw `pixels.as_ptr()` key was vulnerable to.
+        assert_ne!(a.storage_id(), b.storage_id());
+
+        // But equality/hash semantics are unchanged: content-identical images
+        // still compare equal, exactly as before `storage_id` existed.
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn storage_id_is_shared_by_clone() {
+        let a = CpuRasterImage::new(2, 1, PixelFormat::Rgba8, vec![9, 9, 9, 9, 9, 9, 9, 9]);
+        let cloned = a.clone();
+
+        assert_eq!(a.storage_id(), cloned.storage_id());
+    }
+
+    #[test]
+    fn reassigning_pixels_after_clone_mints_a_fresh_id() {
+        // Mirrors the `Opacity`/`SafeZoneOverlay` pattern: read back a cached
+        // image, then locally patch its pixels in place —
+        // `image.pixels = pixels.into()` — and hand the patched copy on
+        // while the original (e.g. still held by a render cache) is
+        // untouched. If the id lived on `CpuRasterImage` as a sibling field
+        // instead of inside `PixelBytes`, this reassignment would silently
+        // leave the *old* id attached to the *new* content, recreating the
+        // exact same-id-different-content hazard the storage id exists to
+        // prevent.
+        let cached = CpuRasterImage::new(1, 1, PixelFormat::Rgba8, vec![1, 2, 3, 4]);
+        let mut local = cached.clone();
+        assert_eq!(cached.storage_id(), local.storage_id());
+
+        let mut pixels = local.pixels.to_vec();
+        pixels[3] = 128;
+        local.pixels = pixels.into();
+
+        assert_ne!(
+            cached.storage_id(),
+            local.storage_id(),
+            "in-place pixel patching must mint a new id, not keep the stale one"
+        );
+        assert_ne!(cached, local);
+    }
+
     fn sample_image() -> CpuRasterImage {
         CpuRasterImage::new(
             2,
@@ -719,8 +866,19 @@ impl CpuRasterImage {
             width,
             height,
             format,
-            pixels: pixels.into(),
+            pixels: PixelBytes::from(pixels.into()),
         }
+    }
+
+    /// Identity of this image's pixel-storage allocation. Stable across
+    /// `clone()`, and across reassigning `self.pixels` from any of the same
+    /// `Bytes`/`Vec<u8>` conversion routes used to construct `Self` (every
+    /// route through [`PixelBytes`]'s `From` impls mints a fresh id, so this
+    /// changes whenever the storage genuinely does); distinct from every
+    /// other allocation, including ones the allocator later places at the
+    /// same address.
+    pub fn storage_id(&self) -> PixelStorageId {
+        self.pixels.id()
     }
 
     /// Loads an image from disk, selecting a decoder from the file extension.
