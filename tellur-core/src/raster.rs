@@ -543,8 +543,14 @@ mod tests {
         };
         let mut ctx = PassThrough;
 
-        let over = solid.opacity(2.0).render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
-        assert_eq!(over.as_cpu().unwrap().pixels[3], 200, "opacity > 1 clamps to 1 (no-op)");
+        let over = solid
+            .opacity(2.0)
+            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
+        assert_eq!(
+            over.as_cpu().unwrap().pixels[3],
+            200,
+            "opacity > 1 clamps to 1 (no-op)"
+        );
 
         let solid = SolidAlpha {
             rgba: [1, 2, 3, 200],
@@ -552,7 +558,11 @@ mod tests {
         let nan = solid
             .opacity(f32::NAN)
             .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
-        assert_eq!(nan.as_cpu().unwrap().pixels[3], 0, "NaN opacity clamps to 0");
+        assert_eq!(
+            nan.as_cpu().unwrap().pixels[3],
+            0,
+            "NaN opacity clamps to 0"
+        );
     }
 
     /// A `RenderContext` stub that always answers `render` with a GPU-tagged
