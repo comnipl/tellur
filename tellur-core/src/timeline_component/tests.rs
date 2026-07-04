@@ -318,6 +318,78 @@ fn unfired_event_elapsed_is_zero() {
 }
 
 #[test]
+fn event_window_unfired_reports_the_before_state_with_a_stable_key() {
+    let e = Event::new();
+    let table = TriggerTable::new();
+    let early = Clock::new(TimelineTime::new(3.0), LocalTime::new(3.0), &table);
+    let late = Clock::new(TimelineTime::new(50.0), LocalTime::new(50.0), &table);
+
+    let w_early = e.window(&early, 0.2..0.9);
+    let w_late = e.window(&late, 0.2..0.9);
+
+    // An unfired (+∞) trigger cannot be shifted into absolute seconds, so the
+    // window reports the same "before it opens" snapshot regardless of `now`
+    // — otherwise it could not be a stable cache-key term (`.sketch/02 §11`).
+    assert_eq!(w_early, w_late);
+    assert_eq!(w_early.phase().get(), 0.0);
+    assert_eq!(w_early.envelope(0.1, 0.1).get(), 0.0);
+}
+
+#[test]
+fn event_window_before_the_trigger_is_clamped_to_start() {
+    let e = Event::new();
+    let mut table = TriggerTable::new();
+    table.record(e, 5.0);
+    // Trigger at 5.0 ⇒ window [5.5, 6.5); `now` = 4.0 is before it opens.
+    let clock = Clock::new(TimelineTime::new(4.0), LocalTime::new(0.0), &table);
+
+    let w = e.window(&clock, 0.5..1.5);
+    assert_eq!(w.phase().get(), 0.0);
+    assert_eq!(w.envelope(0.2, 0.2).get(), 0.0);
+}
+
+#[test]
+fn event_window_inside_tracks_the_trigger_relative_cursor() {
+    let e = Event::new();
+    let mut table = TriggerTable::new();
+    table.record(e, 5.0);
+    // Window [trigger + 0.5, trigger + 1.5) = [5.5, 6.5); `now` = 6.0 is
+    // halfway through.
+    let clock = Clock::new(TimelineTime::new(6.0), LocalTime::new(0.0), &table);
+
+    let w = e.window(&clock, 0.5..1.5);
+    assert!((w.phase().get() - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn event_window_after_is_clamped_to_end_with_a_stable_key() {
+    let e = Event::new();
+    let mut table = TriggerTable::new();
+    table.record(e, 5.0);
+
+    let just_after = Clock::new(TimelineTime::new(7.0), LocalTime::new(0.0), &table);
+    let long_after = Clock::new(TimelineTime::new(500.0), LocalTime::new(0.0), &table);
+
+    let w_just_after = e.window(&just_after, 0.5..1.5);
+    let w_long_after = e.window(&long_after, 0.5..1.5);
+
+    // Both are past the window's close (6.5); the clamped snapshot is
+    // identical however far past, matching `Window::clamped`'s own guarantee
+    // (`clamped_freezes_outside_the_window` in `window.rs`).
+    assert_eq!(w_just_after, w_long_after);
+    assert_eq!(w_just_after.phase().get(), 1.0);
+}
+
+#[test]
+#[should_panic(expected = "Event::window requires a finite range with end > start")]
+fn event_window_rejects_empty_range() {
+    let e = Event::new();
+    let table = TriggerTable::new();
+    let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+    let _ = e.window(&clock, 1.0..1.0);
+}
+
+#[test]
 fn triggered_resolve_records_start_time() {
     let e = Event::new();
     let triggered = Dot.trigger_at_start(e);

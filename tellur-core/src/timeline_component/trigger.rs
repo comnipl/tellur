@@ -3,6 +3,7 @@
 //! (stamps the authoring call site onto the arrangement).
 
 use std::hash::Hash;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::geometry::Vec2;
@@ -10,6 +11,7 @@ use crate::phase::Phase;
 use crate::raster::{RasterImage, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::Time;
+use crate::window::Window;
 
 use super::*;
 
@@ -115,6 +117,42 @@ impl Event {
             return 0.0;
         }
         (clock.global().seconds() - trigger).max(0.0)
+    }
+
+    /// A [`Window`] over `[trigger + range.start, trigger + range.end)`,
+    /// already [`clamped`](Window::clamped) — the event-relative twin of
+    /// [`crate::time::Time::window`], for staggering sub-events
+    /// ([`Window::sub_secs`]) or reading elapsed/remaining seconds off a
+    /// single trigger-anchored interval instead of composing them from
+    /// [`Event::phase`] / [`Event::elapsed`] by hand.
+    ///
+    /// Returning the clamped snapshot (not the live cursor) directly is what
+    /// makes this safe to store in a component field: like
+    /// [`Window::clamped`], the snapshot is constant at `(start, end, start)`
+    /// before the window opens and constant at `(start, end, end)` once it
+    /// closes, so it is a frame-stable cache-key term the same way a
+    /// saturating [`Phase`] is (`.sketch/02 §11`).
+    ///
+    /// An unfired event (trigger at `+∞`) cannot be shifted into absolute
+    /// seconds, so it reports the "before the window" snapshot directly —
+    /// `range.start` doubling as its own anchor, cursor pinned to
+    /// `range.start` (phase `0`, matching [`Event::phase`]'s `+∞` short
+    /// circuit) — rather than propagating `+∞`/`NaN` or panicking. That
+    /// snapshot does not depend on the current time, so it stays stable
+    /// across every frame the event remains unfired, exactly like the
+    /// post-close snapshot stays stable across every frame after firing.
+    pub fn window(&self, clock: &Clock<'_>, range: Range<f32>) -> Window {
+        assert!(
+            range.start.is_finite() && range.end.is_finite() && range.end > range.start,
+            "Event::window requires a finite range with end > start"
+        );
+        let trigger = clock.trigger_of(*self).seconds();
+        if trigger.is_infinite() {
+            return Window::new(range.start, range.end, range.start);
+        }
+        let start = trigger + range.start;
+        let end = trigger + range.end;
+        Window::new(start, end, clock.global().seconds()).clamped()
     }
 }
 
