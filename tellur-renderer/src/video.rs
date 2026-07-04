@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use tellur_core::raster::{PixelFormat, Resolution};
-use tellur_core::render_context::RenderContext;
+use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::ResolvedTimeline;
@@ -122,6 +122,7 @@ pub struct FfmpegEncoder {
     args: Vec<String>,
     progress: bool,
     color_range: ColorRange,
+    gpu_preference: GpuPreference,
 }
 
 #[derive(Debug, Error)]
@@ -160,6 +161,7 @@ impl FfmpegEncoder {
             args: Vec::new(),
             progress: true,
             color_range: ColorRange::default(),
+            gpu_preference: GpuPreference::default(),
         }
     }
 
@@ -170,6 +172,16 @@ impl FfmpegEncoder {
     /// [`ColorRange::Limited`] when a downstream target requires TV range.
     pub fn color_range(mut self, range: ColorRange) -> Self {
         self.color_range = range;
+        self
+    }
+
+    /// Selects how aggressively the render context should prefer GPU work.
+    /// Defaults to [`GpuPreference::Auto`]. Pass [`GpuPreference::Disabled`]
+    /// to force deterministic CPU-only rendering — useful for regression
+    /// baselines that must reproduce bit-for-bit across machines, and for
+    /// bisecting whether a visual difference comes from the GPU backend.
+    pub fn gpu_preference(mut self, preference: GpuPreference) -> Self {
+        self.gpu_preference = preference;
         self
     }
 
@@ -208,7 +220,7 @@ impl FfmpegEncoder {
 
         // No audio input for the old path: pass no extra args, so the command
         // is byte-identical to the pre-step-8 behaviour.
-        let mut ctx = CachingRenderContext::new();
+        let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         self.drive_ffmpeg(&[], total_frames, out, |frame_idx| {
             let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
             let image = tl.build(t, self.resolution, &mut ctx);
@@ -280,7 +292,7 @@ impl FfmpegEncoder {
             "1:a:0".to_string(),
         ];
 
-        let mut ctx = CachingRenderContext::new();
+        let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         let result = self.drive_ffmpeg(&audio_args, total_frames, out, |frame_idx| {
             let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
             let image = resolved
@@ -875,6 +887,16 @@ mod av_mux_tests {
         assert_eq!(&bytes[48..52], &(-2.0_f32).to_le_bytes());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gpu_preference_defaults_to_auto_and_is_overridable() {
+        let default = FfmpegEncoder::new(Resolution::new(64, 64), 24);
+        assert_eq!(default.gpu_preference, GpuPreference::Auto);
+
+        let forced =
+            FfmpegEncoder::new(Resolution::new(64, 64), 24).gpu_preference(GpuPreference::Disabled);
+        assert_eq!(forced.gpu_preference, GpuPreference::Disabled);
     }
 
     #[test]

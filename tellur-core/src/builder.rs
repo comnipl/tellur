@@ -25,7 +25,7 @@ use std::hash::Hash;
 use crate::geometry::{Anchor, Constraints, Transform, Vec2};
 use crate::layout::{raster::Flexible as RasterFlexible, Flexible};
 use crate::placement::{raster::Positioned as RasterPositioned, Positioned};
-use crate::raster::RasterComponent;
+use crate::raster::{Opacity, RasterComponent, RasterTransform};
 use crate::vector::{Transformed, VectorComponent, VectorTransform};
 
 /// Implemented (by the component macro) for a *complete* builder of a
@@ -118,6 +118,15 @@ pub trait RasterBuilderPlacement: RasterBuilder {
 }
 
 impl<B: RasterBuilder> RasterBuilderPlacement for B {}
+
+/// Raster counterpart of [`VectorBuilderTransform`].
+pub trait RasterBuilderTransform: RasterBuilder {
+    fn opacity(self, opacity: f32) -> Opacity {
+        self.build_component().opacity(opacity)
+    }
+}
+
+impl<B: RasterBuilder> RasterBuilderTransform for B {}
 
 /// Raster counterpart of [`VectorBuilderFlex`].
 pub trait RasterBuilderFlex: RasterBuilder {
