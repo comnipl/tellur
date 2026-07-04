@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod builder;
 pub mod cache_budget;
+pub mod clip;
 pub mod color;
 pub mod composite;
 pub mod dyn_compare;

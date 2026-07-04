@@ -14,7 +14,8 @@ use tellur_core::render_context::{
     CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
 };
 use tellur_core::vector::{
-    ClipGroup as TellurClipGroup, Node, Paint, Path as TellurPath, PathCommand, VectorGraphic,
+    ClipGroup as TellurClipGroup, DashPattern, Node, Paint, Path as TellurPath, PathCommand,
+    VectorGraphic,
 };
 use vello::kurbo::{Affine, BezPath, Rect as VelloRect, Stroke as VelloStroke};
 use wgpu::util::DeviceExt;
@@ -1417,18 +1418,28 @@ fn encode_vello_path(
     if let Some(stroke) = &path.stroke {
         if stroke.width > 0.0 {
             if let Some(paint) = to_vello_color(&stroke.paint, opacity) {
-                scene.stroke(
-                    &VelloStroke::new(stroke.width as f64),
-                    transform,
-                    paint,
-                    None,
-                    &vello_path,
-                );
+                let vello_stroke =
+                    apply_dash(VelloStroke::new(stroke.width as f64), stroke.dash.as_ref());
+                scene.stroke(&vello_stroke, transform, paint, None, &vello_path);
             }
         }
     }
 
     Some(())
+}
+
+/// Applies a [`DashPattern`] to a [`VelloStroke`], mirroring
+/// `rasterize.rs`'s `to_skia_dash` so the GPU (vello) and CPU (tiny-skia)
+/// backends draw identical dashes. `None`/an unusable pattern (see
+/// [`DashPattern::normalized_lengths`]) leaves the stroke solid.
+fn apply_dash(stroke: VelloStroke, dash: Option<&DashPattern>) -> VelloStroke {
+    let Some(dash) = dash else {
+        return stroke;
+    };
+    let Some(lengths) = dash.normalized_lengths() else {
+        return stroke;
+    };
+    stroke.with_dashes(dash.offset as f64, lengths.into_iter().map(f64::from))
 }
 
 fn build_vello_path(commands: &[PathCommand]) -> Option<BezPath> {
@@ -2459,6 +2470,7 @@ mod tests {
                                 stroke: Some(Stroke {
                                     paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
                                     width: 4.0,
+                                    dash: None,
                                 }),
                                 transform: Transform::IDENTITY,
                             })),

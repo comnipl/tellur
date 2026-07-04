@@ -614,6 +614,7 @@ fn write_stroke(path: &Path, fallback_stroke_width: f32) -> Option<Stroke> {
         .map(|fill| Stroke {
             paint: fill.paint.clone(),
             width: fallback_stroke_width,
+            dash: None,
         })
         .filter(|stroke| stroke.is_visible())
 }
@@ -1176,6 +1177,7 @@ mod tests {
             Some(Stroke {
                 paint: paint(),
                 width: DEFAULT_STROKE_WIDTH,
+                dash: None,
             })
         );
         assert_eq!(path.transform, Transform::IDENTITY);

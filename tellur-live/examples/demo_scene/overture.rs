@@ -135,6 +135,7 @@ pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
                 .stroke(Stroke {
                     paint: p.pink.with_alpha(hero_life * 0.82).into(),
                     width: 3.0,
+                    dash: None,
                 })
                 .transform_around(
                     Anchor::CENTER,
