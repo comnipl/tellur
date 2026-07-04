@@ -9,7 +9,9 @@ use tellur_core::cache_budget::{
 };
 use tellur_core::color::Color;
 use tellur_core::geometry::{Transform, Vec2};
-use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, Resolution};
+use tellur_core::raster::{
+    CpuRasterImage, GpuSurface, PixelFormat, PixelStorageId, RasterImage, Resolution,
+};
 use tellur_core::render_context::{
     CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
 };
@@ -95,13 +97,18 @@ struct GpuBufferImage {
     _reservation: BudgetReservation,
 }
 
+// Keyed on `PixelStorageId` rather than `pixels.as_ptr()`: the cached
+// `GpuBufferImage` doesn't hold the source `Bytes`, so once the source
+// drops, the allocator can hand its address to an unrelated same-sized
+// image. A raw-pointer key would then collide with the stale entry (ABA)
+// and `upload` would return the wrong GPU buffer; the storage id is never
+// reused, so that collision can't happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CpuUploadCacheKey {
     width: u32,
     height: u32,
     format: PixelFormat,
-    ptr: usize,
-    len: usize,
+    id: PixelStorageId,
 }
 
 impl CpuUploadCacheKey {
@@ -110,8 +117,7 @@ impl CpuUploadCacheKey {
             width: image.width,
             height: image.height,
             format: image.format,
-            ptr: image.pixels.as_ptr() as usize,
-            len: image.pixels.len(),
+            id: image.storage_id(),
         }
     }
 }
@@ -1972,6 +1978,30 @@ mod tests {
 
     fn readback(gpu: &mut GpuRenderer, image: RasterImage) -> CpuRasterImage {
         GpuRasterBackend::readback(gpu, image).expect("GPU image should read back")
+    }
+
+    #[test]
+    fn upload_cache_key_does_not_collide_after_source_reuse() {
+        // Regression test for an ABA bug: the old key embedded
+        // `pixels.as_ptr()`, and the cached `GpuBufferImage` doesn't keep the
+        // source `Bytes` alive, so once `a` drops, the allocator is free to
+        // hand `b` (same width/height/format, so same allocation size) the
+        // exact address `a` used. A ptr-based key would then collide with
+        // the stale cache entry for `a` and `upload` would wrongly return
+        // `a`'s GPU buffer for `b`'s content.
+        let a = CpuRasterImage::new(4, 4, PixelFormat::Rgba8, vec![0xAA; 64]);
+        let key_a = CpuUploadCacheKey::new(&a);
+        drop(a);
+
+        // Same dimensions/format (and thus, previously, a plausible same-size
+        // reused allocation) but different content.
+        let b = CpuRasterImage::new(4, 4, PixelFormat::Rgba8, vec![0xBB; 64]);
+        let key_b = CpuUploadCacheKey::new(&b);
+
+        assert_ne!(
+            key_a, key_b,
+            "keys for unrelated allocations must never collide, regardless of address reuse"
+        );
     }
 
     #[test]
