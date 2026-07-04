@@ -13,6 +13,7 @@
 //! ease a typed interpolation, reshape the Phase first via
 //! [`Phase::eased`]: `a.interpolate(b, p.eased(Easing::OutCubic))`.
 
+use crate::color::Color;
 use crate::geometry::{Anchor, Vec2};
 use crate::phase::Phase;
 
@@ -45,6 +46,23 @@ impl Interpolate for Anchor {
             self.rx.interpolate(other.rx, p),
             self.ry.interpolate(other.ry, p),
         )
+    }
+}
+
+/// Straight per-channel lerp in sRGB space (the same numbers [`Color`]
+/// already stores) — NOT a linear-light blend. Mixing in sRGB is what a
+/// hand-rolled `r + (other.r - r) * t` lerp does, so this matches every
+/// existing manual color lerp in the codebase byte-for-byte; it does not
+/// convert to linear light and back the way a "physically correct" color
+/// mix would.
+impl Interpolate for Color {
+    fn interpolate(self, other: Self, p: Phase) -> Self {
+        Color {
+            r: self.r.interpolate(other.r, p),
+            g: self.g.interpolate(other.g, p),
+            b: self.b.interpolate(other.b, p),
+            a: self.a.interpolate(other.a, p),
+        }
     }
 }
 
@@ -98,5 +116,53 @@ mod tests {
         // Halfway between left-center and right-center should be CENTER.
         let mid = Anchor::CENTER_LEFT.interpolate(Anchor::CENTER_RIGHT, Phase::HALF);
         assert_eq!(mid, Anchor::CENTER);
+    }
+
+    #[test]
+    fn color_endpoints() {
+        let a = Color::rgba_u8(0, 0, 0, 0);
+        let b = Color::rgba_u8(255, 255, 255, 255);
+        assert_eq!(a.interpolate(b, Phase::ZERO), a);
+        assert_eq!(a.interpolate(b, Phase::ONE), b);
+    }
+
+    #[test]
+    fn color_componentwise_midpoint_includes_alpha() {
+        let a = Color {
+            r: 0.0,
+            g: 0.2,
+            b: 1.0,
+            a: 0.0,
+        };
+        let b = Color {
+            r: 1.0,
+            g: 0.8,
+            b: 0.0,
+            a: 1.0,
+        };
+        let mid = a.interpolate(b, Phase::HALF);
+        assert_eq!(mid.r, 0.5);
+        assert_eq!(mid.g, 0.5);
+        assert_eq!(mid.b, 0.5);
+        assert_eq!(mid.a, 0.5);
+    }
+
+    #[test]
+    fn color_matches_a_hand_rolled_srgb_lerp() {
+        // The exact shape the ported source (`PersistentPiScene::pi_color` in
+        // movies/202606/shorts_sqrt2_plus_sqrt3/src/explanation.rs) computed
+        // by hand: independent per-channel `a + (b - a) * t`.
+        let ink = Color::rgb_u8(24, 28, 36);
+        let muted = Color::rgb_u8(112, 121, 132);
+        let t = 0.3;
+        let p = Phase::new(t).unwrap();
+
+        let expected = Color {
+            r: ink.r + (muted.r - ink.r) * t,
+            g: ink.g + (muted.g - ink.g) * t,
+            b: ink.b + (muted.b - ink.b) * t,
+            a: ink.a + (muted.a - ink.a) * t,
+        };
+        assert_eq!(ink.interpolate(muted, p), expected);
     }
 }

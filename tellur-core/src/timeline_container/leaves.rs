@@ -331,6 +331,41 @@ fn audio_fade_gain(local_time: f32, clip_duration: f32, fade_in: f32, fade_out: 
     rise.min(fall)
 }
 
+/// An invisible, silent placeholder with an explicit `duration` and no
+/// visual, audio, or subtitle output of its own — the timeline twin of the
+/// layout side's [`SizedBox`](crate::layout::SizedBox). Built with
+/// `TimeBox::builder().duration(1.5)`.
+///
+/// Useful anywhere a `Timeline`/`Sequence` needs an explicit length to hang
+/// triggers on or to reserve a beat, without authoring a stub media file
+/// just to give a clip a duration (the role
+/// `DialogueDuration` played ad hoc before this leaf existed).
+#[crate::component(timeline)]
+#[derive(Clone, Copy, crate::Keyable)]
+pub struct TimeBox {
+    pub duration: f32,
+}
+
+impl TimelineComponent for TimeBox {
+    fn duration(&self) -> Option<f32> {
+        Some(self.duration)
+    }
+
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        Arrangement {
+            kind: NodeKind::Timeline,
+            label: "time box".to_owned(),
+            name: None,
+            source: None,
+            start: offset,
+            end: offset + self.duration,
+            trim: None,
+            triggers: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
 /// 字幕 — the subtitle channel only (written to .srt/.vtt, NOT a burned-in
 /// telop, which is a visual). Built with `Subtitle::builder().text("…")`.
 ///
