@@ -1,7 +1,15 @@
 [package]
 name = "tellur"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Declarative video authoring in Rust: vector, raster, and timeline components with GPU rendering"
+keywords = ["video", "animation", "graphics", "declarative"]
+categories = ["multimedia::video", "graphics", "rendering"]
+
+[package.metadata.docs.rs]
+features = ["latex"]
 
 [features]
 default = ["renderer"]
@@ -16,10 +24,10 @@ latex = ["tellur-core/latex", "tellur-renderer?/latex"]
 cli = ["dep:clap", "dep:cargo_metadata", "dep:toml_edit", "dep:tellur-live", "renderer"]
 
 [dependencies]
-tellur-core = { path = "../tellur-core" }
-tellur-plugin = { path = "../tellur-plugin" }
-tellur-renderer = { path = "../tellur-renderer", optional = true }
-tellur-live = { path = "../tellur-live", optional = true }
+tellur-core = { path = "../tellur-core", version = "0.1.0" }
+tellur-plugin = { path = "../tellur-plugin", version = "0.1.0" }
+tellur-renderer = { path = "../tellur-renderer", version = "0.1.0", optional = true }
+tellur-live = { path = "../tellur-live", version = "0.1.0", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 cargo_metadata = { version = "0.18", optional = true }
 toml_edit = { version = "0.22", optional = true }

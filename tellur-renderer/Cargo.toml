@@ -1,7 +1,13 @@
 [package]
 name = "tellur-renderer"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU (wgpu/vello) and CPU rasterization plus ffmpeg encoding for tellur"
+
+[package.metadata.docs.rs]
+features = ["latex"]
 
 [features]
 # Forwards to `tellur-core/latex` so examples (and downstream renderers) can
@@ -29,7 +35,7 @@ lru = "0.12"
 pollster = "0.3"
 rustc-hash = "1.1.0"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
-tellur-core = { path = "../tellur-core" }
+tellur-core = { path = "../tellur-core", version = "0.1.0" }
 thiserror = "2.0.18"
 tiny-skia = "0.12.0"
 vello = "0.2.1"
