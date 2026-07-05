@@ -2,7 +2,7 @@
 
 tellur のレイアウトシステムを、設計思想からステップバイステップで理解するためのドキュメントです。「どのコンテナを使えばいいのか」が迷わず選べるようになることをゴールにしています。
 
-対応モジュール: `tellur-core/src/layout/`・`layer.rs`・`fragment.rs`・`placement.rs`・`geometry.rs`
+対応モジュール: `tellur-core/src/layout/`・`layer.rs`・`fragment.rs`・`placement.rs`・`clip.rs`・`geometry.rs`
 
 姉妹編: [時間システム チュートリアル](./time-tutorial.ja.md)
 
@@ -199,6 +199,7 @@ DecoratedBox::builder()
 - `Padding` — 子の周りに余白を足す。`EdgeInsets::all / symmetric / only`
 - `DecoratedBox` — 子のレイアウトサイズいっぱいに背景（vector 版は border も）を敷く。レイアウトには影響しない。raster 版は paint bounds を自分の箱に固定するので、ドロップシャドウなどの**はみ出しを切り取るクリップ矩形**としても機能する
 - `SizedBox` — 固定サイズの空箱。固定スペーサーや領域確保に（伸びるスペーサーは `Flexible::spacer`）
+- `Clip` — 子を矩形（または任意パス）で**幾何的に**切り抜く vector コンテナ: `Clip::builder().region(ClipRegion::rect(rect)).child(x)`。レイアウトは子に完全に透過し、描画だけを切る。`DecoratedBox` の「paint bounds を箱に固定する」のとは別物で、こちらは箱の途中だろうと任意パスだろうと、指定した領域で本当に切る
 
 ## 7. 実例 — 2つの世界の合流
 
@@ -233,6 +234,7 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 | 余白 | `Padding` |
 | 背景・枠線・はみ出しクリップ | `DecoratedBox` |
 | 固定サイズの空白 | `SizedBox` |
+| 矩形・任意パスで切り抜く | `Clip` |
 | 回転・拡縮・不透明度（レイアウト不変） | `.transform()` / `.opacity()`（= `Transformed`） |
 | アンカーを軸に回転・拡縮（中心回転など） | `.transform_around(Anchor::CENTER, t)` |
 
@@ -246,3 +248,5 @@ use tellur_core::layout::raster::{Frame, Flex, Flexible};  // raster
 ```
 
 ソース上も 1 コンテナ 1 ファイル（`layout/frame.rs` など）に両変種が同居しています。raster 側だけの追加責務は `paint_bounds`（ドロップシャドウ等のはみ出しを含む描画範囲）と、キャッシュとの付き合い方（`Flexible` や `Positioned` は `CachePolicy::Transparent` で子にキャッシュスロットを譲る）です。
+
+例外が2つ: `Clip` は vector 専用（raster で欲しければ切ってから `.rasterize()`）、逆に `.opacity()` は raster 側にも同名で存在します（= `Opacity`。alpha 乗算のみで、`.transform()` / `.transform_around()` は今も vector 専用です）。
