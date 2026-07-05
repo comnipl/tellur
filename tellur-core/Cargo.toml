@@ -1,7 +1,15 @@
 [package]
 name = "tellur-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core component model for tellur: vector/raster/timeline components, layout, easing, and events"
+keywords = ["video", "animation", "graphics", "declarative"]
+categories = ["multimedia::video", "graphics", "rendering"]
+
+[package.metadata.docs.rs]
+features = ["latex"]
 
 [features]
 # Inline LaTeX math spans (`MathSpan`). Pulls in the RaTeX math-layout

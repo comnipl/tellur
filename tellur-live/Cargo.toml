@@ -1,7 +1,10 @@
 [package]
 name = "tellur-live"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Live-preview server for tellur projects with hot rebuild"
 build = "build.rs"
 # `web/dist` (the Vite bundle build.rs embeds) is gitignored, so by default it is
 # left out of the published crate — consumers would then have to run npm at build
@@ -19,9 +22,9 @@ include = [
 [dependencies]
 lru = "0.12.5"
 png = "0.18.1"
-tellur-core = { path = "../tellur-core" }
-tellur-plugin = { path = "../tellur-plugin" }
-tellur-renderer = { path = "../tellur-renderer" }
+tellur-core = { path = "../tellur-core", version = "0.1.0" }
+tellur-plugin = { path = "../tellur-plugin", version = "0.1.0" }
+tellur-renderer = { path = "../tellur-renderer", version = "0.1.0" }
 
 [[example]]
 name = "demo_timeline_plugin"

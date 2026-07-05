@@ -1,7 +1,10 @@
 [package]
 name = "tellur-plugin"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Plugin ABI for loading tellur timelines as dynamic libraries"
 
 [dependencies]
-tellur-core = { path = "../tellur-core" }
+tellur-core = { path = "../tellur-core", version = "0.1.0" }
