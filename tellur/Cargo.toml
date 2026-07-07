@@ -2,7 +2,7 @@
 name = "tellur"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 readme.workspace = true
 repository.workspace = true
 description = "Declarative video authoring in Rust: vector, raster, and timeline components with GPU rendering"

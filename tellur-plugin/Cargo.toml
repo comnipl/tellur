@@ -2,7 +2,7 @@
 name = "tellur-plugin"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 readme.workspace = true
 repository.workspace = true
 description = "Plugin ABI for loading tellur timelines as dynamic libraries"
