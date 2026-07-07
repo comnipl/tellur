@@ -3,6 +3,7 @@ name = "tellur-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 description = "Core component model for tellur: vector/raster/timeline components, layout, easing, and events"
 keywords = ["video", "animation", "graphics", "declarative"]

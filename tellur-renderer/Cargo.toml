@@ -3,6 +3,7 @@ name = "tellur-renderer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 description = "GPU (wgpu/vello) and CPU rasterization plus ffmpeg encoding for tellur"
 
