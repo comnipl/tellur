@@ -26,19 +26,45 @@ pub struct AbiMismatchError {
     pub hint: String,
 }
 
+/// Right-aligned width for the `Host` / `Plugin` labels so values line up.
+const SIDE_LABEL_WIDTH: usize = 7;
+
 impl fmt::Display for AbiMismatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f)?;
         writeln!(f, "AbiMismatch: The plugin ABI is incompatible with the host.")?;
         writeln!(f)?;
 
         let diffs = fingerprint::fingerprint_diffs(&self.host, &self.plugin);
         if diffs.is_empty() {
-            writeln!(f, "  Host {}", self.host)?;
-            writeln!(f, "  Plugin {}", self.plugin)?;
+            writeln!(
+                f,
+                "{:>width$} {}",
+                "Host",
+                self.host,
+                width = SIDE_LABEL_WIDTH
+            )?;
+            writeln!(
+                f,
+                "{:>width$} {}",
+                "Plugin",
+                self.plugin,
+                width = SIDE_LABEL_WIDTH
+            )?;
         } else {
             for (field, host_val, plugin_val) in diffs {
-                writeln!(f, "  Host {field}={host_val}")?;
-                writeln!(f, "  Plugin {field}={plugin_val}")?;
+                writeln!(
+                    f,
+                    "{:>width$} {field}={host_val}",
+                    "Host",
+                    width = SIDE_LABEL_WIDTH
+                )?;
+                writeln!(
+                    f,
+                    "{:>width$} {field}={plugin_val}",
+                    "Plugin",
+                    width = SIDE_LABEL_WIDTH
+                )?;
             }
         }
 
@@ -101,7 +127,7 @@ mod tests {
         let plugin = "rustc=1.95.0/abc target=x86_64-unknown-linux-gnu tellur-plugin=0.1.0 lock=found bytes=1.12.0";
         let hint = remediation_hint(host, plugin);
         assert!(hint.contains(
-            "On the plugin side (your video editing project), please run `cargo update -p bytes --precise 1.11.1`."
+            "On the plugin side (your video editing project),\n      please run `cargo update -p bytes --precise 1.11.1`."
         ));
     }
 
@@ -114,7 +140,7 @@ mod tests {
             plugin: plugin.to_owned(),
             hint: remediation_hint(host, plugin),
         };
-        let expected = "AbiMismatch: The plugin ABI is incompatible with the host.\n\n  Host bytes=1.11.1\n  Plugin bytes=1.12.0\n\nhint: On the plugin side (your video editing project), please run `cargo update -p bytes --precise 1.11.1`.";
+        let expected = "\nAbiMismatch: The plugin ABI is incompatible with the host.\n\n   Host bytes=1.11.1\n Plugin bytes=1.12.0\n\nhint: On the plugin side (your video editing project),\n      please run `cargo update -p bytes --precise 1.11.1`.";
         assert_eq!(err.to_string(), expected);
         assert_eq!(format!("{err:?}"), expected);
         assert_eq!(fingerprint_diffs(host, plugin).len(), 1);

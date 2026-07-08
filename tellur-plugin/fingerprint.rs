@@ -114,7 +114,13 @@ pub fn parse_fingerprint_kv(fingerprint: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-const PLUGIN_SIDE_PREFIX: &str = "On the plugin side (your video editing project), please ";
+const PLUGIN_SIDE_INTRO: &str = "On the plugin side (your video editing project),";
+/// Aligns continuation lines with the text after the `hint: ` prefix.
+const HINT_CONTINUATION_INDENT: &str = "      ";
+
+fn format_plugin_side_hint(action: &str) -> String {
+    format!("{PLUGIN_SIDE_INTRO}\n{HINT_CONTINUATION_INDENT}please {action}")
+}
 
 /// Keys compared for ABI mismatch display, in presentation order.
 const DIFF_FIELD_KEYS: &[&str] = &["tellur-plugin", "rustc", "target", "lock"];
@@ -164,8 +170,8 @@ pub fn remediation_hint(host: &str, plugin: &str) -> String {
     if host_map.get("lock") == Some(&"unknown".to_owned())
         || plugin_map.get("lock") == Some(&"unknown".to_owned())
     {
-        hints.push(format!(
-            "{PLUGIN_SIDE_PREFIX}ensure the project has a Cargo.lock and rebuild from that directory."
+        hints.push(format_plugin_side_hint(
+            "ensure the project has a Cargo.lock and rebuild from that directory.",
         ));
     }
 
@@ -173,29 +179,29 @@ pub fn remediation_hint(host: &str, plugin: &str) -> String {
         if host_map.get(*crate_name) != plugin_map.get(*crate_name) {
             if let Some(host_ver) = host_map.get(*crate_name) {
                 if host_ver != "unknown" {
-                    hints.push(format!(
-                        "{PLUGIN_SIDE_PREFIX}run `cargo update -p {crate_name} --precise {host_ver}`."
-                    ));
+                    hints.push(format_plugin_side_hint(&format!(
+                        "run `cargo update -p {crate_name} --precise {host_ver}`."
+                    )));
                 }
             }
         }
     }
 
     if host_map.get("tellur-plugin") != plugin_map.get("tellur-plugin") {
-        hints.push(format!(
-            "{PLUGIN_SIDE_PREFIX}update the tellur dependency to match the tellur live host."
+        hints.push(format_plugin_side_hint(
+            "update the tellur dependency to match the tellur live host.",
         ));
     }
 
     if host_map.get("rustc") != plugin_map.get("rustc") {
-        hints.push(format!(
-            "{PLUGIN_SIDE_PREFIX}rebuild the plugin with the same Rust toolchain as the tellur live host."
+        hints.push(format_plugin_side_hint(
+            "rebuild the plugin with the same Rust toolchain as the tellur live host.",
         ));
     }
 
     if hints.is_empty() {
-        format!(
-            "{PLUGIN_SIDE_PREFIX}rebuild the plugin with the same tellur version and Cargo.lock as the tellur live host."
+        format_plugin_side_hint(
+            "rebuild the plugin with the same tellur version and Cargo.lock as the tellur live host.",
         )
     } else {
         hints.join("\nhint: ")
