@@ -5,6 +5,12 @@
 //! especially useful with [`Text`](crate::text::Text) and, with the `latex`
 //! feature enabled, `MathSpan`: both ultimately render as vector paths, so they
 //! can be revealed with the same component.
+//!
+//! How write time is split across paths is a [`WritePacing`] policy: by
+//! default every writable path gets an equal, staggered time slot, so text
+//! advances at a steady per-character rhythm no matter how intricate each
+//! glyph is. [`WritePacing::ByLength`] instead moves the pen at a constant
+//! speed, making a path's share proportional to its outline length.
 
 use crate::builder::VectorBuilder;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
@@ -23,15 +29,35 @@ const DEFAULT_FILL_DELAY: f32 = 0.0;
 const DEFAULT_FILL_LEAD: f32 = 0.07;
 const DEFAULT_FILL_DURATION: f32 = 0.24;
 const DEFAULT_STROKE_SPEED: f32 = 2400.0;
+const DEFAULT_PER_PATH_SECS: f32 = 0.25;
+const DEFAULT_LAG_RATIO: f32 = 0.5;
 const DEFAULT_TIMED_FILL_LEAD: f32 = 0.08;
 const DEFAULT_TIMED_FILL_DURATION: f32 = 0.18;
 const DEFAULT_COMPLETED_STROKE_OPACITY: f32 = 0.35;
 const QUAD_STEPS: usize = 16;
 const CUBIC_STEPS: usize = 24;
 
+/// How write time is distributed across the child's writable paths.
+///
+/// [`Text`](crate::text::Text) and `MathSpan` render one path per glyph, so
+/// for text these policies read as "per character".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WritePacing {
+    /// The pen moves at a constant speed: a path's share of the write time is
+    /// proportional to its outline length, so intricate glyphs take visibly
+    /// longer than simple ones.
+    ByLength,
+    /// Every writable path gets an equal time slot regardless of its length,
+    /// giving text a steady per-character rhythm. Neighbouring slots overlap
+    /// according to the wrapper's `lag_ratio`.
+    PerPath,
+}
+
 /// Reveals a vector component by drawing its paths over time.
 ///
-/// The first part of `progress` draws an inset stroke along each path. As each
+/// Each writable path is assigned a slot of the write time according to
+/// `pacing` (equal per-path slots by default, staggered by `lag_ratio`).
+/// Within its slot a path draws an inset stroke along its outline. As each
 /// filled path finishes being written, that path's fill fades in behind the
 /// completed temporary stroke while later paths keep writing. At `progress == 1`,
 /// the original child graphic is returned, so filled text and math settle into
@@ -40,6 +66,10 @@ const CUBIC_STEPS: usize = 24;
 #[derive(Keyable)]
 pub struct Write {
     pub progress: Phase,
+    #[builder(default = WritePacing::PerPath)]
+    pub pacing: WritePacing,
+    #[builder(default = DEFAULT_LAG_RATIO)]
+    pub lag_ratio: f32,
     #[builder(default = DEFAULT_STROKE_WIDTH)]
     pub stroke_width: f32,
     #[builder(default = DEFAULT_STROKE_END)]
@@ -58,21 +88,14 @@ pub struct Write {
 
 impl Write {
     pub fn new<C: VectorComponent + 'static>(progress: Phase, child: C) -> Self {
-        Self {
-            progress,
-            stroke_width: DEFAULT_STROKE_WIDTH,
-            stroke_end: DEFAULT_STROKE_END,
-            fill_delay: DEFAULT_FILL_DELAY,
-            fill_lead: DEFAULT_FILL_LEAD,
-            fill_duration: DEFAULT_FILL_DURATION,
-            completed_stroke_opacity: DEFAULT_COMPLETED_STROKE_OPACITY,
-            child: Box::new(child),
-        }
+        Self::from_box(progress, Box::new(child))
     }
 
     pub fn from_box(progress: Phase, child: Box<dyn VectorComponent>) -> Self {
         Self {
             progress,
+            pacing: WritePacing::PerPath,
+            lag_ratio: DEFAULT_LAG_RATIO,
             stroke_width: DEFAULT_STROKE_WIDTH,
             stroke_end: DEFAULT_STROKE_END,
             fill_delay: DEFAULT_FILL_DELAY,
@@ -81,6 +104,27 @@ impl Write {
             completed_stroke_opacity: DEFAULT_COMPLETED_STROKE_OPACITY,
             child,
         }
+    }
+
+    /// Gives every writable path an equal time slot (the default).
+    pub fn per_path(mut self) -> Self {
+        self.pacing = WritePacing::PerPath;
+        self
+    }
+
+    /// Allocates write time proportionally to path length.
+    pub fn by_length(mut self) -> Self {
+        self.pacing = WritePacing::ByLength;
+        self
+    }
+
+    /// Sets how far into a path's slot the next path starts, as a fraction of
+    /// the slot (1.0 = strictly sequential, 0.5 = halfway through, 0.0 = all
+    /// paths write simultaneously). Only meaningful with
+    /// [`WritePacing::PerPath`].
+    pub fn lag_ratio(mut self, lag_ratio: f32) -> Self {
+        self.lag_ratio = lag_ratio;
+        self
     }
 
     pub fn stroke_width(mut self, stroke_width: f32) -> Self {
@@ -157,7 +201,8 @@ impl VectorComponent for Write {
             };
         }
 
-        let total = node_write_length(&inner.root, self.stroke_width);
+        let lengths = collect_write_lengths(&inner.root, self.stroke_width);
+        let total: f32 = lengths.iter().sum();
         if total <= 0.0 {
             return VectorGraphic {
                 view_box,
@@ -165,36 +210,41 @@ impl VectorComponent for Write {
             };
         }
 
+        // Slots are laid out so that the last outline completes exactly at
+        // `stroke_end`, leaving the tail of `progress` for fills to finish.
         let stroke_end = stroke_end_point(self.stroke_end);
-        let stroke_progress = stroke_progress(self.progress, stroke_end);
+        let (mut slots, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
+        scale_slots(&mut slots, stroke_end / span);
 
         let mut children = Vec::new();
-        let mut fill_state = FillState {
-            walked: 0.0,
-            total,
-            progress,
-            stroke_end,
-            fill_delay: self.fill_delay,
-            fill_lead: self.fill_lead,
-            fill_duration: self.fill_duration,
-            fallback_stroke_width: self.stroke_width,
+        let mut fill_walk = FillWalk {
+            slots: &slots,
+            next: 0,
+            alpha_at: |completion: f32| {
+                fill_alpha(
+                    progress,
+                    completion,
+                    self.fill_lead,
+                    self.fill_delay,
+                    self.fill_duration,
+                )
+            },
         };
-        let fill = fill_node(inner.root.clone(), &mut fill_state);
+        let fill = fill_node(inner.root.clone(), &mut fill_walk);
         if !fill.is_empty() {
             children.push(fill);
         }
 
-        if stroke_progress > 0.0 {
-            let mut stroke_state = StrokeState {
-                walked: 0.0,
-                drawn: total * stroke_progress,
-                completed_stroke_opacity: self.completed_stroke_opacity,
-                fallback_stroke_width: self.stroke_width,
-            };
-            let stroke = stroke_node(inner.root, &mut stroke_state);
-            if !stroke.is_empty() {
-                children.push(stroke);
-            }
+        let mut stroke_walk = StrokeWalk {
+            slots: &slots,
+            next: 0,
+            cursor: progress,
+            completed_stroke_opacity: self.completed_stroke_opacity,
+            fallback_stroke_width: self.stroke_width,
+        };
+        let stroke = stroke_node(inner.root, &mut stroke_walk);
+        if !stroke.is_empty() {
+            children.push(stroke);
         }
 
         VectorGraphic {
@@ -208,17 +258,28 @@ impl VectorComponent for Write {
     }
 }
 
-/// Reveals a vector component from a start time at a constant path speed.
+/// Reveals a vector component from a start time, pacing paths in seconds.
 ///
 /// Unlike [`Write`], which consumes an already-normalized [`Phase`],
-/// `TimedWrite` measures the child's path length after layout and converts
-/// elapsed seconds into drawn distance. Longer text therefore takes longer
-/// instead of making the pen move faster.
+/// `TimedWrite` schedules the child's paths on a clock of elapsed seconds
+/// after layout. By default every writable path gets the same `per_path_secs`
+/// slot ([`WritePacing::PerPath`]), so text advances at a steady
+/// per-character rhythm and longer text takes longer. Call
+/// [`TimedWrite::stroke_speed`] (or [`TimedWrite::by_length`]) to move the
+/// pen at a constant speed instead, making intricate glyphs take longer.
 #[crate::component(vector)]
 #[derive(Keyable)]
 pub struct TimedWrite {
     pub time: f32,
     pub start: f32,
+    #[builder(default = WritePacing::PerPath)]
+    pub pacing: WritePacing,
+    /// Seconds each writable path takes under [`WritePacing::PerPath`].
+    #[builder(default = DEFAULT_PER_PATH_SECS)]
+    pub per_path_secs: f32,
+    #[builder(default = DEFAULT_LAG_RATIO)]
+    pub lag_ratio: f32,
+    /// Pen speed in child units per second under [`WritePacing::ByLength`].
     #[builder(default = DEFAULT_STROKE_SPEED)]
     pub stroke_speed: f32,
     #[builder(default = DEFAULT_STROKE_WIDTH)]
@@ -239,16 +300,7 @@ impl TimedWrite {
     }
 
     pub fn from_box<T: Time>(time: T, start: f32, child: Box<dyn VectorComponent>) -> Self {
-        Self {
-            time: time.seconds(),
-            start,
-            stroke_speed: DEFAULT_STROKE_SPEED,
-            stroke_width: DEFAULT_STROKE_WIDTH,
-            fill_lead: DEFAULT_TIMED_FILL_LEAD,
-            fill_duration: DEFAULT_TIMED_FILL_DURATION,
-            completed_stroke_opacity: DEFAULT_COMPLETED_STROKE_OPACITY,
-            child,
-        }
+        Self::with_defaults(time.seconds(), start, child)
     }
 
     pub fn from_elapsed<C: VectorComponent + 'static>(elapsed: f32, child: C) -> Self {
@@ -256,9 +308,16 @@ impl TimedWrite {
     }
 
     pub fn from_elapsed_box(elapsed: f32, child: Box<dyn VectorComponent>) -> Self {
+        Self::with_defaults(elapsed, 0.0, child)
+    }
+
+    fn with_defaults(time: f32, start: f32, child: Box<dyn VectorComponent>) -> Self {
         Self {
-            time: elapsed,
-            start: 0.0,
+            time,
+            start,
+            pacing: WritePacing::PerPath,
+            per_path_secs: DEFAULT_PER_PATH_SECS,
+            lag_ratio: DEFAULT_LAG_RATIO,
             stroke_speed: DEFAULT_STROKE_SPEED,
             stroke_width: DEFAULT_STROKE_WIDTH,
             fill_lead: DEFAULT_TIMED_FILL_LEAD,
@@ -268,8 +327,40 @@ impl TimedWrite {
         }
     }
 
+    /// Gives every writable path an equal `secs`-second slot and switches
+    /// pacing to [`WritePacing::PerPath`].
+    pub fn per_path_secs(mut self, secs: f32) -> Self {
+        self.pacing = WritePacing::PerPath;
+        self.per_path_secs = secs;
+        self
+    }
+
+    /// Switches pacing to equal per-path slots (the default).
+    pub fn per_path(mut self) -> Self {
+        self.pacing = WritePacing::PerPath;
+        self
+    }
+
+    /// Moves the pen at a constant `stroke_speed` (child units per second)
+    /// and switches pacing to [`WritePacing::ByLength`].
     pub fn stroke_speed(mut self, stroke_speed: f32) -> Self {
+        self.pacing = WritePacing::ByLength;
         self.stroke_speed = stroke_speed;
+        self
+    }
+
+    /// Switches pacing to length-proportional at the current `stroke_speed`.
+    pub fn by_length(mut self) -> Self {
+        self.pacing = WritePacing::ByLength;
+        self
+    }
+
+    /// Sets how far into a path's slot the next path starts, as a fraction of
+    /// the slot (1.0 = strictly sequential, 0.5 = halfway through, 0.0 = all
+    /// paths write simultaneously). Only meaningful with
+    /// [`WritePacing::PerPath`].
+    pub fn lag_ratio(mut self, lag_ratio: f32) -> Self {
+        self.lag_ratio = lag_ratio;
         self
     }
 
@@ -296,6 +387,14 @@ impl TimedWrite {
     fn elapsed(&self) -> f32 {
         self.time - self.start
     }
+
+    /// Seconds per abstract schedule unit (see [`write_slots`]).
+    fn seconds_per_unit(&self) -> f32 {
+        match self.pacing {
+            WritePacing::ByLength => 1.0 / timed_stroke_speed(self.stroke_speed),
+            WritePacing::PerPath => self.per_path_secs.max(0.000_1),
+        }
+    }
 }
 
 impl VectorComponent for TimedWrite {
@@ -305,10 +404,15 @@ impl VectorComponent for TimedWrite {
 
     fn paint_bounds(&self, size: Vec2) -> Rect {
         let inner = self.child.render(size);
-        let total = node_write_length(&inner.root, self.stroke_width);
-        let speed = timed_stroke_speed(self.stroke_speed);
+        let lengths = collect_write_lengths(&inner.root, self.stroke_width);
+        let total: f32 = lengths.iter().sum();
+        let (_, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
+        let span = span * self.seconds_per_unit();
         let elapsed = self.elapsed();
-        if elapsed <= 0.0 || total <= 0.0 || elapsed >= timed_done_at(total, speed, self) {
+        if elapsed <= 0.0
+            || total <= 0.0
+            || elapsed >= timed_done_at(span, self.fill_lead, self.fill_duration)
+        {
             return self.child.paint_bounds(size);
         }
 
@@ -317,11 +421,15 @@ impl VectorComponent for TimedWrite {
 
     fn render(&self, size: Vec2) -> VectorGraphic {
         let inner = self.child.render(size);
-        let total = node_write_length(&inner.root, self.stroke_width);
-        let speed = timed_stroke_speed(self.stroke_speed);
+        let lengths = collect_write_lengths(&inner.root, self.stroke_width);
+        let total: f32 = lengths.iter().sum();
+        let (mut slots, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
+        let scale = self.seconds_per_unit();
+        scale_slots(&mut slots, scale);
+        let span = span * scale;
         let elapsed = self.elapsed();
 
-        if elapsed >= timed_done_at(total, speed, self) && total > 0.0 {
+        if total > 0.0 && elapsed >= timed_done_at(span, self.fill_lead, self.fill_duration) {
             return inner;
         }
 
@@ -335,26 +443,26 @@ impl VectorComponent for TimedWrite {
         }
 
         let mut children = Vec::new();
-        let mut fill_state = TimedFillState {
-            walked: 0.0,
-            elapsed,
-            stroke_speed: speed,
-            fill_lead: self.fill_lead,
-            fill_duration: self.fill_duration,
-            fallback_stroke_width: self.stroke_width,
+        let mut fill_walk = FillWalk {
+            slots: &slots,
+            next: 0,
+            alpha_at: |completion: f32| {
+                timed_fill_alpha(elapsed, completion, self.fill_lead, self.fill_duration)
+            },
         };
-        let fill = timed_fill_node(inner.root.clone(), &mut fill_state);
+        let fill = fill_node(inner.root.clone(), &mut fill_walk);
         if !fill.is_empty() {
             children.push(fill);
         }
 
-        let mut stroke_state = StrokeState {
-            walked: 0.0,
-            drawn: elapsed * speed,
+        let mut stroke_walk = StrokeWalk {
+            slots: &slots,
+            next: 0,
+            cursor: elapsed,
             completed_stroke_opacity: self.completed_stroke_opacity,
             fallback_stroke_width: self.stroke_width,
         };
-        let stroke = stroke_node(inner.root, &mut stroke_state);
+        let stroke = stroke_node(inner.root, &mut stroke_walk);
         if !stroke.is_empty() {
             children.push(stroke);
         }
@@ -498,33 +606,128 @@ fn node_write_outset(node: &Node, fallback_stroke_width: f32, parent: Transform)
     }
 }
 
-fn node_write_length(node: &Node, fallback_stroke_width: f32) -> f32 {
-    match node {
-        Node::Group(group) => group
-            .children
-            .iter()
-            .map(|child| node_write_length(child, fallback_stroke_width))
-            .sum(),
-        Node::SingleGroup(group) => node_write_length(&group.child, fallback_stroke_width),
-        Node::ClipGroup(group) => node_write_length(&group.child, fallback_stroke_width),
-        Node::Path(path) => {
-            if write_stroke(path, fallback_stroke_width).is_some() {
-                path_length(&path.commands)
-            } else {
-                0.0
+/// One entry per `Node::Path` in traversal order: the length the write pen
+/// spends on it, or `0.0` when the path has nothing to stroke. Both render
+/// walks visit paths in this same order, so indices line up with the slots
+/// produced by [`write_slots`].
+fn collect_write_lengths(node: &Node, fallback_stroke_width: f32) -> Vec<f32> {
+    fn walk(node: &Node, fallback_stroke_width: f32, out: &mut Vec<f32>) {
+        match node {
+            Node::Group(group) => {
+                for child in &group.children {
+                    walk(child, fallback_stroke_width, out);
+                }
             }
+            Node::SingleGroup(group) => walk(&group.child, fallback_stroke_width, out),
+            Node::ClipGroup(group) => walk(&group.child, fallback_stroke_width, out),
+            Node::Path(path) => {
+                let length = if write_stroke(path, fallback_stroke_width).is_some() {
+                    path_length(&path.commands)
+                } else {
+                    0.0
+                };
+                out.push(length);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(node, fallback_stroke_width, &mut out);
+    out
+}
+
+/// A path's slot on the write clock, plus its pen length.
+#[derive(Clone, Copy)]
+struct Slot {
+    start: f32,
+    duration: f32,
+    length: f32,
+}
+
+/// Lays the collected path lengths out on an abstract write clock according
+/// to `pacing`, returning one slot per path plus the total span. The caller
+/// scales the result into its own time units with [`scale_slots`]: [`Write`]
+/// normalizes the span onto the progress interval, [`TimedWrite`] converts
+/// schedule units into seconds.
+fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slot>, f32) {
+    match pacing {
+        WritePacing::ByLength => {
+            let mut walked = 0.0;
+            let slots = lengths
+                .iter()
+                .map(|&length| {
+                    let duration = length.max(0.0);
+                    let slot = Slot {
+                        start: walked,
+                        duration,
+                        length,
+                    };
+                    walked += duration;
+                    slot
+                })
+                .collect();
+            (slots, walked)
+        }
+        WritePacing::PerPath => {
+            let lag = lag_ratio.max(0.0);
+            let mut start = 0.0;
+            let mut span: f32 = 0.0;
+            let slots = lengths
+                .iter()
+                .map(|&length| {
+                    if length <= 0.0 {
+                        // Nothing to stroke: complete instantly where the pen is.
+                        Slot {
+                            start,
+                            duration: 0.0,
+                            length: 0.0,
+                        }
+                    } else {
+                        let slot = Slot {
+                            start,
+                            duration: 1.0,
+                            length,
+                        };
+                        span = span.max(start + 1.0);
+                        start += lag;
+                        slot
+                    }
+                })
+                .collect();
+            (slots, span)
         }
     }
 }
 
-struct StrokeState {
-    walked: f32,
-    drawn: f32,
+fn scale_slots(slots: &mut [Slot], scale: f32) {
+    for slot in slots {
+        slot.start *= scale;
+        slot.duration *= scale;
+    }
+}
+
+/// Fraction of `slot` the write cursor has covered, saturating at both ends.
+fn slot_progress(cursor: f32, slot: Slot) -> f32 {
+    if slot.duration <= 0.0 {
+        if cursor >= slot.start {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        clamp_unit((cursor - slot.start) / slot.duration)
+    }
+}
+
+struct StrokeWalk<'a> {
+    slots: &'a [Slot],
+    next: usize,
+    cursor: f32,
     completed_stroke_opacity: f32,
     fallback_stroke_width: f32,
 }
 
-fn stroke_node(node: Node, state: &mut StrokeState) -> Node {
+fn stroke_node(node: Node, walk: &mut StrokeWalk<'_>) -> Node {
     match node {
         Node::Group(group) => Node::Group(Group {
             transform: group.transform,
@@ -532,41 +735,38 @@ fn stroke_node(node: Node, state: &mut StrokeState) -> Node {
             children: group
                 .children
                 .into_iter()
-                .map(|child| stroke_node(child, state))
+                .map(|child| stroke_node(child, walk))
                 .collect(),
         }),
         Node::SingleGroup(group) => Node::SingleGroup(SingleGroup {
             transform: group.transform,
             opacity: group.opacity,
-            child: Box::new(stroke_node(*group.child, state)),
+            child: Box::new(stroke_node(*group.child, walk)),
         }),
         Node::ClipGroup(group) => Node::ClipGroup(ClipGroup {
             commands: group.commands,
             transform: group.transform,
-            child: Box::new(stroke_node(*group.child, state)),
+            child: Box::new(stroke_node(*group.child, walk)),
         }),
-        Node::Path(path) => stroke_path_node(path, state),
+        Node::Path(path) => stroke_path_node(path, walk),
     }
 }
 
-fn stroke_path_node(path: Path, state: &mut StrokeState) -> Node {
-    let Some(stroke) = write_stroke(&path, state.fallback_stroke_width) else {
+fn stroke_path_node(path: Path, walk: &mut StrokeWalk<'_>) -> Node {
+    let slot = walk.slots[walk.next];
+    walk.next += 1;
+
+    let Some(stroke) = write_stroke(&path, walk.fallback_stroke_width) else {
         return Node::empty();
     };
-    let total = path_length(&path.commands);
-    if total <= 0.0 {
+    if slot.length <= 0.0 {
         return Node::empty();
     }
 
-    let start = state.walked;
-    let end = state.walked + total;
-    state.walked = end;
-
-    if state.drawn <= start {
+    let take = slot.length * slot_progress(walk.cursor, slot);
+    if take <= 0.0 {
         return Node::empty();
     }
-
-    let take = (state.drawn - start).min(total);
     let commands = trim_path(&path.commands, take);
     if commands.len() < 2 {
         return Node::empty();
@@ -579,8 +779,8 @@ fn stroke_path_node(path: Path, state: &mut StrokeState) -> Node {
         transform: path.transform,
     });
 
-    let opacity = if temporary_stroke_from_fill(&path) && take >= total {
-        clamp_unit(state.completed_stroke_opacity)
+    let opacity = if temporary_stroke_from_fill(&path) && take >= slot.length {
+        clamp_unit(walk.completed_stroke_opacity)
     } else {
         1.0
     };
@@ -788,18 +988,16 @@ fn segment_t(partial: f32, total: f32) -> f32 {
     }
 }
 
-struct FillState {
-    walked: f32,
-    total: f32,
-    progress: f32,
-    stroke_end: f32,
-    fill_delay: f32,
-    fill_lead: f32,
-    fill_duration: f32,
-    fallback_stroke_width: f32,
+/// Shared fill walk: `alpha_at` maps a path's completion moment on the write
+/// clock to a fill opacity ([`fill_alpha`] for [`Write`],
+/// [`timed_fill_alpha`] for [`TimedWrite`]).
+struct FillWalk<'a, F: Fn(f32) -> f32> {
+    slots: &'a [Slot],
+    next: usize,
+    alpha_at: F,
 }
 
-fn fill_node(node: Node, state: &mut FillState) -> Node {
+fn fill_node<F: Fn(f32) -> f32>(node: Node, walk: &mut FillWalk<'_, F>) -> Node {
     match node {
         Node::Group(group) => Node::Group(Group {
             transform: group.transform,
@@ -807,46 +1005,31 @@ fn fill_node(node: Node, state: &mut FillState) -> Node {
             children: group
                 .children
                 .into_iter()
-                .map(|child| fill_node(child, state))
+                .map(|child| fill_node(child, walk))
                 .collect(),
         }),
         Node::SingleGroup(group) => Node::SingleGroup(SingleGroup {
             transform: group.transform,
             opacity: group.opacity,
-            child: Box::new(fill_node(*group.child, state)),
+            child: Box::new(fill_node(*group.child, walk)),
         }),
         Node::ClipGroup(group) => Node::ClipGroup(ClipGroup {
             commands: group.commands,
             transform: group.transform,
-            child: Box::new(fill_node(*group.child, state)),
+            child: Box::new(fill_node(*group.child, walk)),
         }),
-        Node::Path(path) => fill_path_node(path, state),
+        Node::Path(path) => fill_path_node(path, walk),
     }
 }
 
-fn fill_path_node(path: Path, state: &mut FillState) -> Node {
-    let path_len = if write_stroke(&path, state.fallback_stroke_width).is_some() {
-        path_length(&path.commands)
-    } else {
-        0.0
-    };
-    let completion = if state.total > 0.0 {
-        ((state.walked + path_len) / state.total) * state.stroke_end
-    } else {
-        state.stroke_end
-    };
-    state.walked += path_len;
+fn fill_path_node<F: Fn(f32) -> f32>(path: Path, walk: &mut FillWalk<'_, F>) -> Node {
+    let slot = walk.slots[walk.next];
+    walk.next += 1;
 
     let Some(fill) = path.fill.filter(|fill| fill.is_visible()) else {
         return Node::empty();
     };
-    let alpha = fill_alpha(
-        state.progress,
-        completion,
-        state.fill_lead,
-        state.fill_delay,
-        state.fill_duration,
-    );
+    let alpha = (walk.alpha_at)(slot.start + slot.duration);
     if alpha <= 0.0 {
         return Node::empty();
     }
@@ -861,14 +1044,6 @@ fn fill_path_node(path: Path, state: &mut FillState) -> Node {
         filled
     } else {
         Node::single_group(Transform::IDENTITY, alpha, filled)
-    }
-}
-
-fn stroke_progress(progress: Phase, stroke_end: f32) -> f32 {
-    if stroke_end >= 1.0 {
-        progress.get()
-    } else {
-        clamp_unit(progress.get() / stroke_end)
     }
 }
 
@@ -884,75 +1059,6 @@ fn fill_alpha(progress: f32, completion: f32, lead: f32, delay: f32, duration: f
     smoothstep(clamp_unit((progress - start) / duration))
 }
 
-struct TimedFillState {
-    walked: f32,
-    elapsed: f32,
-    stroke_speed: f32,
-    fill_lead: f32,
-    fill_duration: f32,
-    fallback_stroke_width: f32,
-}
-
-fn timed_fill_node(node: Node, state: &mut TimedFillState) -> Node {
-    match node {
-        Node::Group(group) => Node::Group(Group {
-            transform: group.transform,
-            opacity: group.opacity,
-            children: group
-                .children
-                .into_iter()
-                .map(|child| timed_fill_node(child, state))
-                .collect(),
-        }),
-        Node::SingleGroup(group) => Node::SingleGroup(SingleGroup {
-            transform: group.transform,
-            opacity: group.opacity,
-            child: Box::new(timed_fill_node(*group.child, state)),
-        }),
-        Node::ClipGroup(group) => Node::ClipGroup(ClipGroup {
-            commands: group.commands,
-            transform: group.transform,
-            child: Box::new(timed_fill_node(*group.child, state)),
-        }),
-        Node::Path(path) => timed_fill_path_node(path, state),
-    }
-}
-
-fn timed_fill_path_node(path: Path, state: &mut TimedFillState) -> Node {
-    let path_len = if write_stroke(&path, state.fallback_stroke_width).is_some() {
-        path_length(&path.commands)
-    } else {
-        0.0
-    };
-    let completion = (state.walked + path_len) / state.stroke_speed;
-    state.walked += path_len;
-
-    let Some(fill) = path.fill.filter(|fill| fill.is_visible()) else {
-        return Node::empty();
-    };
-    let alpha = timed_fill_alpha(
-        state.elapsed,
-        completion,
-        state.fill_lead,
-        state.fill_duration,
-    );
-    if alpha <= 0.0 {
-        return Node::empty();
-    }
-
-    let filled = Node::Path(Path {
-        commands: path.commands,
-        fill: Some(fill),
-        stroke: None,
-        transform: path.transform,
-    });
-    if alpha >= 1.0 {
-        filled
-    } else {
-        Node::single_group(Transform::IDENTITY, alpha, filled)
-    }
-}
-
 fn timed_fill_alpha(elapsed: f32, completion: f32, lead: f32, duration: f32) -> f32 {
     let start = (completion - lead.max(0.0)).max(0.0);
     let duration = duration.max(0.000_1);
@@ -963,11 +1069,11 @@ fn timed_stroke_speed(stroke_speed: f32) -> f32 {
     stroke_speed.max(0.000_1)
 }
 
-fn timed_done_at(total: f32, stroke_speed: f32, write: &TimedWrite) -> f32 {
-    let stroke_done = total / stroke_speed;
-    let fill_done =
-        (stroke_done - write.fill_lead.max(0.0)).max(0.0) + write.fill_duration.max(0.000_1);
-    stroke_done.max(fill_done)
+/// The moment (in seconds) a timed write is fully settled: the last outline
+/// is drawn at `span` and the last fill has finished fading after it.
+fn timed_done_at(span: f32, fill_lead: f32, fill_duration: f32) -> f32 {
+    let fill_done = (span - fill_lead.max(0.0)).max(0.0) + fill_duration.max(0.000_1);
+    span.max(fill_done)
 }
 
 fn smoothstep(t: f32) -> f32 {
@@ -1099,6 +1205,35 @@ mod tests {
         }
     }
 
+    fn rect_path(x: f32, width: f32) -> Node {
+        Node::Path(Path {
+            commands: vec![
+                PathCommand::MoveTo(Vec2(x, 0.0)),
+                PathCommand::LineTo(Vec2(x + width, 0.0)),
+                PathCommand::LineTo(Vec2(x + width, 10.0)),
+                PathCommand::LineTo(Vec2(x, 10.0)),
+                PathCommand::Close,
+            ],
+            fill: Some(Fill { paint: paint() }),
+            stroke: None,
+            transform: Transform::IDENTITY,
+        })
+    }
+
+    fn rects_graphic(size: Vec2, rects: Vec<Node>) -> VectorGraphic {
+        VectorGraphic {
+            view_box: Rect {
+                origin: Vec2::ZERO,
+                size,
+            },
+            root: Node::Group(Group {
+                transform: Transform::IDENTITY,
+                opacity: 1.0,
+                children: rects,
+            }),
+        }
+    }
+
     #[derive(PartialEq, Hash)]
     struct TwoRects;
 
@@ -1108,31 +1243,21 @@ mod tests {
         }
 
         fn render(&self, size: Vec2) -> VectorGraphic {
-            let path = |x: f32| {
-                Node::Path(Path {
-                    commands: vec![
-                        PathCommand::MoveTo(Vec2(x, 0.0)),
-                        PathCommand::LineTo(Vec2(x + 10.0, 0.0)),
-                        PathCommand::LineTo(Vec2(x + 10.0, 10.0)),
-                        PathCommand::LineTo(Vec2(x, 10.0)),
-                        PathCommand::Close,
-                    ],
-                    fill: Some(Fill { paint: paint() }),
-                    stroke: None,
-                    transform: Transform::IDENTITY,
-                })
-            };
-            VectorGraphic {
-                view_box: Rect {
-                    origin: Vec2::ZERO,
-                    size,
-                },
-                root: Node::Group(Group {
-                    transform: Transform::IDENTITY,
-                    opacity: 1.0,
-                    children: vec![path(0.0), path(14.0)],
-                }),
-            }
+            rects_graphic(size, vec![rect_path(0.0, 10.0), rect_path(14.0, 10.0)])
+        }
+    }
+
+    /// Two filled rects with very different perimeters: 40 and 80 units.
+    #[derive(PartialEq, Hash)]
+    struct UnevenRects;
+
+    impl VectorComponent for UnevenRects {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(44.0, 10.0))
+        }
+
+        fn render(&self, size: Vec2) -> VectorGraphic {
+            rects_graphic(size, vec![rect_path(0.0, 10.0), rect_path(14.0, 30.0)])
         }
     }
 
@@ -1252,6 +1377,7 @@ mod tests {
     fn completed_paths_fill_before_later_paths_finish_writing() {
         let write = TwoRects
             .write_on(Phase::saturating(0.5))
+            .by_length()
             .stroke_end(Phase::saturating(0.8));
         let graphic = write.render(Vec2(24.0, 10.0));
         let Node::Group(root) = graphic.root else {
@@ -1270,6 +1396,66 @@ mod tests {
         };
         assert!(matches!(stroke.children[0], Node::SingleGroup(_)));
         assert!(matches!(stroke.children[1], Node::ClipGroup(_)));
+    }
+
+    #[test]
+    fn write_on_defaults_to_staggered_per_path_slots() {
+        let write = TwoRects
+            .write_on(Phase::saturating(0.25))
+            .stroke_end(Phase::saturating(0.75));
+        let graphic = write.render(Vec2(24.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("write reveal should render a group");
+        };
+
+        // No fill has started yet, so only the stroke layer is present.
+        assert_eq!(root.children.len(), 1);
+        let Node::Group(stroke) = &root.children[0] else {
+            panic!("the remaining child should be the stroke reveal layer");
+        };
+        let Node::ClipGroup(first) = &stroke.children[0] else {
+            panic!("first path should still be writing");
+        };
+        let Node::Path(first) = first.child.as_ref() else {
+            panic!("clipped reveal should contain a stroke path");
+        };
+        // Slots are normalized onto [0, stroke_end]: the first path writes
+        // over [0, 0.5], so progress 0.25 draws half its 40-unit outline.
+        assert_eq!(
+            first.commands,
+            vec![
+                PathCommand::MoveTo(Vec2(0.0, 0.0)),
+                PathCommand::LineTo(Vec2(10.0, 0.0)),
+                PathCommand::LineTo(Vec2(10.0, 10.0)),
+            ]
+        );
+        // The second slot starts lag_ratio (0.5) into the first one, exactly
+        // at the current progress, so it has not drawn anything yet.
+        assert!(stroke.children[1].is_empty());
+    }
+
+    #[test]
+    fn write_on_per_path_outlines_complete_by_stroke_end() {
+        let write = TwoRects
+            .write_on(Phase::saturating(0.75))
+            .stroke_end(Phase::saturating(0.75));
+        let graphic = write.render(Vec2(24.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("write reveal should render a group");
+        };
+
+        assert_eq!(root.children.len(), 2);
+        let Node::Group(stroke) = &root.children[1] else {
+            panic!("second child should be the stroke reveal layer");
+        };
+        // Both slots end no later than stroke_end, so at that progress every
+        // outline is complete and dimmed while the fills keep fading in.
+        for child in &stroke.children {
+            let Node::SingleGroup(done) = child else {
+                panic!("every path should be complete and dimmed");
+            };
+            assert!((done.opacity - DEFAULT_COMPLETED_STROKE_OPACITY).abs() < 0.000_01);
+        }
     }
 
     #[test]
@@ -1320,6 +1506,85 @@ mod tests {
                 PathCommand::LineTo(Vec2(10.0, 10.0)),
             ]
         );
+    }
+
+    #[test]
+    fn per_path_pacing_staggers_equal_time_slots() {
+        let write = TwoRects
+            .write_elapsed(0.75)
+            .per_path_secs(1.0)
+            .lag_ratio(0.5);
+        let graphic = write.render(Vec2(24.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("per-path write reveal should render a group");
+        };
+
+        // No fill has started yet, so only the stroke layer is present.
+        assert_eq!(root.children.len(), 1);
+        let Node::Group(stroke) = &root.children[0] else {
+            panic!("the remaining child should be the stroke reveal layer");
+        };
+        let Node::ClipGroup(first) = &stroke.children[0] else {
+            panic!("first path should still be writing");
+        };
+        let Node::Path(first) = first.child.as_ref() else {
+            panic!("clipped reveal should contain a stroke path");
+        };
+        // 0.75s into its one-second slot: 30 of 40 units drawn.
+        assert_eq!(
+            first.commands,
+            vec![
+                PathCommand::MoveTo(Vec2(0.0, 0.0)),
+                PathCommand::LineTo(Vec2(10.0, 0.0)),
+                PathCommand::LineTo(Vec2(10.0, 10.0)),
+                PathCommand::LineTo(Vec2(0.0, 10.0)),
+            ]
+        );
+        let Node::ClipGroup(second) = &stroke.children[1] else {
+            panic!("second path should have started halfway through the first slot");
+        };
+        let Node::Path(second) = second.child.as_ref() else {
+            panic!("clipped reveal should contain a stroke path");
+        };
+        // 0.25s into its [0.5, 1.5] slot: 10 of 40 units drawn.
+        assert_eq!(
+            second.commands,
+            vec![
+                PathCommand::MoveTo(Vec2(14.0, 0.0)),
+                PathCommand::LineTo(Vec2(24.0, 0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn per_path_pacing_gives_long_and_short_paths_the_same_slot() {
+        let write = UnevenRects
+            .write_elapsed(1.0)
+            .per_path_secs(1.0)
+            .lag_ratio(1.0);
+        let graphic = write.render(Vec2(44.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("per-path write reveal should render a group");
+        };
+
+        assert_eq!(root.children.len(), 2);
+        let Node::Group(fill) = &root.children[0] else {
+            panic!("first child should be the per-path fill layer");
+        };
+        // The short path just completed, so its fill has started fading in.
+        assert!(matches!(fill.children[0], Node::SingleGroup(_)));
+        assert!(fill.children[1].is_empty());
+
+        let Node::Group(stroke) = &root.children[1] else {
+            panic!("second child should be the stroke reveal layer");
+        };
+        // The 40-unit path finished exactly at the end of its one-second
+        // slot; the 80-unit path has an equal slot and has not started yet.
+        let Node::SingleGroup(done) = &stroke.children[0] else {
+            panic!("short path should be complete and dimmed");
+        };
+        assert!((done.opacity - DEFAULT_COMPLETED_STROKE_OPACITY).abs() < 0.000_01);
+        assert!(stroke.children[1].is_empty());
     }
 
     #[test]

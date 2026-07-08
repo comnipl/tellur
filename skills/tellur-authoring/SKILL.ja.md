@@ -168,7 +168,10 @@ const BGM_GAIN: f32 = 0.466122427;
 - **alpha は因子の積で合成**し、`Color::multiply_alpha(alpha)` /
   `Color::with_alpha(base * alpha)` で色に適用する
 - 書き文字アニメは `Text` / shape の `.write_elapsed(secs)` / `.write_on(phase)`
-  （+ `.stroke_end(Phase::ONE)`）。経過秒は `Event::window` の `.elapsed()` から取る
+  （+ `.stroke_end(Phase::ONE)`）。経過秒は `Event::window` の `.elapsed()` から取る。
+  ペーシングはデフォルトでグリフごとの等時間スロット（stagger 付き）。リズムは
+  `.per_path_secs(secs)` / `.lag_ratio(r)` で調整し、画数の多い字ほど時間をかけたい
+  ときは `.stroke_speed(u)`（`Write` では `.by_length()`）でペン速度一定に切り替える
 - overshoot 系（`ease_in_back` / `ease_out_elastic` / 単位区間を出る bezier）は
   `(from, to)` メソッドで値域に直接 ease する。`eased(Easing::X)` は `Phase` に
   留まるため clamp される。負方向のはみ出しが困る文脈では `.max(0.0)` を添える
