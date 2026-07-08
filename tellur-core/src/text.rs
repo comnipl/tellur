@@ -17,7 +17,10 @@
 //! kerning, ligatures, or other cross-boundary glyph positioning.
 //!
 //! Single-line only for now: `\n` is not interpreted; multi-line layout
-//! and line breaking are deferred to a follow-up.
+//! and line breaking are deferred to a follow-up. A single line's intrinsic
+//! height is its content metrics (`ascent + descent`); the font's
+//! [`FontMetrics::line_gap`] is exposed for future multi-line leading but
+//! is not included in the line box.
 
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
@@ -118,6 +121,22 @@ struct ShapedGlyphs {
     glyphs: Vec<ShapedGlyph>,
     /// Total advance of the run.
     width: f32,
+}
+
+/// Vertical metrics of a font at a given size.
+///
+/// All distances are non-negative and measured from the baseline. Single-line
+/// [`Text`] layout uses `ascent + descent` as its intrinsic height; `line_gap`
+/// is the font's recommended extra space between lines and is not part of that
+/// box. For a default line stride, use `ascent + descent + line_gap`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontMetrics {
+    /// Distance above the baseline.
+    pub ascent: f32,
+    /// Distance below the baseline.
+    pub descent: f32,
+    /// Recommended extra space between lines. Not included in single-line boxes.
+    pub line_gap: f32,
 }
 
 /// An owned font, cheaply shareable via `Arc<Font>` across components.
@@ -253,11 +272,8 @@ impl Font {
             .expect("font data validated in Font constructors")
     }
 
-    /// This font's `(ascent, descent)` at `size`, both as non-negative
-    /// distances from the baseline (ascent above, descent below). Used by
-    /// a [`TextSpan`] to report how far it paints around the line baseline
-    /// so the enclosing [`Text`] can size the line box to fit every span.
-    fn vertical_metrics(&self, size: f32) -> (f32, f32) {
+    /// This font's vertical metrics at `size`.
+    pub fn vertical_metrics(&self, size: f32) -> FontMetrics {
         let face = self.face();
         let upem = face.units_per_em() as f32;
         let scale = size / upem;
@@ -265,7 +281,12 @@ impl Font {
         // `descender` is conventionally negative (below baseline); flip it
         // to a non-negative depth.
         let descent = -(face.descender() as f32) * scale;
-        (ascent.max(0.0), descent.max(0.0))
+        let line_gap = face.line_gap() as f32 * scale;
+        FontMetrics {
+            ascent: ascent.max(0.0),
+            descent: descent.max(0.0),
+            line_gap: line_gap.max(0.0),
+        }
     }
 
     /// Returns the memoized run-local geometry for `text` at the given
@@ -500,11 +521,11 @@ impl Span for TextSpan {
                 (commands, fill.clone())
             })
             .collect();
-        let (ascent, descent) = font.vertical_metrics(size);
+        let metrics = font.vertical_metrics(size);
         ShapedSpan {
             width: shaped.width * scale_x,
-            ascent: ascent * scale_y,
-            descent: descent * scale_y,
+            ascent: metrics.ascent * scale_y,
+            descent: metrics.descent * scale_y,
             paths,
         }
     }
@@ -607,9 +628,9 @@ fn shape_text_run(
     let shaped = style
         .font
         .shaped_glyphs(style.weight, style.size, 0.0, text);
-    let (ascent, descent) = style.font.vertical_metrics(style.size);
-    let ascent = ascent * style.scale_y;
-    let descent = descent * style.scale_y;
+    let metrics = style.font.vertical_metrics(style.size);
+    let ascent = metrics.ascent * style.scale_y;
+    let descent = metrics.descent * style.scale_y;
     let scale = Vec2(style.scale_x, style.scale_y);
 
     parts
@@ -664,20 +685,6 @@ fn shape_text_run(
 }
 
 impl Text {
-    /// Vertical metrics of the base font at `self.size`, returned as
-    /// `(ascent, line_height)`.
-    fn line_metrics(&self) -> (f32, f32) {
-        let base_face = self.font.face();
-        let base_upem = base_face.units_per_em() as f32;
-        let base_scale = self.size / base_upem;
-        let ascent = base_face.ascender() as f32 * base_scale;
-        // `descender` is conventionally negative (below baseline).
-        let descent = base_face.descender() as f32 * base_scale;
-        let line_gap = base_face.line_gap() as f32 * base_scale;
-        let line_height = ascent - descent + line_gap;
-        (ascent, line_height)
-    }
-
     /// Shapes every input span independently and lays them out
     /// left-to-right. Returns each span's start-x paired with its
     /// [`ShapedSpan`] (paths still baseline-relative), the line baseline
@@ -699,13 +706,12 @@ impl Text {
             weight: self.weight,
             fill: &self.fill,
         };
-        let (base_ascent, base_line_height) = self.line_metrics();
-        let base_below = (base_line_height - base_ascent).max(0.0);
+        let base_metrics = self.font.vertical_metrics(self.size);
+        let mut line_ascent = base_metrics.ascent;
+        let mut line_below = base_metrics.descent;
 
         let mut placed: Vec<(f32, ShapedSpan)> = Vec::with_capacity(self.spans.len());
         let mut pen_x: f32 = 0.0;
-        let mut line_ascent = base_ascent;
-        let mut line_below = base_below;
 
         for span in &self.spans {
             let shaped = span.shape(&ctx);
@@ -731,13 +737,12 @@ impl Text {
             weight: self.weight,
             fill: &self.fill,
         };
-        let (base_ascent, base_line_height) = self.line_metrics();
-        let base_below = (base_line_height - base_ascent).max(0.0);
+        let base_metrics = self.font.vertical_metrics(self.size);
+        let mut line_ascent = base_metrics.ascent;
+        let mut line_below = base_metrics.descent;
 
         let mut placed: Vec<(f32, ShapedSpan)> = Vec::with_capacity(self.spans.len());
         let mut pen_x: f32 = 0.0;
-        let mut line_ascent = base_ascent;
-        let mut line_below = base_below;
         let mut i = 0;
 
         while i < self.spans.len() {
@@ -955,7 +960,8 @@ fn scale_command(cmd: PathCommand, scale: Vec2) -> PathCommand {
 ///
 /// The local coordinate space puts the span's leftmost glyph origin at
 /// `x = 0` and the line baseline at `y = ascent`; the layout/view_box
-/// size is `(span_width, line_height)`.
+/// size is `(span_width, line_content_height)` where the height is the
+/// enclosing line's `ascent + descent` (font `line_gap` excluded).
 #[derive(Clone, PartialEq, Hash)]
 pub struct TextSpanGraphic {
     paths: Vec<(Vec<PathCommand>, Paint)>,
@@ -1086,6 +1092,45 @@ mod tests {
         assert_eq!(features[0].value, 1);
         assert_eq!(features[0].start, 0);
         assert_eq!(features[0].end, u32::MAX);
+    }
+
+    #[test]
+    fn font_vertical_metrics_are_non_negative_and_scale() {
+        let font = SANS_SERIF.clone();
+        let small = font.vertical_metrics(24.0);
+        let large = font.vertical_metrics(48.0);
+
+        assert!(small.ascent >= 0.0);
+        assert!(small.descent >= 0.0);
+        assert!(small.line_gap >= 0.0);
+        assert!(small.ascent + small.descent > 0.0);
+
+        assert_close(large.ascent, small.ascent * 2.0);
+        assert_close(large.descent, small.descent * 2.0);
+        assert_close(large.line_gap, small.line_gap * 2.0);
+    }
+
+    #[test]
+    fn single_line_text_intrinsic_height_excludes_line_gap() {
+        let font = SANS_SERIF.clone();
+        let size = 48.0;
+        let metrics = font.vertical_metrics(size);
+        let fill = Paint::Solid(crate::color::Color::rgb_u8(20, 20, 20));
+        let text = Text::builder()
+            .font(font)
+            .size(size)
+            .fill(fill)
+            .span("Ag")
+            .build();
+
+        let (_paths, layout_size) = text.shape_and_layout();
+        let expected_height = metrics.ascent + metrics.descent;
+
+        assert_close(layout_size.1, expected_height);
+        assert!(layout_size.1 <= metrics.ascent + metrics.descent + metrics.line_gap);
+        if metrics.line_gap > 0.0 {
+            assert!(layout_size.1 < metrics.ascent + metrics.descent + metrics.line_gap);
+        }
     }
 
     #[test]
