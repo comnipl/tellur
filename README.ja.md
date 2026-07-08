@@ -105,7 +105,12 @@ $ tellur live --project path/to/your-video --gpu
 
 ## ドキュメント
 
-体系的なチュートリアルは整備中です。
+- [レイアウトシステム チュートリアル](docs/layout-tutorial.ja.md) — キャンバス世界とフロー世界: `Layer`・`Frame`・`Flex`・アンカー・クリップ（[English / 正本](docs/layout-tutorial.md)）
+- [時間システム チュートリアル](docs/time-tutorial.ja.md) — `Phase`・`Window`・イベント・配置クロックの世界（[English / 正本](docs/time-tutorial.md)）
+
+AI コーディングエージェント向けには、チュートリアルの上に載る [オーサリングスキル](skills/tellur-authoring/SKILL.md)（[日本語版](skills/tellur-authoring/SKILL.ja.md)）で「Tellur らしい書き方」を規範化しています。
+
+入門チュートリアルは整備中です。
 
 ## ライセンス
 

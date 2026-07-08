@@ -101,7 +101,12 @@ $ tellur live --project path/to/your-video --gpu
 
 ## Documentation
 
-A systematic tutorial is currently under preparation.
+- [Layout system tutorial](docs/layout-tutorial.md) — the canvas and flow worlds: `Layer`, `Frame`, `Flex`, anchors, and clipping ([日本語](docs/layout-tutorial.ja.md))
+- [Time system tutorial](docs/time-tutorial.md) — `Phase`, `Window`, events, and the placement-clock world ([日本語](docs/time-tutorial.ja.md))
+
+For AI coding agents, an [authoring skill](skills/tellur-authoring/SKILL.md) captures the idiomatic "Tellur style" on top of the tutorials.
+
+A getting-started tutorial is under preparation.
 
 ## License
 
