@@ -17,7 +17,10 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tellur_plugin::{EntryFn, TimelineCollection, ENTRY_SYMBOL};
+use tellur_plugin::{
+    validate_plugin_fingerprint, AbiFingerprintFn, AbiMismatchError, EntryFn, TimelineCollection,
+    ABI_FINGERPRINT_SYMBOL, ENTRY_SYMBOL,
+};
 
 #[derive(Debug)]
 pub enum PluginLoadError {
@@ -25,6 +28,8 @@ pub enum PluginLoadError {
     InvalidPath(PathBuf),
     Open { path: PathBuf, message: String },
     Symbol { symbol: String, message: String },
+    MissingAbiFingerprint,
+    AbiMismatch(AbiMismatchError),
     MissingPlugin,
 }
 
@@ -39,6 +44,12 @@ impl fmt::Display for PluginLoadError {
             Self::Symbol { symbol, message } => {
                 write!(f, "failed to load symbol {symbol}: {message}")
             }
+            Self::MissingAbiFingerprint => write!(
+                f,
+                "plugin is missing the ABI fingerprint symbol (tellur_abi_fingerprint_v1); \
+                 rebuild the project with a tellur version that exports it"
+            ),
+            Self::AbiMismatch(err) => write!(f, "{err}"),
             Self::MissingPlugin => write!(f, "plugin is not loaded"),
         }
     }
@@ -203,6 +214,7 @@ fn metadata_change_time(metadata: &fs::Metadata) -> Option<(i64, i64)> {
 fn load_plugin(path: &Path, stamp: SourceStamp) -> Result<LoadedPlugin, PluginLoadError> {
     let staged_path = stage_library(path, stamp)?;
     let library = unsafe { DynamicLibrary::open(&staged_path)? };
+    check_plugin_abi(&library)?;
     let entry: EntryFn = unsafe { library.symbol(ENTRY_SYMBOL)? };
     let collection = unsafe { entry() };
     Ok(LoadedPlugin {
@@ -212,6 +224,41 @@ fn load_plugin(path: &Path, stamp: SourceStamp) -> Result<LoadedPlugin, PluginLo
         collection,
         library,
     })
+}
+
+fn check_plugin_abi(library: &DynamicLibrary) -> Result<(), PluginLoadError> {
+    if std::env::var_os("TELLUR_SKIP_ABI_CHECK").is_some() {
+        eprintln!("warning: TELLUR_SKIP_ABI_CHECK=1; skipping plugin ABI fingerprint check");
+        return Ok(());
+    }
+
+    let fingerprint_fn: AbiFingerprintFn =
+        match unsafe { library.symbol(ABI_FINGERPRINT_SYMBOL) } {
+            Ok(f) => f,
+            Err(PluginLoadError::Symbol { symbol, .. })
+                if symbol == "tellur_abi_fingerprint_v1" =>
+            {
+                return Err(PluginLoadError::MissingAbiFingerprint);
+            }
+            Err(e) => return Err(e),
+        };
+
+    let plugin_ptr = unsafe { fingerprint_fn() };
+    if plugin_ptr.is_null() {
+        return Err(PluginLoadError::Symbol {
+            symbol: "tellur_abi_fingerprint_v1".to_owned(),
+            message: "fingerprint function returned a null pointer".to_owned(),
+        });
+    }
+
+    let plugin_fp = unsafe { CStr::from_ptr(plugin_ptr) }
+        .to_str()
+        .map_err(|_| PluginLoadError::Symbol {
+            symbol: "tellur_abi_fingerprint_v1".to_owned(),
+            message: "fingerprint is not valid UTF-8".to_owned(),
+        })?;
+
+    validate_plugin_fingerprint(plugin_fp).map_err(PluginLoadError::AbiMismatch)
 }
 
 fn stage_library(path: &Path, stamp: SourceStamp) -> Result<PathBuf, PluginLoadError> {
