@@ -192,7 +192,10 @@ a component boundary, the type choice decides cache efficiency.
   `Color::multiply_alpha(alpha)` / `Color::with_alpha(base * alpha)`
 - Write-on animation is `.write_elapsed(secs)` / `.write_on(phase)` (plus
   `.stroke_end(Phase::ONE)`) on `Text` / shapes. Get the elapsed seconds from
-  an `Event::window`'s `.elapsed()`
+  an `Event::window`'s `.elapsed()`. Pacing defaults to an equal, staggered
+  time slot per glyph; tune the rhythm with `.per_path_secs(secs)` /
+  `.lag_ratio(r)`, or switch to a constant pen speed with `.stroke_speed(u)`
+  (`.by_length()` on `Write`) when intricate glyphs should take longer
 - Overshoot curves (`ease_in_back` / `ease_out_elastic` / beziers leaving the
   unit interval) must ease directly into the value range with the
   `(from, to)` methods — `eased(Easing::X)` stays inside `Phase` and clamps.
