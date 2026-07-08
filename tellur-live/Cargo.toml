@@ -39,3 +39,6 @@ path = "examples/demo_timeline_mp4.rs"
 [[example]]
 name = "timeline_showcase"
 crate-type = ["cdylib"]
+
+[dev-dependencies]
+tellur-plugin = { path = "../tellur-plugin", version = "0.1.0" }

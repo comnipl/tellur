@@ -5,9 +5,11 @@
 //! symbol ([`ENTRY_SYMBOL`]) returning a [`TimelineCollection`]; the host
 //! `dlopen`s the library and calls it. This contract intentionally uses Rust
 //! types across the dynamic-library boundary, so it is sound only when the host
-//! and plugin are built from the same `tellur` version and toolchain — it is
-//! NOT a stable C ABI. The entry symbol is versioned so a stale plugin fails to
-//! resolve cleanly instead of hitting a vtable mismatch.
+//! and plugin are built from the same `tellur` version, toolchain, and resolved
+//! boundary-crate versions — it is NOT a stable C ABI. The entry symbol is
+//! versioned so a stale plugin fails to resolve cleanly instead of hitting a
+//! vtable mismatch, and [`abi::ABI_FINGERPRINT_SYMBOL`] carries a finer-grained
+//! fingerprint checked at load time.
 
 use std::hash::{Hash, Hasher};
 
@@ -48,6 +50,24 @@ pub use tellur_core as __core;
 /// `render_audio_window`, so stale `v3` plugins must fail at `dlsym` instead of
 /// landing on the wrong vtable slot.
 pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v4\0";
+
+pub mod abi;
+pub use abi::{
+    validate_plugin_fingerprint, AbiFingerprintFn, AbiMismatchError, ABI_FINGERPRINT,
+    ABI_FINGERPRINT_SYMBOL,
+};
+
+/// Export the C ABI fingerprint symbol alongside timeline entry points.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __tellur_export_abi_fingerprint {
+    () => {
+        #[no_mangle]
+        pub extern "C" fn tellur_abi_fingerprint_v1() -> *const ::std::os::raw::c_char {
+            $crate::abi::ABI_FINGERPRINT_C.as_ptr().cast()
+        }
+    };
+}
 
 /// The signature of the [`ENTRY_SYMBOL`] entry point a plugin exports.
 pub type EntryFn = unsafe extern "Rust" fn() -> Box<dyn TimelineCollection>;
@@ -312,6 +332,7 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
 #[macro_export]
 macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
+        $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
@@ -319,6 +340,7 @@ macro_rules! export_timeline {
         }
     };
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
+        $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
@@ -343,6 +365,7 @@ macro_rules! export_timeline {
 #[macro_export]
 macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
+        $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
@@ -359,6 +382,7 @@ macro_rules! export_legacy_timeline {
 #[macro_export]
 macro_rules! export_timeline_collection {
     ($builder:path) => {
+        $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v4(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
