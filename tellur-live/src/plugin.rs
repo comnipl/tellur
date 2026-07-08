@@ -22,7 +22,6 @@ use tellur_plugin::{
     ABI_FINGERPRINT_SYMBOL, ENTRY_SYMBOL,
 };
 
-#[derive(Debug)]
 pub enum PluginLoadError {
     Io(std::io::Error),
     InvalidPath(PathBuf),
@@ -31,6 +30,12 @@ pub enum PluginLoadError {
     MissingAbiFingerprint,
     AbiMismatch(AbiMismatchError),
     MissingPlugin,
+}
+
+impl fmt::Debug for PluginLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl fmt::Display for PluginLoadError {
@@ -182,6 +187,7 @@ impl HotReloadPlugin {
                 Ok(true)
             }
             Err(e) if self.loaded.is_some() => {
+                eprintln!("{e}");
                 self.last_error = Some(e.to_string());
                 self.failed_stamp = Some(stamp);
                 Ok(false)

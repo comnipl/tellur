@@ -19,7 +19,7 @@ pub static ABI_FINGERPRINT_C: &[u8] = concat!(env!("TELLUR_ABI_FINGERPRINT"), "\
 pub type AbiFingerprintFn = unsafe extern "C" fn() -> *const std::os::raw::c_char;
 
 /// Error when a plugin's ABI fingerprint does not match the host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AbiMismatchError {
     pub host: String,
     pub plugin: String,
@@ -44,6 +44,12 @@ impl fmt::Display for AbiMismatchError {
 
         writeln!(f)?;
         write!(f, "hint: {}", self.hint)
+    }
+}
+
+impl fmt::Debug for AbiMismatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -108,10 +114,9 @@ mod tests {
             plugin: plugin.to_owned(),
             hint: remediation_hint(host, plugin),
         };
-        assert_eq!(
-            err.to_string(),
-            "AbiMismatch: The plugin ABI is incompatible with the host.\n\n  Host bytes=1.11.1\n  Plugin bytes=1.12.0\n\nhint: On the plugin side (your video editing project), please run `cargo update -p bytes --precise 1.11.1`."
-        );
+        let expected = "AbiMismatch: The plugin ABI is incompatible with the host.\n\n  Host bytes=1.11.1\n  Plugin bytes=1.12.0\n\nhint: On the plugin side (your video editing project), please run `cargo update -p bytes --precise 1.11.1`.";
+        assert_eq!(err.to_string(), expected);
+        assert_eq!(format!("{err:?}"), expected);
         assert_eq!(fingerprint_diffs(host, plugin).len(), 1);
     }
 

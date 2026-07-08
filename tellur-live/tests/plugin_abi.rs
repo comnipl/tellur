@@ -42,4 +42,6 @@ fn rejects_mismatched_abi_fingerprint() {
     )
     .expect_err("host fingerprint should reject a foreign plugin fingerprint");
     assert!(err.to_string().contains("AbiMismatch:"));
+    assert!(format!("{err:?}").contains("AbiMismatch:"));
+    assert!(!format!("{err:?}").contains("AbiMismatchError {"));
 }
