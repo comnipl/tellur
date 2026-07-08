@@ -41,5 +41,5 @@ fn rejects_mismatched_abi_fingerprint() {
         "rustc=0.0.0/000 target=unknown tellur-plugin=0.0.0 lock=unknown bytes=unknown",
     )
     .expect_err("host fingerprint should reject a foreign plugin fingerprint");
-    assert!(err.to_string().contains("plugin ABI fingerprint mismatch"));
+    assert!(err.to_string().contains("AbiMismatch:"));
 }

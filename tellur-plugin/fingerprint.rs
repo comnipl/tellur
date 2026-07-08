@@ -114,6 +114,47 @@ pub fn parse_fingerprint_kv(fingerprint: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+const PLUGIN_SIDE_PREFIX: &str = "On the plugin side (your video editing project), please ";
+
+/// Keys compared for ABI mismatch display, in presentation order.
+const DIFF_FIELD_KEYS: &[&str] = &["tellur-plugin", "rustc", "target", "lock"];
+
+/// Return `(field, host_value, plugin_value)` for each fingerprint field that differs.
+pub fn fingerprint_diffs(host: &str, plugin: &str) -> Vec<(String, String, String)> {
+    let host_map = parse_fingerprint_kv(host);
+    let plugin_map = parse_fingerprint_kv(plugin);
+    let mut diffs = Vec::new();
+
+    for crate_name in BOUNDARY_CRATES {
+        push_diff(
+            &mut diffs,
+            &host_map,
+            &plugin_map,
+            (*crate_name).to_owned(),
+        );
+    }
+
+    for key in DIFF_FIELD_KEYS {
+        push_diff(&mut diffs, &host_map, &plugin_map, (*key).to_owned());
+    }
+
+    diffs
+}
+
+fn push_diff(
+    diffs: &mut Vec<(String, String, String)>,
+    host_map: &BTreeMap<String, String>,
+    plugin_map: &BTreeMap<String, String>,
+    field: String,
+) {
+    let (Some(host_val), Some(plugin_val)) = (host_map.get(&field), plugin_map.get(&field)) else {
+        return;
+    };
+    if host_val != plugin_val {
+        diffs.push((field, host_val.clone(), plugin_val.clone()));
+    }
+}
+
 /// Suggest remediation when host and plugin fingerprints differ.
 pub fn remediation_hint(host: &str, plugin: &str) -> String {
     let host_map = parse_fingerprint_kv(host);
@@ -123,35 +164,40 @@ pub fn remediation_hint(host: &str, plugin: &str) -> String {
     if host_map.get("lock") == Some(&"unknown".to_owned())
         || plugin_map.get("lock") == Some(&"unknown".to_owned())
     {
-        hints.push(
-            "ensure the project has a Cargo.lock and rebuild the plugin from that directory"
-                .to_owned(),
-        );
+        hints.push(format!(
+            "{PLUGIN_SIDE_PREFIX}ensure the project has a Cargo.lock and rebuild from that directory."
+        ));
     }
 
     for crate_name in BOUNDARY_CRATES {
         if host_map.get(*crate_name) != plugin_map.get(*crate_name) {
             if let Some(host_ver) = host_map.get(*crate_name) {
                 if host_ver != "unknown" {
-                    hints.push(format!("cargo update -p {crate_name} --precise {host_ver}"));
+                    hints.push(format!(
+                        "{PLUGIN_SIDE_PREFIX}run `cargo update -p {crate_name} --precise {host_ver}`."
+                    ));
                 }
             }
         }
     }
 
     if host_map.get("tellur-plugin") != plugin_map.get("tellur-plugin") {
-        hints.push(
-            "update the tellur dependency to the same version as the tellur live host".to_owned(),
-        );
+        hints.push(format!(
+            "{PLUGIN_SIDE_PREFIX}update the tellur dependency to match the tellur live host."
+        ));
     }
 
     if host_map.get("rustc") != plugin_map.get("rustc") {
-        hints.push("rebuild the plugin with the same Rust toolchain as the tellur host".to_owned());
+        hints.push(format!(
+            "{PLUGIN_SIDE_PREFIX}rebuild the plugin with the same Rust toolchain as the tellur live host."
+        ));
     }
 
     if hints.is_empty() {
-        "rebuild the plugin with the same tellur version and Cargo.lock as the live host".to_owned()
+        format!(
+            "{PLUGIN_SIDE_PREFIX}rebuild the plugin with the same tellur version and Cargo.lock as the tellur live host."
+        )
     } else {
-        hints.join("; ")
+        hints.join("\nhint: ")
     }
 }
