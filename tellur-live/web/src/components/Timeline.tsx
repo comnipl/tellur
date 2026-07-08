@@ -756,9 +756,11 @@ export function Timeline(props: TimelineProps) {
   }, []);
 
   const handleWheel = useCallback(
-    (e: React.WheelEvent<HTMLDivElement>) => {
+    (e: WheelEvent) => {
       if (!e.shiftKey) return;
-      const rect = e.currentTarget.getBoundingClientRect();
+      const body = bodyRef.current;
+      if (!body) return;
+      const rect = body.getBoundingClientRect();
       if (rect.width <= 0) return;
 
       e.preventDefault();
@@ -805,6 +807,13 @@ export function Timeline(props: TimelineProps) {
     },
     [duration, onViewportChange],
   );
+
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    body.addEventListener("wheel", handleWheel, { passive: false });
+    return () => body.removeEventListener("wheel", handleWheel);
+  }, [handleWheel]);
 
   // Motion transitions for the expand/collapse choreography. Snappy but clean:
   // position/size/scaleY ride an ease-out tween (easeOutQuint) that decelerates
@@ -901,7 +910,6 @@ export function Timeline(props: TimelineProps) {
             : "timeline__body"
         }
         ref={bodyRef}
-        onWheel={handleWheel}
         onPointerDown={handleSeekPointerDown}
         onPointerMove={handleSeekPointerMove}
         onPointerUp={endSeekDrag}
@@ -1229,10 +1237,7 @@ export function Timeline(props: TimelineProps) {
   );
 }
 
-function normalizeWheelDelta(
-  e: React.WheelEvent<HTMLDivElement>,
-  pageSize: number,
-): number {
+function normalizeWheelDelta(e: WheelEvent, pageSize: number): number {
   const rawDelta =
     Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
 
