@@ -41,7 +41,7 @@ jobs:
           cp -r /tmp/tellur-live-web/. tellur-live/web/dist/
 
       - name: cargo publish --workspace --dry-run
-        run: nix develop --command cargo publish --workspace --locked --dry-run
+        run: nix develop --command cargo publish --workspace --locked --dry-run --allow-dirty
 
   # Tag + GitHub Release after the Release PR merges.
   github-release:
@@ -125,4 +125,4 @@ jobs:
       - name: cargo publish --workspace
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: nix develop --command cargo publish --workspace --locked
+        run: nix develop --command cargo publish --workspace --locked --allow-dirty
