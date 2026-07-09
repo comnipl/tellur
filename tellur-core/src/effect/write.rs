@@ -749,7 +749,7 @@ fn scale_slots(slots: &mut [Slot], scale: f32) {
 /// Extends each slot's stroke_duration so the pen never exceeds
 /// `max_speed` (units/sec), leaving fill scheduling (`duration`) intact.
 fn cap_stroke_speed(slots: &mut [Slot], max_speed: f32) {
-    if !(max_speed > 0.0) || !max_speed.is_finite() {
+    if !max_speed.is_finite() || max_speed <= 0.0 {
         return;
     }
     for slot in slots {
