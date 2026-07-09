@@ -44,6 +44,9 @@ jobs:
           printf 'Found %d changeset(s):\n' "${#files[@]}"
           printf '  %s\n' "${files[@]}"
 
+      - name: Validate changeset metadata
+        run: nix develop --command cargo run --quiet --manifest-path tools/release-notes/Cargo.toml -- check
+
       - name: Prepare release PR
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
