@@ -7,6 +7,7 @@ members = [
     "tellur-plugin",
     "tellur-renderer",
 ]
+exclude = ["tools/release-notes"]
 resolver = "2"
 
 [workspace.package]
