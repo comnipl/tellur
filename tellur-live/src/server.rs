@@ -136,12 +136,19 @@ pub struct ServerOptions {
     pub gpu_preference: GpuPreference,
     pub verbose: bool,
     pub auto_build: Option<AutoBuildOptions>,
+    pub started_at: Instant,
+}
+
+impl ServerOptions {
+    pub fn with_started_at(mut self, started_at: Instant) -> Self {
+        self.started_at = started_at;
+        self
+    }
 }
 
 pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(&options.bind)?;
     let local_addr = listener.local_addr()?;
-    print_startup_banner(local_addr, options.gpu_preference);
     eprintln!("plugin: {}", options.plugin_path.display());
     if let Some(auto_build) = &options.auto_build {
         eprintln!("auto build: {}", describe_build(auto_build));
@@ -174,6 +181,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
         app.reload_plugin_if_changed()?;
     }
+    print_startup_banner(local_addr, options.gpu_preference, options.started_at);
     if prewarm_gpu {
         start_preview_prewarm(Arc::clone(&app));
     }

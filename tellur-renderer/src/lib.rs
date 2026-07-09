@@ -9,7 +9,7 @@ pub mod subtitle;
 pub mod video;
 
 pub use gpu::{probe_adapter_info, GpuAdapterInfo};
-pub use host_info::host_cpu_summary;
+pub use host_info::{host_cpu_summary, host_memory_total_bytes};
 pub use motion_blur::MotionBlur;
 pub use outline::Outline;
 pub use rasterize::{Rasterizable, RasterizableBuilder, Rasterize};

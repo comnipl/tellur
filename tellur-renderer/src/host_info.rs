@@ -1,5 +1,12 @@
 use sysinfo::System;
 
+/// Total installed system RAM in bytes.
+pub fn host_memory_total_bytes() -> u64 {
+    let mut system = System::new();
+    system.refresh_memory();
+    system.total_memory()
+}
+
 /// A short CPU summary for startup banners, e.g. `AMD Ryzen 9 7950X (32 threads)`.
 pub fn host_cpu_summary() -> String {
     let system = System::new();
@@ -21,11 +28,16 @@ pub fn host_cpu_summary() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::host_cpu_summary;
+    use super::{host_cpu_summary, host_memory_total_bytes};
 
     #[test]
     fn host_cpu_summary_is_non_empty() {
         let summary = host_cpu_summary();
         assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn host_memory_total_bytes_is_non_zero() {
+        assert!(host_memory_total_bytes() > 0);
     }
 }
