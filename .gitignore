@@ -1,2 +1,5 @@
 .env
 target/
+
+# Standalone release helper (not a workspace member)
+tools/release-notes/target/

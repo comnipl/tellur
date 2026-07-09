@@ -1,0 +1,22 @@
+[package]
+name = "release-notes"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Split SemVer bump from changelog section for tellur releases"
+
+[[bin]]
+name = "release-notes"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
