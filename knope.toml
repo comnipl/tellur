@@ -3,9 +3,10 @@
 # listed so PrepareRelease bumps them together.
 #
 # Single anonymous [package] so Git tags stay `vX.Y.Z` (not `tellur/vX.Y.Z`).
-# Changeset front matter therefore uses `default: patch|minor|major`.
-# Changelog section is independent: `section: breaking|features|fixes`, applied
-# by tools/release-notes after PrepareRelease.
+# Changeset front matter uses `default: patch|minor|major` for both the SemVer
+# bump and the changelog category (Breaking Changes / Features / Fixes).
+# Changelog formatting (bold summaries, indented details) is applied by
+# tools/release-notes after PrepareRelease.
 
 [changes]
 ignore_conventional_commits = true
@@ -45,7 +46,7 @@ command = "cargo run --quiet --manifest-path tools/release-notes/Cargo.toml -- c
 [[workflows.steps]]
 type = "PrepareRelease"
 ignore_conventional_commits = true
-# Rewrite the newest CHANGELOG entry using section metadata (not SemVer bump).
+# Rewrite the newest CHANGELOG entry using bump-derived sections.
 [[workflows.steps]]
 type = "Command"
 command = "cargo run --quiet --manifest-path tools/release-notes/Cargo.toml -- apply"
@@ -77,7 +78,7 @@ template = "chore: release v$version"
 [workflows.steps.body]
 template = """This PR was created by Knope. Merging it will tag `v$version`, create a GitHub Release, and publish all workspace crates to crates.io.
 
-Review the updated `CHANGELOG.md` in this PR for release notes (sections come from each changeset's `section` field, independent of the SemVer bump in `default`).
+Review the updated `CHANGELOG.md` in this PR for release notes (sections are derived from each changeset's `default` bump).
 """
 
 [[workflows]]

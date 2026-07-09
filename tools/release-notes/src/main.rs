@@ -17,20 +17,12 @@ enum Bump {
     Patch,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-enum Section {
-    Breaking,
-    Features,
-    Fixes,
-}
-
-impl Section {
+impl Bump {
     fn heading(self) -> &'static str {
         match self {
-            Section::Breaking => "Breaking Changes",
-            Section::Features => "Features",
-            Section::Fixes => "Fixes",
+            Bump::Major => "Breaking Changes",
+            Bump::Minor => "Features",
+            Bump::Patch => "Fixes",
         }
     }
 }
@@ -38,14 +30,12 @@ impl Section {
 #[derive(Debug, Deserialize)]
 struct FrontMatter {
     default: Bump,
-    section: Section,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct Change {
     path: String,
     bump: Bump,
-    section: Section,
     summary: String,
     details: Option<String>,
 }
@@ -56,7 +46,7 @@ struct Manifest {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "release-notes", about = "Split SemVer bump from changelog section")]
+#[command(name = "release-notes", about = "Render changelog entries from changesets")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -116,10 +106,9 @@ fn main() -> Result<()> {
             println!("Validated {} changeset(s).", changes.len());
             for change in changes {
                 println!(
-                    "  {}  bump={}  section={}  {}",
+                    "  {}  bump={}  {}",
                     change.path,
                     bump_name(change.bump),
-                    section_name(change.section),
                     change.summary
                 );
             }
@@ -165,14 +154,6 @@ fn bump_name(bump: Bump) -> &'static str {
         Bump::Major => "major",
         Bump::Minor => "minor",
         Bump::Patch => "patch",
-    }
-}
-
-fn section_name(section: Section) -> &'static str {
-    match section {
-        Section::Breaking => "breaking",
-        Section::Features => "features",
-        Section::Fixes => "fixes",
     }
 }
 
@@ -226,10 +207,9 @@ fn preview(changeset_dir: &Path, cargo_toml: &Path) -> Result<()> {
     println!("Would consume {} changeset(s):", changes.len());
     for change in &changes {
         println!(
-            "  {}  bump={}  section={}",
+            "  {}  bump={}",
             change.path,
-            bump_name(change.bump),
-            section_name(change.section)
+            bump_name(change.bump)
         );
     }
     println!();
@@ -363,15 +343,14 @@ fn load_changesets(dir: &Path) -> Result<Vec<Change>> {
                 .unwrap_or("unknown.md")
                 .to_string(),
             bump: change.0,
-            section: change.1,
-            summary: change.2,
-            details: change.3,
+            summary: change.1,
+            details: change.2,
         });
     }
     Ok(changes)
 }
 
-fn parse_changeset(text: &str) -> Result<(Bump, Section, String, Option<String>)> {
+fn parse_changeset(text: &str) -> Result<(Bump, String, Option<String>)> {
     let text = text.trim_start_matches('\u{feff}').trim_start();
     let Some(rest) = text.strip_prefix("---") else {
         bail!("missing YAML front matter (expected leading ---)");
@@ -414,7 +393,7 @@ fn parse_changeset(text: &str) -> Result<(Bump, Section, String, Option<String>)
         }
     };
 
-    Ok((front.default, front.section, summary.to_string(), details))
+    Ok((front.default, summary.to_string(), details))
 }
 
 fn rewrite_newest_entry(changelog: &str, changes: &[Change]) -> Result<String> {
@@ -451,22 +430,22 @@ fn rewrite_newest_entry(changelog: &str, changes: &[Change]) -> Result<String> {
 }
 
 fn render_sections(changes: &[Change]) -> String {
-    let mut by_section: Vec<(Section, Vec<&Change>)> = Vec::new();
-    for section in [Section::Breaking, Section::Features, Section::Fixes] {
+    let mut by_bump: Vec<(Bump, Vec<&Change>)> = Vec::new();
+    for bump in [Bump::Major, Bump::Minor, Bump::Patch] {
         let items = changes
             .iter()
-            .filter(|change| change.section == section)
+            .filter(|change| change.bump == bump)
             .collect::<Vec<_>>();
         if !items.is_empty() {
-            by_section.push((section, items));
+            by_bump.push((bump, items));
         }
     }
 
     let mut out = String::new();
-    for (section, items) in by_section {
+    for (bump, items) in by_bump {
         out.push('\n');
         out.push_str("### ");
-        out.push_str(section.heading());
+        out.push_str(bump.heading());
         out.push('\n');
 
         for change in items {
@@ -517,14 +496,12 @@ mod tests {
         let text = "\
 ---
 default: minor
-section: fixes
 ---
 
 # Fix renderer cache invalidation
 ";
-        let (bump, section, summary, details) = parse_changeset(text).unwrap();
+        let (bump, summary, details) = parse_changeset(text).unwrap();
         assert_eq!(bump, Bump::Minor);
-        assert_eq!(section, Section::Fixes);
         assert_eq!(summary, "Fix renderer cache invalidation");
         assert!(details.is_none());
     }
@@ -534,22 +511,20 @@ section: fixes
         let text = "\
 ---
 default: patch
-section: features
 ---
 
 # Add an AI agent authoring skill
 
 Longer description with details.
 ";
-        let (bump, section, summary, details) = parse_changeset(text).unwrap();
+        let (bump, summary, details) = parse_changeset(text).unwrap();
         assert_eq!(bump, Bump::Patch);
-        assert_eq!(section, Section::Features);
         assert_eq!(summary, "Add an AI agent authoring skill");
         assert_eq!(details.as_deref(), Some("Longer description with details."));
     }
 
     #[test]
-    fn rejects_missing_section() {
+    fn accepts_changeset_without_section() {
         let text = "\
 ---
 default: patch
@@ -557,8 +532,10 @@ default: patch
 
 # Something
 ";
-        let err = parse_changeset(text).unwrap_err().to_string();
-        assert!(err.contains("invalid YAML") || err.contains("missing field"));
+        let (bump, summary, details) = parse_changeset(text).unwrap();
+        assert_eq!(bump, Bump::Patch);
+        assert_eq!(summary, "Something");
+        assert!(details.is_none());
     }
 
     #[test]
@@ -582,26 +559,24 @@ default: patch
             Change {
                 path: "a.md".into(),
                 bump: Bump::Minor,
-                section: Section::Fixes,
-                summary: "Fix cache invalidation".into(),
+                summary: "Add skill".into(),
                 details: None,
             },
             Change {
                 path: "b.md".into(),
                 bump: Bump::Patch,
-                section: Section::Features,
-                summary: "Add skill".into(),
+                summary: "Fix cache invalidation".into(),
                 details: Some("More detail.".into()),
             },
         ];
         let rewritten = rewrite_newest_entry(changelog, &changes).unwrap();
         assert!(rewritten.contains("## 0.2.0 (2026-07-09)"));
         assert!(rewritten.contains("### Features"));
-        assert!(rewritten.contains("- **Add skill**"));
-        assert!(rewritten.contains("  More detail."));
-        assert!(!rewritten.contains("#### Add skill"));
+        assert!(rewritten.contains("- Add skill"));
         assert!(rewritten.contains("### Fixes"));
-        assert!(rewritten.contains("- Fix cache invalidation"));
+        assert!(rewritten.contains("- **Fix cache invalidation**"));
+        assert!(rewritten.contains("  More detail."));
+        assert!(!rewritten.contains("#### Fix cache invalidation"));
         assert!(!rewritten.contains("- wrong place"));
         assert!(rewritten.contains("## 0.1.0 (2026-07-07)"));
         assert!(rewritten.contains("- Initial public release"));
@@ -611,8 +586,7 @@ default: patch
     fn renders_complex_changes_as_bullet_with_indented_details() {
         let changes = vec![Change {
             path: "a.md".into(),
-            bump: Bump::Minor,
-            section: Section::Breaking,
+            bump: Bump::Major,
             summary: "The write-on effect now draws at a constant speed per path by default".into(),
             details: Some(
                 "Previously, the timing was controlled to write the stroke at a constant overall rate.\n\nTo resolve this, we have introduced .per_path().".into(),
@@ -638,7 +612,7 @@ default: patch
         let mut file = fs::File::create(changeset_dir.join("demo.md")).unwrap();
         write!(
             file,
-            "---\ndefault: minor\nsection: fixes\n---\n\n# Fix something\n"
+            "---\ndefault: patch\n---\n\n# Fix something\n"
         )
         .unwrap();
 
@@ -660,20 +634,18 @@ default: patch
     }
 
     #[test]
-    fn preview_uses_section_not_bump() {
+    fn render_sections_groups_by_bump() {
         let changes = vec![
             Change {
                 path: "a.md".into(),
                 bump: Bump::Minor,
-                section: Section::Fixes,
-                summary: "Fix cache invalidation".into(),
+                summary: "Add skill".into(),
                 details: None,
             },
             Change {
                 path: "b.md".into(),
                 bump: Bump::Patch,
-                section: Section::Features,
-                summary: "Add skill".into(),
+                summary: "Fix cache invalidation".into(),
                 details: None,
             },
         ];
