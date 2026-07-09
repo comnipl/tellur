@@ -9,7 +9,8 @@ pub fn host_memory_total_bytes() -> u64 {
 
 /// A short CPU summary for startup banners, e.g. `AMD Ryzen 9 7950X (32 threads)`.
 pub fn host_cpu_summary() -> String {
-    let system = System::new();
+    let mut system = System::new();
+    system.refresh_cpu_all();
     let cpus = system.cpus();
     let threads = cpus.len();
     let brand = cpus
@@ -34,6 +35,12 @@ mod tests {
     fn host_cpu_summary_is_non_empty() {
         let summary = host_cpu_summary();
         assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn host_cpu_summary_includes_cpu_brand() {
+        let summary = host_cpu_summary();
+        assert!(!summary.starts_with("unknown CPU"));
     }
 
     #[test]
