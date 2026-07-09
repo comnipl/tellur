@@ -1,6 +1,7 @@
 pub mod build_watch;
 pub mod plugin;
 pub mod server;
+pub mod startup_info;
 
 pub use build_watch::{
     describe_build, run_build_once, AutoBuildOptions, CompileSnapshot, CompileState, CompileStatus,

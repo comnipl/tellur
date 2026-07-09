@@ -33,6 +33,44 @@ const GPU_CACHE_GROW_SUCCESS_STREAK: u8 = 64;
 const GPU_CACHE_GROW_FRACTION_DIVISOR: usize = 64;
 const MIB: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuAdapterInfo {
+    pub name: String,
+    pub backend: String,
+}
+
+/// Probes the preferred wgpu adapter without creating a device or compiling shaders.
+pub fn probe_adapter_info() -> Option<GpuAdapterInfo> {
+    pollster::block_on(probe_adapter_info_async())
+}
+
+async fn probe_adapter_info_async() -> Option<GpuAdapterInfo> {
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })
+        .await?;
+    let info = adapter.get_info();
+    Some(GpuAdapterInfo {
+        name: info.name,
+        backend: format_wgpu_backend(info.backend),
+    })
+}
+
+fn format_wgpu_backend(backend: wgpu::Backend) -> String {
+    match backend {
+        wgpu::Backend::Vulkan => "Vulkan".to_string(),
+        wgpu::Backend::Metal => "Metal".to_string(),
+        wgpu::Backend::Dx12 => "DirectX 12".to_string(),
+        wgpu::Backend::Gl => "OpenGL".to_string(),
+        wgpu::Backend::BrowserWebGpu => "WebGPU".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,

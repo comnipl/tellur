@@ -26,6 +26,7 @@ use crate::build_watch::{
     CompileState,
 };
 use crate::plugin::HotReloadPlugin;
+use crate::startup_info::print_startup_banner;
 use tellur_plugin::TimelineInfo;
 
 /// Live preview re-encodes short MP4 segments repeatedly. Keeping the render
@@ -140,7 +141,7 @@ pub struct ServerOptions {
 pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(&options.bind)?;
     let local_addr = listener.local_addr()?;
-    eprintln!("tellur live listening on http://{local_addr}");
+    print_startup_banner(local_addr, options.gpu_preference);
     eprintln!("plugin: {}", options.plugin_path.display());
     if let Some(auto_build) = &options.auto_build {
         eprintln!("auto build: {}", describe_build(auto_build));
