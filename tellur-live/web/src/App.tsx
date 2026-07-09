@@ -94,11 +94,21 @@ export function App() {
   const fpsCounterRef = useRef({ frames: 0, last: performance.now() });
   const previewSettingsProjectRef = useRef<string | null>(null);
   const userChangedPreviewSettingsRef = useRef(false);
+  const reconnectInfoRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let source: EventSource | null = null;
+    let polling = false;
+
+    const stopPolling = () => {
+      if (timer != null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      polling = false;
+    };
 
     const applyInfo = (next: ServerInfo) => {
       if (cancelled) return;
@@ -121,21 +131,15 @@ export function App() {
       setLoadError(null);
     };
 
-    const tick = async () => {
-      try {
-        applyInfo(await fetchInfo());
-      } catch (e) {
-        if (!cancelled) setLoadError(String(e));
-      } finally {
-        if (!cancelled) timer = setTimeout(tick, INFO_FALLBACK_POLL_MS);
-      }
-    };
-
-    if ("EventSource" in window) {
+    const connectEvents = () => {
+      if (cancelled || !("EventSource" in window)) return;
+      if (source && source.readyState !== EventSource.CLOSED) return;
+      source?.close();
       source = new EventSource("/api/events");
       source.addEventListener("info", (event: MessageEvent) => {
         try {
           applyInfo(JSON.parse(event.data) as ServerInfo);
+          stopPolling();
         } catch (e) {
           if (!cancelled) setLoadError(String(e));
         }
@@ -144,16 +148,58 @@ export function App() {
         if (cancelled) return;
         source?.close();
         source = null;
-        tick();
+        startPolling();
       };
+    };
+
+    const tick = async () => {
+      if (cancelled) return;
+      polling = true;
+      try {
+        applyInfo(await fetchInfo());
+        if (!cancelled && source == null && "EventSource" in window) {
+          connectEvents();
+        }
+      } catch (e) {
+        if (!cancelled) setLoadError(String(e));
+      } finally {
+        if (!cancelled && polling) {
+          timer = setTimeout(tick, INFO_FALLBACK_POLL_MS);
+        }
+      }
+    };
+
+    const startPolling = () => {
+      if (polling || cancelled) return;
+      stopPolling();
+      void tick();
+    };
+
+    reconnectInfoRef.current = () => {
+      if (cancelled) return;
+      void fetchInfo()
+        .then((next) => {
+          applyInfo(next);
+          if (!cancelled && source == null && "EventSource" in window) {
+            connectEvents();
+          }
+        })
+        .catch((e) => {
+          if (!cancelled) setLoadError(String(e));
+        });
+    };
+
+    if ("EventSource" in window) {
+      connectEvents();
     } else {
-      tick();
+      startPolling();
     }
 
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
+      stopPolling();
       source?.close();
+      reconnectInfoRef.current = null;
     };
   }, []);
 
@@ -176,6 +222,22 @@ export function App() {
     fps,
     motionBlur,
   });
+
+  useEffect(() => {
+    const recover = () => {
+      reconnectInfoRef.current?.();
+      preview.recoverFromNetwork();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") recover();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", recover);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", recover);
+    };
+  }, [preview.recoverFromNetwork]);
 
   useEffect(() => {
     // Only suppress the global shortcuts when focus is in a GENUINE text-entry

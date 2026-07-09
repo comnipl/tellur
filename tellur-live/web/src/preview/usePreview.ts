@@ -36,6 +36,7 @@ export interface PreviewControls {
   toggleMute: () => void;
   stepFrame: (delta: number) => void;
   rewindToStart: () => void;
+  recoverFromNetwork: () => void;
 }
 
 export interface PreviewSettings {
@@ -372,6 +373,10 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
 
   const rewindToStart = useCallback(() => seekTo(0), [seekTo]);
 
+  const recoverFromNetwork = useCallback(() => {
+    playerRef.current?.recoverFromNetwork();
+  }, []);
+
   return {
     state: {
       seconds,
@@ -390,6 +395,7 @@ export function usePreview(settings: PreviewSettings): PreviewControls {
     toggleMute,
     stepFrame,
     rewindToStart,
+    recoverFromNetwork,
   };
 }
 

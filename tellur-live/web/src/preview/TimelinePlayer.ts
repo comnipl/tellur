@@ -254,6 +254,7 @@ export class TimelinePlayer {
 
   seek(seconds: number): void {
     if (this.disposed) return;
+    this.clearError();
     const target = clamp(seconds, 0, this.config.duration);
     this.position = target;
     this.fillGen++;
@@ -319,6 +320,7 @@ export class TimelinePlayer {
   // Must be called inside the user gesture so unmuted playback satisfies autoplay policy.
   play(): void {
     if (this.disposed) return;
+    this.clearError();
     // Apply the user's audio state synchronously within the gesture.
     // React does not re-apply the `muted` attribute after mount, so set the property.
     this.video.muted = this.config.isMuted();
@@ -353,6 +355,17 @@ export class TimelinePlayer {
   setMuted(muted: boolean): void {
     if (this.disposed) return;
     this.video.muted = muted;
+  }
+
+  // Wake / online recovery: drop a hung stream, clear transient errors, and retry fill.
+  recoverFromNetwork(): void {
+    if (this.disposed) return;
+    this.clearError();
+    this.streamBlockedUntil = 0;
+    if (this.inflight) {
+      this.abortInflight();
+    }
+    this.kickFill();
   }
 
   pause(): void {
@@ -735,6 +748,7 @@ export class TimelinePlayer {
       }
       reached = persistedEnd;
       this.streamBlockedUntil = 0;
+      this.clearError();
       const blob = new Blob(inflight.received, { type: "video/mp4" });
       const ok = await this.config.cache.putSegment(
         this.config.groupKey,
@@ -776,6 +790,8 @@ export class TimelinePlayer {
         if (this.appendFailureCount >= APPEND_FAILURES_BEFORE_ERROR) {
           this.events.onError?.(String(e));
         }
+      } else if (isTransientNetworkError(e)) {
+        this.events.onError?.(String(e));
       } else {
         this.events.onError?.(String(e));
       }
@@ -1005,8 +1021,11 @@ export class TimelinePlayer {
   }
 
   private noteAppendSuccess(): void {
-    if (this.appendFailureCount === 0) return;
     this.appendFailureCount = 0;
+    this.clearError();
+  }
+
+  private clearError(): void {
     this.events.onError?.(null);
   }
 
@@ -1560,6 +1579,18 @@ function mergeRanges(ranges: CacheRange[]): CacheRange[] {
 
 function isAbortError(e: unknown): boolean {
   return e instanceof DOMException && e.name === "AbortError";
+}
+
+function isTransientNetworkError(e: unknown): boolean {
+  if (e instanceof TypeError) return true;
+  const message = e instanceof Error ? e.message : String(e);
+  if (/Failed to fetch|NetworkError|Load failed/i.test(message)) return true;
+  const statusMatch = /failed:\s*(\d{3})\b/.exec(message);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    return status >= 500 && status <= 599;
+  }
+  return false;
 }
 
 class SourceBufferAppendError extends Error {
