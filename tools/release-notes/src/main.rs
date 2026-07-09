@@ -469,28 +469,41 @@ fn render_sections(changes: &[Change]) -> String {
         out.push_str(section.heading());
         out.push('\n');
 
-        let (simple, complex): (Vec<_>, Vec<_>) =
-            items.into_iter().partition(|change| change.details.is_none());
-
-        for change in simple {
+        for change in items {
             out.push('\n');
             out.push_str("- ");
-            out.push_str(&change.summary);
+            if change.details.is_some() {
+                out.push_str("**");
+                out.push_str(&change.summary);
+                out.push_str("**");
+            } else {
+                out.push_str(&change.summary);
+            }
             out.push('\n');
-        }
 
-        for change in complex {
-            out.push('\n');
-            out.push_str("#### ");
-            out.push_str(&change.summary);
-            out.push('\n');
-            out.push('\n');
-            out.push_str(change.details.as_deref().unwrap_or(""));
-            out.push('\n');
+            if let Some(details) = &change.details {
+                out.push('\n');
+                out.push_str(&indent_detail_lines(details));
+                out.push('\n');
+            }
         }
     }
     out.push('\n');
     out
+}
+
+fn indent_detail_lines(details: &str) -> String {
+    details
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                String::new()
+            } else {
+                format!("  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -584,12 +597,37 @@ default: patch
         let rewritten = rewrite_newest_entry(changelog, &changes).unwrap();
         assert!(rewritten.contains("## 0.2.0 (2026-07-09)"));
         assert!(rewritten.contains("### Features"));
-        assert!(rewritten.contains("#### Add skill"));
+        assert!(rewritten.contains("- **Add skill**"));
+        assert!(rewritten.contains("  More detail."));
+        assert!(!rewritten.contains("#### Add skill"));
         assert!(rewritten.contains("### Fixes"));
         assert!(rewritten.contains("- Fix cache invalidation"));
         assert!(!rewritten.contains("- wrong place"));
         assert!(rewritten.contains("## 0.1.0 (2026-07-07)"));
         assert!(rewritten.contains("- Initial public release"));
+    }
+
+    #[test]
+    fn renders_complex_changes_as_bullet_with_indented_details() {
+        let changes = vec![Change {
+            path: "a.md".into(),
+            bump: Bump::Minor,
+            section: Section::Breaking,
+            summary: "The write-on effect now draws at a constant speed per path by default".into(),
+            details: Some(
+                "Previously, the timing was controlled to write the stroke at a constant overall rate.\n\nTo resolve this, we have introduced .per_path().".into(),
+            ),
+        }];
+        let rendered = render_sections(&changes);
+        assert!(rendered.contains("### Breaking Changes"));
+        assert!(rendered.contains(
+            "- **The write-on effect now draws at a constant speed per path by default**"
+        ));
+        assert!(rendered.contains(
+            "  Previously, the timing was controlled to write the stroke at a constant overall rate."
+        ));
+        assert!(rendered.contains("  To resolve this, we have introduced .per_path()."));
+        assert!(!rendered.contains("#### "));
     }
 
     #[test]
