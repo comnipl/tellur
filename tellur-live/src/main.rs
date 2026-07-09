@@ -2,7 +2,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tellur_core::raster::Resolution;
 use tellur_core::render_context::GpuPreference;
@@ -10,13 +10,14 @@ use tellur_live::{serve, AutoBuildOptions, ServerOptions};
 use tellur_renderer::ColorRange;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let started_at = Instant::now();
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help") {
         println!("{}", usage());
         return Ok(());
     }
     let options = parse_args(args.into_iter())?;
-    serve(options)
+    serve(options.with_started_at(started_at))
 }
 
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, Box<dyn Error>> {
@@ -159,6 +160,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<ServerOptions, B
         gpu_preference,
         verbose,
         auto_build,
+        started_at: Instant::now(),
     })
 }
 

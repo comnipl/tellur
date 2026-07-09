@@ -26,6 +26,7 @@ use crate::build_watch::{
     CompileState,
 };
 use crate::plugin::HotReloadPlugin;
+use crate::startup_info::{print_startup_banner, StartupBannerInputs};
 use tellur_plugin::TimelineInfo;
 
 /// Live preview re-encodes short MP4 segments repeatedly. Keeping the render
@@ -135,13 +136,19 @@ pub struct ServerOptions {
     pub gpu_preference: GpuPreference,
     pub verbose: bool,
     pub auto_build: Option<AutoBuildOptions>,
+    pub started_at: Instant,
+}
+
+impl ServerOptions {
+    pub fn with_started_at(mut self, started_at: Instant) -> Self {
+        self.started_at = started_at;
+        self
+    }
 }
 
 pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(&options.bind)?;
     let local_addr = listener.local_addr()?;
-    eprintln!("tellur live listening on http://{local_addr}");
-    eprintln!("plugin: {}", options.plugin_path.display());
     if let Some(auto_build) = &options.auto_build {
         eprintln!("auto build: {}", describe_build(auto_build));
         eprintln!("running initial build");
@@ -154,6 +161,9 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         .clone()
         .map(start_build_watcher)
         .unwrap_or_else(CompileState::compiled);
+
+    let plugin_path = options.plugin_path.clone();
+    let auto_build = options.auto_build.as_ref();
 
     let app = Arc::new(Mutex::new(PreviewApp {
         plugin: HotReloadPlugin::new(options.plugin_path),
@@ -173,6 +183,13 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
             .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
         app.reload_plugin_if_changed()?;
     }
+    print_startup_banner(StartupBannerInputs {
+        listen_addr: local_addr,
+        plugin_path: &plugin_path,
+        gpu_preference: options.gpu_preference,
+        auto_build,
+        started_at: options.started_at,
+    });
     if prewarm_gpu {
         start_preview_prewarm(Arc::clone(&app));
     }

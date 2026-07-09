@@ -46,6 +46,9 @@ cargo run -p tellur-live -- serve \
 ```
 
 Open `http://127.0.0.1:4317/` for the minimal browser client.
+On startup, `tellur-live` prints a short banner to stderr with the listen URL,
+CPU, selected GPU adapter (when enabled), and the effective `TELLUR_CACHE_RAM` /
+`TELLUR_VRAM` budgets.
 Use `--host 0.0.0.0` when the preview server should be reachable from other
 devices on the network.
 Pass `--verbose` to print per-frame timing and cache statistics to stdout.

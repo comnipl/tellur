@@ -19,7 +19,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command as Process;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cargo_metadata::{Metadata, MetadataCommand, Package};
 use clap::{Args, Parser, Subcommand};
@@ -106,6 +106,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
+    let started_at = Instant::now();
     let gpu_preference = if args.no_gpu {
         GpuPreference::Disabled
     } else if args.gpu {
@@ -198,6 +199,7 @@ fn live(args: LiveArgs) -> Result<(), Box<dyn Error>> {
         gpu_preference,
         verbose: args.verbose,
         auto_build,
+        started_at,
     })
 }
 
