@@ -29,7 +29,8 @@ const DEFAULT_FILL_DELAY: f32 = 0.0;
 const DEFAULT_FILL_LEAD: f32 = 0.07;
 const DEFAULT_FILL_DURATION: f32 = 0.24;
 const DEFAULT_STROKE_SPEED: f32 = 2400.0;
-const DEFAULT_PER_PATH_SECS: f32 = 0.25;
+const DEFAULT_MAX_STROKE_SPEED: f32 = 2400.0;
+const DEFAULT_PER_PATH_SECS: f32 = 0.17;
 const DEFAULT_LAG_RATIO: f32 = 0.5;
 const DEFAULT_TIMED_FILL_LEAD: f32 = 0.08;
 const DEFAULT_TIMED_FILL_DURATION: f32 = 0.18;
@@ -282,6 +283,11 @@ pub struct TimedWrite {
     /// Pen speed in child units per second under [`WritePacing::ByLength`].
     #[builder(default = DEFAULT_STROKE_SPEED)]
     pub stroke_speed: f32,
+    /// Upper bound on pen speed (child units per second). Slots whose
+    /// nominal pace would exceed this get a longer stroke_duration while
+    /// their fill timing stays on the nominal slot. `f32::INFINITY` disables.
+    #[builder(default = DEFAULT_MAX_STROKE_SPEED)]
+    pub max_stroke_speed: f32,
     #[builder(default = DEFAULT_STROKE_WIDTH)]
     pub stroke_width: f32,
     #[builder(default = DEFAULT_TIMED_FILL_LEAD)]
@@ -319,6 +325,7 @@ impl TimedWrite {
             per_path_secs: DEFAULT_PER_PATH_SECS,
             lag_ratio: DEFAULT_LAG_RATIO,
             stroke_speed: DEFAULT_STROKE_SPEED,
+            max_stroke_speed: DEFAULT_MAX_STROKE_SPEED,
             stroke_width: DEFAULT_STROKE_WIDTH,
             fill_lead: DEFAULT_TIMED_FILL_LEAD,
             fill_duration: DEFAULT_TIMED_FILL_DURATION,
@@ -346,6 +353,14 @@ impl TimedWrite {
     pub fn stroke_speed(mut self, stroke_speed: f32) -> Self {
         self.pacing = WritePacing::ByLength;
         self.stroke_speed = stroke_speed;
+        self
+    }
+
+    /// Caps how fast the pen may travel (child units per second). Paths whose
+    /// nominal per-path pace would exceed this take longer to stroke, while
+    /// fill timing stays on the nominal slot. Pass `f32::INFINITY` to disable.
+    pub fn max_stroke_speed(mut self, max_stroke_speed: f32) -> Self {
+        self.max_stroke_speed = max_stroke_speed;
         self
     }
 
@@ -406,12 +421,21 @@ impl VectorComponent for TimedWrite {
         let inner = self.child.render(size);
         let lengths = collect_write_lengths(&inner.root, self.stroke_width);
         let total: f32 = lengths.iter().sum();
-        let (_, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
-        let span = span * self.seconds_per_unit();
+        let (mut slots, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
+        let scale = self.seconds_per_unit();
+        scale_slots(&mut slots, scale);
+        cap_stroke_speed(&mut slots, self.max_stroke_speed);
+        let span = span * scale;
         let elapsed = self.elapsed();
         if elapsed <= 0.0
             || total <= 0.0
-            || elapsed >= timed_done_at(span, self.fill_lead, self.fill_duration)
+            || elapsed
+                >= timed_done_at(
+                    stroke_span(&slots),
+                    span,
+                    self.fill_lead,
+                    self.fill_duration,
+                )
         {
             return self.child.paint_bounds(size);
         }
@@ -426,10 +450,19 @@ impl VectorComponent for TimedWrite {
         let (mut slots, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
         let scale = self.seconds_per_unit();
         scale_slots(&mut slots, scale);
+        cap_stroke_speed(&mut slots, self.max_stroke_speed);
         let span = span * scale;
         let elapsed = self.elapsed();
 
-        if total > 0.0 && elapsed >= timed_done_at(span, self.fill_lead, self.fill_duration) {
+        if total > 0.0
+            && elapsed
+                >= timed_done_at(
+                    stroke_span(&slots),
+                    span,
+                    self.fill_lead,
+                    self.fill_duration,
+                )
+        {
             return inner;
         }
 
@@ -640,7 +673,10 @@ fn collect_write_lengths(node: &Node, fallback_stroke_width: f32) -> Vec<f32> {
 #[derive(Clone, Copy)]
 struct Slot {
     start: f32,
+    /// Fill scheduling slot: fill starts fading at `start + duration`.
     duration: f32,
+    /// How long the pen actually takes; >= duration when speed-capped.
+    stroke_duration: f32,
     length: f32,
 }
 
@@ -660,6 +696,7 @@ fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slo
                     let slot = Slot {
                         start: walked,
                         duration,
+                        stroke_duration: duration,
                         length,
                     };
                     walked += duration;
@@ -680,12 +717,14 @@ fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slo
                         Slot {
                             start,
                             duration: 0.0,
+                            stroke_duration: 0.0,
                             length: 0.0,
                         }
                     } else {
                         let slot = Slot {
                             start,
                             duration: 1.0,
+                            stroke_duration: 1.0,
                             length,
                         };
                         span = span.max(start + 1.0);
@@ -703,19 +742,41 @@ fn scale_slots(slots: &mut [Slot], scale: f32) {
     for slot in slots {
         slot.start *= scale;
         slot.duration *= scale;
+        slot.stroke_duration *= scale;
     }
+}
+
+/// Extends each slot's stroke_duration so the pen never exceeds
+/// `max_speed` (units/sec), leaving fill scheduling (`duration`) intact.
+fn cap_stroke_speed(slots: &mut [Slot], max_speed: f32) {
+    if !(max_speed > 0.0) || !max_speed.is_finite() {
+        return;
+    }
+    for slot in slots {
+        if slot.length > 0.0 {
+            slot.stroke_duration = slot.stroke_duration.max(slot.length / max_speed);
+        }
+    }
+}
+
+/// Latest moment any pen is still drawing, accounting for speed caps.
+fn stroke_span(slots: &[Slot]) -> f32 {
+    slots
+        .iter()
+        .map(|slot| slot.start + slot.stroke_duration)
+        .fold(0.0, f32::max)
 }
 
 /// Fraction of `slot` the write cursor has covered, saturating at both ends.
 fn slot_progress(cursor: f32, slot: Slot) -> f32 {
-    if slot.duration <= 0.0 {
+    if slot.stroke_duration <= 0.0 {
         if cursor >= slot.start {
             1.0
         } else {
             0.0
         }
     } else {
-        clamp_unit((cursor - slot.start) / slot.duration)
+        clamp_unit((cursor - slot.start) / slot.stroke_duration)
     }
 }
 
@@ -1070,10 +1131,11 @@ fn timed_stroke_speed(stroke_speed: f32) -> f32 {
 }
 
 /// The moment (in seconds) a timed write is fully settled: the last outline
-/// is drawn at `span` and the last fill has finished fading after it.
-fn timed_done_at(span: f32, fill_lead: f32, fill_duration: f32) -> f32 {
-    let fill_done = (span - fill_lead.max(0.0)).max(0.0) + fill_duration.max(0.000_1);
-    span.max(fill_done)
+/// is drawn at `stroke_span` and the last fill has finished fading after the
+/// nominal fill schedule ends at `fill_span`.
+fn timed_done_at(stroke_span: f32, fill_span: f32, fill_lead: f32, fill_duration: f32) -> f32 {
+    let fill_done = (fill_span - fill_lead.max(0.0)).max(0.0) + fill_duration.max(0.000_1);
+    stroke_span.max(fill_done)
 }
 
 fn smoothstep(t: f32) -> f32 {
@@ -1608,6 +1670,118 @@ mod tests {
             panic!("second child should still be the unfinished temporary stroke");
         };
         assert!(matches!(stroke.child.as_ref(), Node::Path(_)));
+    }
+
+    #[test]
+    fn max_stroke_speed_slows_long_paths() {
+        // Short path: 40 units, long path: 80 units. With per_path_secs=1 and
+        // lag_ratio=1 the nominal slots are [0,1] and [1,2]. Cap at 40 u/s so
+        // the long path needs 2s of stroke time and is only halfway done at t=2.
+        let write = UnevenRects
+            .write_elapsed(2.0)
+            .per_path_secs(1.0)
+            .lag_ratio(1.0)
+            .max_stroke_speed(40.0)
+            .fill_lead_secs(0.0);
+        let graphic = write.render(Vec2(44.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("capped write reveal should render a group");
+        };
+
+        assert_eq!(root.children.len(), 2);
+        let Node::Group(fill) = &root.children[0] else {
+            panic!("first child should be the per-path fill layer");
+        };
+        // Short path finished on schedule (fill fully opaque). Long path's
+        // fill has not started yet at the exact slot-end instant with lead=0.
+        assert!(matches!(fill.children[0], Node::Path(_)));
+        assert!(fill.children[1].is_empty());
+
+        let Node::Group(stroke) = &root.children[1] else {
+            panic!("second child should be the stroke reveal layer");
+        };
+        let Node::SingleGroup(done) = &stroke.children[0] else {
+            panic!("short path should be complete and dimmed");
+        };
+        assert!((done.opacity - DEFAULT_COMPLETED_STROKE_OPACITY).abs() < 0.000_01);
+
+        let Node::ClipGroup(long) = &stroke.children[1] else {
+            panic!("long path should still be writing under the speed cap");
+        };
+        let Node::Path(long) = long.child.as_ref() else {
+            panic!("clipped reveal should contain a stroke path");
+        };
+        // 1s into a 2s stroke at 40 u/s: 40 of 80 units drawn.
+        assert_eq!(
+            long.commands,
+            vec![
+                PathCommand::MoveTo(Vec2(14.0, 0.0)),
+                PathCommand::LineTo(Vec2(44.0, 0.0)),
+                PathCommand::LineTo(Vec2(44.0, 10.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn fill_starts_on_schedule_even_when_stroke_is_capped() {
+        // At t=2.1 the long path's fill has started (slot ends at 2.0, lead=0)
+        // while its stroke is still incomplete (needs until t=3.0 at 40 u/s).
+        let write = UnevenRects
+            .write_elapsed(2.1)
+            .per_path_secs(1.0)
+            .lag_ratio(1.0)
+            .max_stroke_speed(40.0)
+            .fill_lead_secs(0.0)
+            .fill_duration_secs(0.2);
+        let graphic = write.render(Vec2(44.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("capped write reveal should render a group");
+        };
+
+        assert_eq!(root.children.len(), 2);
+        let Node::Group(fill) = &root.children[0] else {
+            panic!("first child should be the per-path fill layer");
+        };
+        let Node::SingleGroup(long_fill) = &fill.children[1] else {
+            panic!("long path fill should have started on the nominal schedule");
+        };
+        assert!(long_fill.opacity > 0.0);
+        assert!(long_fill.opacity < 1.0);
+
+        let Node::Group(stroke) = &root.children[1] else {
+            panic!("second child should be the stroke reveal layer");
+        };
+        assert!(
+            matches!(stroke.children[1], Node::ClipGroup(_)),
+            "long path stroke should still be unfinished under the speed cap"
+        );
+    }
+
+    #[test]
+    fn capped_write_is_not_done_until_stroke_finishes() {
+        // Long path stroke ends at t=3.0; fill finishes earlier (2.0 + 0.18).
+        // Just before stroke completion the reveal must still be active.
+        let almost = UnevenRects
+            .write_elapsed(2.99)
+            .per_path_secs(1.0)
+            .lag_ratio(1.0)
+            .max_stroke_speed(40.0);
+        let graphic = almost.render(Vec2(44.0, 10.0));
+        let Node::Group(root) = graphic.root else {
+            panic!("capped write should still be revealing just before stroke end");
+        };
+        assert!(
+            root.children.len() >= 1,
+            "should still be drawing the capped stroke"
+        );
+
+        let done = UnevenRects
+            .write_elapsed(3.0)
+            .per_path_secs(1.0)
+            .lag_ratio(1.0)
+            .max_stroke_speed(40.0);
+        let original = UnevenRects.render(Vec2(44.0, 10.0));
+        assert_eq!(done.render(Vec2(44.0, 10.0)), original);
     }
 
     #[test]
