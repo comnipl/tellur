@@ -106,6 +106,7 @@
             pkgs.cargo-watch
             pkgs.cargo-nextest
             pkgs.just
+            pkgs.knope
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.pkg-config

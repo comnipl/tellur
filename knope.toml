@@ -1,0 +1,73 @@
+# Lockstep release config for the tellur workspace.
+# All crates share workspace.package.version; inter-crate dependency pins are
+# listed so PrepareRelease bumps them together.
+#
+# Single anonymous [package] so Git tags stay `vX.Y.Z` (not `tellur/vX.Y.Z`).
+# Changeset front matter therefore uses `default: patch|minor|major`.
+
+[changes]
+ignore_conventional_commits = true
+
+[package]
+versioned_files = [
+    "Cargo.toml",
+    { path = "tellur/Cargo.toml", dependency = "tellur-core" },
+    { path = "tellur/Cargo.toml", dependency = "tellur-plugin" },
+    { path = "tellur/Cargo.toml", dependency = "tellur-renderer" },
+    { path = "tellur/Cargo.toml", dependency = "tellur-live" },
+    { path = "tellur-core/Cargo.toml", dependency = "tellur-macros" },
+    { path = "tellur-plugin/Cargo.toml", dependency = "tellur-core" },
+    { path = "tellur-renderer/Cargo.toml", dependency = "tellur-core" },
+    { path = "tellur-live/Cargo.toml", dependency = "tellur-core" },
+    { path = "tellur-live/Cargo.toml", dependency = "tellur-plugin" },
+    { path = "tellur-live/Cargo.toml", dependency = "tellur-renderer" },
+]
+changelog = "CHANGELOG.md"
+
+[github]
+owner = "comnipl"
+repo = "tellur"
+
+[[workflows]]
+name = "document-change"
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+[[workflows]]
+name = "prepare-release"
+[[workflows.steps]]
+type = "PrepareRelease"
+# Required on knope 0.22.x (nixpkgs); [changes] alone does not flip this flag yet.
+ignore_conventional_commits = true
+# Cargo.lock is regenerated outside knope (workspace members share one lockfile
+# and the first versioned_files entry is the root workspace Cargo.toml).
+[[workflows.steps]]
+type = "Command"
+command = "cargo update --workspace"
+[[workflows.steps]]
+type = "Command"
+command = "git add Cargo.lock"
+[[workflows.steps]]
+type = "Command"
+command = "git switch -C release/v$version"
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"chore: release v$version\""
+[[workflows.steps]]
+type = "Command"
+command = "git push --force --set-upstream origin release/v$version"
+[[workflows.steps]]
+type = "CreatePullRequest"
+base = "main"
+[workflows.steps.title]
+template = "chore: release v$version"
+[workflows.steps.body]
+template = """This PR was created by Knope. Merging it will tag `v$version`, create a GitHub Release, and publish all workspace crates to crates.io.
+
+$changelog
+"""
+
+[[workflows]]
+name = "release"
+[[workflows.steps]]
+type = "Release"

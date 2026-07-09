@@ -1,0 +1,50 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare-release:
+    name: Prepare Release PR
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          # PAT so the created Release PR can trigger workflows (GITHUB_TOKEN cannot).
+          token: ${{ secrets.RELEASE_PR_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - name: Require at least one changeset
+        run: |
+          shopt -s nullglob
+          files=(.changeset/*.md)
+          if ((${#files[@]} == 0)); then
+            echo "::error::No .changeset/*.md files found. Add a changeset before preparing a release."
+            exit 1
+          fi
+          printf 'Found %d changeset(s):\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+
+      - name: Prepare release PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PR_TOKEN }}
+        run: nix develop --command knope prepare-release --verbose

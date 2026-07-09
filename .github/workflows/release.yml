@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # Runs on open/update of a Release PR so publish failures are caught before merge.
+  publish-dry-run:
+    name: Publish dry-run
+    if: >
+      github.event.action != 'closed'
+      && startsWith(github.head_ref, 'release/')
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          key: publish-dry-run
+
+      - name: Inject tellur-live web bundle
+        run: |
+          nix build .#web --out-link /tmp/tellur-live-web
+          mkdir -p tellur-live/web/dist
+          cp -r /tmp/tellur-live-web/. tellur-live/web/dist/
+
+      - name: cargo publish --workspace --dry-run
+        run: nix develop --command cargo publish --workspace --locked --dry-run
+
+  # Tag + GitHub Release after the Release PR merges.
+  github-release:
+    name: Tag and GitHub Release
+    if: >
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+      && startsWith(github.head_ref, 'release/')
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          # Need a token that can create tags/releases; RELEASE_PR_TOKEN works.
+          # Fall back is fine only if contents:write on GITHUB_TOKEN is enough
+          # (it is for tags/releases created by the workflow itself).
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - name: Create tag and GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: nix develop --command knope release --verbose
+
+  # Publish all workspace crates via crates.io Trusted Publishing (OIDC).
+  # Re-running this job after a partial failure is safe: already-published
+  # versions error with "already uploaded"; publish remaining crates with
+  # `cargo publish -p <crate>` or re-run after yanking is NOT needed — just
+  # re-run and skip crates that already exist by publishing individually if
+  # --workspace aborts early.
+  publish:
+    name: Publish to crates.io
+    needs: [github-release]
+    if: >
+      github.event.action == 'closed'
+      && github.event.pull_request.merged == true
+      && startsWith(github.head_ref, 'release/')
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - run: sudo mkdir -p /nix && sudo chown "$(id -u):$(id -g)" /nix
+
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5
+        with:
+          path: /nix
+          key: nix-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+
+      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+        with:
+          key: publish
+
+      - name: Inject tellur-live web bundle
+        run: |
+          nix build .#web --out-link /tmp/tellur-live-web
+          mkdir -p tellur-live/web/dist
+          cp -r /tmp/tellur-live-web/. tellur-live/web/dist/
+
+      - name: Authenticate to crates.io (Trusted Publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1
+
+      - name: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: nix develop --command cargo publish --workspace --locked
