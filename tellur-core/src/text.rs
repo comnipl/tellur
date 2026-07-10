@@ -139,6 +139,17 @@ pub struct FontMetrics {
     pub line_gap: f32,
 }
 
+/// A font's vertical metrics in design units, read once at construction.
+/// These are face constants (independent of rendering size), so caching
+/// them lets [`Font::vertical_metrics`] scale directly instead of
+/// reparsing the face on every call.
+struct FontUnitMetrics {
+    units_per_em: f32,
+    ascender: f32,
+    descender: f32,
+    line_gap: f32,
+}
+
 /// An owned font, cheaply shareable via `Arc<Font>` across components.
 ///
 /// The byte buffer is reference-counted. Shaping a run — building a
@@ -153,6 +164,7 @@ pub struct FontMetrics {
 pub struct Font {
     data: Arc<Vec<u8>>,
     face_index: u32,
+    unit_metrics: FontUnitMetrics,
     shape_cache: Mutex<LruCache<ShapeKey, Arc<ShapedGlyphs>>>,
 }
 
@@ -172,10 +184,18 @@ impl Font {
         face_index: u32,
     ) -> Result<Self, FontError> {
         let data: Arc<Vec<u8>> = bytes.into();
-        rustybuzz::Face::from_slice(data.as_ref(), face_index).ok_or(FontError::Parse)?;
+        let face =
+            rustybuzz::Face::from_slice(data.as_ref(), face_index).ok_or(FontError::Parse)?;
+        let unit_metrics = FontUnitMetrics {
+            units_per_em: face.units_per_em() as f32,
+            ascender: face.ascender() as f32,
+            descender: face.descender() as f32,
+            line_gap: face.line_gap() as f32,
+        };
         Ok(Self {
             data,
             face_index,
+            unit_metrics,
             shape_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(SHAPE_CACHE_CAPACITY).expect("cache capacity is non-zero"),
             )),
@@ -274,14 +294,12 @@ impl Font {
 
     /// This font's vertical metrics at `size`.
     pub fn vertical_metrics(&self, size: f32) -> FontMetrics {
-        let face = self.face();
-        let upem = face.units_per_em() as f32;
-        let scale = size / upem;
-        let ascent = face.ascender() as f32 * scale;
+        let scale = size / self.unit_metrics.units_per_em;
+        let ascent = self.unit_metrics.ascender * scale;
         // `descender` is conventionally negative (below baseline); flip it
         // to a non-negative depth.
-        let descent = -(face.descender() as f32) * scale;
-        let line_gap = face.line_gap() as f32 * scale;
+        let descent = -self.unit_metrics.descender * scale;
+        let line_gap = self.unit_metrics.line_gap * scale;
         FontMetrics {
             ascent: ascent.max(0.0),
             descent: descent.max(0.0),
