@@ -9,4 +9,4 @@ description = "Plugin ABI for loading tellur timelines as dynamic libraries"
 build = "build.rs"
 
 [dependencies]
-tellur-core = { path = "../tellur-core", version = "0.1.0" }
+tellur-core = { path = "../tellur-core", version = "0.2.0" }
