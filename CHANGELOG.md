@@ -3,6 +3,16 @@
 All notable changes to tellur are documented in this file.
 Versions are lockstep across the workspace.
 
+## 0.2.1 (2026-07-10)
+
+### Fixes
+
+- **Cache font unit metrics at construction**
+
+  `Font::vertical_metrics` reparsed the entire `rustybuzz::Face` on every call, even on shape-cache hits, making text-heavy renders CPU-bound.  
+  The metrics are face constants, so they are now read once when the font is constructed and only scaled per call.
+
+
 ## 0.2.0 (2026-07-09)
 
 ### Breaking Changes

@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "tellur"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -2026,7 +2026,7 @@ dependencies = [
 
 [[package]]
 name = "tellur-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ab_glyph",
  "bon",
@@ -2050,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "tellur-live"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lru",
  "png",
@@ -2061,7 +2061,7 @@ dependencies = [
 
 [[package]]
 name = "tellur-macros"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2071,14 +2071,14 @@ dependencies = [
 
 [[package]]
 name = "tellur-plugin"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tellur-core",
 ]
 
 [[package]]
 name = "tellur-renderer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "bytes",

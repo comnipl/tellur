@@ -24,9 +24,9 @@ include = [
 [dependencies]
 lru = "0.12.5"
 png = "0.18.1"
-tellur-core = { path = "../tellur-core", version = "0.2.0" }
-tellur-plugin = { path = "../tellur-plugin", version = "0.2.0" }
-tellur-renderer = { path = "../tellur-renderer", version = "0.2.0" }
+tellur-core = { path = "../tellur-core", version = "0.2.1" }
+tellur-plugin = { path = "../tellur-plugin", version = "0.2.1" }
+tellur-renderer = { path = "../tellur-renderer", version = "0.2.1" }
 
 [[example]]
 name = "demo_timeline_plugin"
@@ -41,4 +41,4 @@ name = "timeline_showcase"
 crate-type = ["cdylib"]
 
 [dev-dependencies]
-tellur-plugin = { path = "../tellur-plugin", version = "0.2.0" }
+tellur-plugin = { path = "../tellur-plugin", version = "0.2.1" }
