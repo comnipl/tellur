@@ -790,8 +790,8 @@ impl RenderContext for CachingRenderContext {
             RasterImage::Cpu(image) => image,
             image @ RasterImage::Gpu(_) => {
                 let readback_bytes = Self::image_bytes(&image);
-                let backend = match &image {
-                    RasterImage::Gpu(surface) => surface.backend(),
+                let (backend, width, height) = match &image {
+                    RasterImage::Gpu(surface) => (surface.backend(), surface.width, surface.height),
                     RasterImage::Cpu(_) => unreachable!(),
                 };
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -803,6 +803,10 @@ impl RenderContext for CachingRenderContext {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.release_cached_resources();
                 }
+                // The composite caches hold Arc clones of surfaces also tracked by
+                // the LRU cache below, so without clearing them first the LRU
+                // eviction releases no VRAM (the Arc refcount never hits zero).
+                tellur_core::clear_composite_caches();
                 self.evict_gpu_cache_until_vram_available(readback_bytes);
                 if let Some(gpu) = self.gpu.as_mut() {
                     if let Some(image) = gpu.readback(image) {
@@ -811,7 +815,7 @@ impl RenderContext for CachingRenderContext {
                 }
 
                 panic!(
-                    "render context could not read back GPU image for backend '{backend}' after freeing {readback_bytes} bytes for readback",
+                    "render context could not read back {width}x{height} GPU image ({readback_bytes} bytes) for backend '{backend}' after clearing render, upload, and composite caches",
                 )
             }
         }
