@@ -20,28 +20,14 @@ use std::sync::{LazyLock, Mutex};
 
 use lru::LruCache;
 
-use crate::cache_budget::configured_vram_bytes;
-use crate::raster::{
-    pixel_stride, CpuRasterImage, PixelFormat, RasterImage, RasterStorageId, Resolution,
-};
+use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, RasterStorageId, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 
 const COMPOSITE_FRAMES_CACHE_ENTRIES: usize = 32;
-// Absolute ceiling regardless of the configured VRAM budget, so a huge
-// `TELLUR_VRAM` setting can't let one cache pin unbounded memory.
-const COMPOSITE_FRAMES_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
-struct CompositeFramesCacheState {
-    cache: LruCache<CompositeFramesCacheKey, CompositeFramesCacheEntry>,
-    bytes: usize,
-}
-
-static COMPOSITE_FRAMES_CACHE: LazyLock<Mutex<CompositeFramesCacheState>> = LazyLock::new(|| {
-    Mutex::new(CompositeFramesCacheState {
-        cache: LruCache::unbounded(),
-        bytes: 0,
-    })
-});
+static COMPOSITE_FRAMES_CACHE: LazyLock<
+    Mutex<LruCache<CompositeFramesCacheKey, CompositeFramesCacheEntry>>,
+> = LazyLock::new(|| Mutex::new(LruCache::unbounded()));
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CompositeFramesCacheKey {
@@ -55,38 +41,11 @@ struct CompositeFramesCacheEntry {
     output: RasterImage,
 }
 
-impl CompositeFramesCacheEntry {
-    fn bytes(&self) -> usize {
-        self._inputs
-            .iter()
-            .chain(std::iter::once(&self.output))
-            .map(raster_image_bytes)
-            .sum()
-    }
-}
-
-fn raster_image_bytes(image: &RasterImage) -> usize {
-    image.width() as usize * image.height() as usize * pixel_stride(image.format())
-}
-
-/// Drops every cached composited-frame entry and releases the VRAM/RAM it
-/// pinned. Callers use this as an emergency eviction path — e.g. before an
-/// operation that needs headroom right away — since the cache otherwise only
-/// shrinks via LRU/byte-cap eviction on the next `put`.
-pub fn clear_composite_frames_cache() {
-    if let Ok(mut state) = COMPOSITE_FRAMES_CACHE.lock() {
-        state.cache.clear();
-        state.bytes = 0;
-    }
-}
-
 #[cfg(test)]
 fn clear_composite_frames_cache_for_tests() {
-    clear_composite_frames_cache();
-}
-
-fn composite_frames_cache_byte_cap() -> usize {
-    (configured_vram_bytes() / 16).min(COMPOSITE_FRAMES_CACHE_MAX_BYTES)
+    if let Ok(mut cache) = COMPOSITE_FRAMES_CACHE.lock() {
+        cache.clear();
+    }
 }
 
 fn composite_frames_cache_key(
@@ -103,7 +62,7 @@ fn cached_composite_frames(key: &CompositeFramesCacheKey) -> Option<RasterImage>
     COMPOSITE_FRAMES_CACHE
         .lock()
         .ok()
-        .and_then(|mut state| state.cache.get(key).map(|entry| entry.output.clone()))
+        .and_then(|mut cache| cache.get(key).map(|entry| entry.output.clone()))
 }
 
 fn cache_composite_frames(
@@ -111,34 +70,17 @@ fn cache_composite_frames(
     inputs: Vec<RasterImage>,
     output: RasterImage,
 ) {
-    if let Ok(mut state) = COMPOSITE_FRAMES_CACHE.lock() {
-        let entry = CompositeFramesCacheEntry {
-            _inputs: inputs,
-            output,
-        };
-        let entry_bytes = entry.bytes();
-        if let Some(old) = state.cache.put(key, entry) {
-            state.bytes = state.bytes.saturating_sub(old.bytes());
-        }
-        state.bytes = state.bytes.saturating_add(entry_bytes);
-        trim_composite_frames_cache(
-            &mut state,
-            COMPOSITE_FRAMES_CACHE_ENTRIES,
-            composite_frames_cache_byte_cap(),
+    if let Ok(mut cache) = COMPOSITE_FRAMES_CACHE.lock() {
+        cache.put(
+            key,
+            CompositeFramesCacheEntry {
+                _inputs: inputs,
+                output,
+            },
         );
-    }
-}
-
-fn trim_composite_frames_cache(
-    state: &mut CompositeFramesCacheState,
-    max_entries: usize,
-    max_bytes: usize,
-) {
-    while state.cache.len() > max_entries || state.bytes > max_bytes {
-        let Some((_, evicted)) = state.cache.pop_lru() else {
-            break;
-        };
-        state.bytes = state.bytes.saturating_sub(evicted.bytes());
+        while cache.len() > COMPOSITE_FRAMES_CACHE_ENTRIES {
+            cache.pop_lru();
+        }
     }
 }
 
@@ -315,15 +257,6 @@ mod tests {
     use crate::raster::RasterComponent;
     use crate::render_context::{DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput};
     use crate::vector::VectorGraphic;
-
-    // `COMPOSITE_FRAMES_CACHE` is a process-wide static, so tests that read
-    // or write it must not interleave with each other under the default
-    // parallel test runner. Poison is recovered rather than propagated so
-    // one panicking test doesn't cascade-fail the rest.
-    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-    fn lock_cache_for_test() -> std::sync::MutexGuard<'static, ()> {
-        CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     #[derive(Default)]
     struct FakeGpu {
@@ -541,7 +474,6 @@ mod tests {
 
     #[test]
     fn composite_frames_uses_gpu_batch_without_readback() {
-        let _guard = lock_cache_for_test();
         clear_composite_frames_cache_for_tests();
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
@@ -562,7 +494,6 @@ mod tests {
 
     #[test]
     fn composite_frames_reuses_cached_batch_for_same_input_storage() {
-        let _guard = lock_cache_for_test();
         clear_composite_frames_cache_for_tests();
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
@@ -585,7 +516,6 @@ mod tests {
 
     #[test]
     fn composite_frames_falls_back_to_cpu_when_gpu_declines() {
-        let _guard = lock_cache_for_test();
         clear_composite_frames_cache_for_tests();
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
@@ -602,67 +532,5 @@ mod tests {
         assert_eq!(ctx.gpu.composite_calls, 1);
         assert_eq!(ctx.gpu.composite_inputs, vec![2]);
         clear_composite_frames_cache_for_tests();
-    }
-
-    #[test]
-    fn trim_evicts_lru_entries_to_satisfy_byte_cap() {
-        fn small_image() -> RasterImage {
-            // 4x4 Rgba8 = 64 bytes; each entry holds one input plus the
-            // output, so 128 bytes per entry.
-            RasterImage::cpu(4, 4, PixelFormat::Rgba8, vec![0u8; 4 * 4 * 4])
-        }
-
-        let mut state = CompositeFramesCacheState {
-            cache: LruCache::unbounded(),
-            bytes: 0,
-        };
-        for i in 0..5u32 {
-            let key = CompositeFramesCacheKey {
-                target: Resolution::new(i, 0),
-                inputs: Vec::new(),
-            };
-            let entry = CompositeFramesCacheEntry {
-                _inputs: vec![small_image()],
-                output: small_image(),
-            };
-            let entry_bytes = entry.bytes();
-            if let Some(old) = state.cache.put(key, entry) {
-                state.bytes = state.bytes.saturating_sub(old.bytes());
-            }
-            state.bytes = state.bytes.saturating_add(entry_bytes);
-        }
-        assert_eq!(state.bytes, 5 * 128);
-
-        // A tiny byte cap forces eviction well before the 32-entry cap.
-        trim_composite_frames_cache(&mut state, 32, 300);
-
-        assert_eq!(state.cache.len(), 2);
-        assert_eq!(state.bytes, 256);
-        assert!(state.bytes <= 300);
-    }
-
-    #[test]
-    fn clear_composite_frames_cache_empties_state_and_resets_bytes() {
-        let _guard = lock_cache_for_test();
-        clear_composite_frames_cache_for_tests();
-        let frames = vec![
-            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
-            RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
-        ];
-        let mut ctx = FakeContext::new(true);
-        let _ = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("composite produces an output");
-
-        {
-            let state = COMPOSITE_FRAMES_CACHE.lock().unwrap();
-            assert!(!state.cache.is_empty());
-            assert!(state.bytes > 0);
-        }
-
-        clear_composite_frames_cache();
-
-        let state = COMPOSITE_FRAMES_CACHE.lock().unwrap();
-        assert_eq!(state.cache.len(), 0);
-        assert_eq!(state.bytes, 0);
     }
 }

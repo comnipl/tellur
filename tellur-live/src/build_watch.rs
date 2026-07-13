@@ -2,18 +2,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// A panicking build-watch or render thread must not permanently poison this
-/// lock; the compile snapshot is plain data, so recovering from a poisoned
-/// lock and keeping the last-known state is safe.
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 #[derive(Debug, Clone)]
 pub struct AutoBuildOptions {
@@ -73,11 +64,19 @@ impl CompileState {
     }
 
     pub fn snapshot(&self) -> CompileSnapshot {
-        lock_unpoisoned(&self.inner).clone()
+        self.inner
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_else(|_| CompileSnapshot {
+                status: CompileStatus::Failed,
+                last_error: Some("compile state lock poisoned".to_owned()),
+            })
     }
 
     fn set(&self, status: CompileStatus, last_error: Option<String>) {
-        *lock_unpoisoned(&self.inner) = CompileSnapshot { status, last_error };
+        if let Ok(mut state) = self.inner.lock() {
+            *state = CompileSnapshot { status, last_error };
+        }
     }
 }
 

@@ -43,13 +43,3 @@ pub use tellur_macros::{component, raster_component, vector_component, Keyable};
 // sets `#[builder(crate = ::tellur_core::__bon)]` so generated code resolves.
 #[doc(hidden)]
 pub use bon as __bon;
-
-/// Clears both global composite caches (`composite::clear_composite_frames_cache`
-/// and `layer::clear_composite_children_cache`), releasing all VRAM/RAM they
-/// pin. Downstream crates call this as an emergency eviction path under
-/// memory pressure, since the caches otherwise only shrink via their own
-/// LRU/byte-cap eviction on the next `put`.
-pub fn clear_composite_caches() {
-    composite::clear_composite_frames_cache();
-    layer::clear_composite_children_cache();
-}

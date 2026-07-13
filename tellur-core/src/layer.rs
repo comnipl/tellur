@@ -25,32 +25,17 @@ use std::sync::{LazyLock, Mutex};
 
 use lru::LruCache;
 
-use crate::cache_budget::configured_vram_bytes;
 use crate::composite::composite_at;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
-use crate::raster::{
-    pixel_stride, PixelFormat, RasterComponent, RasterImage, RasterStorageId, Resolution,
-};
+use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterStorageId, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
 const COMPOSITE_CHILDREN_CACHE_ENTRIES: usize = 32;
-// Absolute ceiling regardless of the configured VRAM budget, so a huge
-// `TELLUR_VRAM` setting can't let one cache pin unbounded memory.
-const COMPOSITE_CHILDREN_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
-struct CompositeChildrenCacheState {
-    cache: LruCache<CompositeChildrenCacheKey, CompositeChildrenCacheEntry>,
-    bytes: usize,
-}
-
-static COMPOSITE_CHILDREN_CACHE: LazyLock<Mutex<CompositeChildrenCacheState>> =
-    LazyLock::new(|| {
-        Mutex::new(CompositeChildrenCacheState {
-            cache: LruCache::unbounded(),
-            bytes: 0,
-        })
-    });
+static COMPOSITE_CHILDREN_CACHE: LazyLock<
+    Mutex<LruCache<CompositeChildrenCacheKey, CompositeChildrenCacheEntry>>,
+> = LazyLock::new(|| Mutex::new(LruCache::unbounded()));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CompositeChildrenCacheInput {
@@ -71,38 +56,11 @@ struct CompositeChildrenCacheEntry {
     output: RasterImage,
 }
 
-impl CompositeChildrenCacheEntry {
-    fn bytes(&self) -> usize {
-        self._inputs
-            .iter()
-            .chain(std::iter::once(&self.output))
-            .map(raster_image_bytes)
-            .sum()
-    }
-}
-
-fn raster_image_bytes(image: &RasterImage) -> usize {
-    image.width() as usize * image.height() as usize * pixel_stride(image.format())
-}
-
-/// Drops every cached composited-children entry and releases the VRAM/RAM it
-/// pinned. Callers use this as an emergency eviction path — e.g. before an
-/// operation that needs headroom right away — since the cache otherwise only
-/// shrinks via LRU/byte-cap eviction on the next `put`.
-pub fn clear_composite_children_cache() {
-    if let Ok(mut state) = COMPOSITE_CHILDREN_CACHE.lock() {
-        state.cache.clear();
-        state.bytes = 0;
-    }
-}
-
 #[cfg(test)]
 fn clear_composite_children_cache_for_tests() {
-    clear_composite_children_cache();
-}
-
-fn composite_children_cache_byte_cap() -> usize {
-    (configured_vram_bytes() / 16).min(COMPOSITE_CHILDREN_CACHE_MAX_BYTES)
+    if let Ok(mut cache) = COMPOSITE_CHILDREN_CACHE.lock() {
+        cache.clear();
+    }
 }
 
 fn composite_children_cache_key(
@@ -126,7 +84,7 @@ fn cached_composite_children(key: &CompositeChildrenCacheKey) -> Option<RasterIm
     COMPOSITE_CHILDREN_CACHE
         .lock()
         .ok()
-        .and_then(|mut state| state.cache.get(key).map(|entry| entry.output.clone()))
+        .and_then(|mut cache| cache.get(key).map(|entry| entry.output.clone()))
 }
 
 fn cache_composite_children(
@@ -134,34 +92,17 @@ fn cache_composite_children(
     inputs: Vec<RasterImage>,
     output: RasterImage,
 ) {
-    if let Ok(mut state) = COMPOSITE_CHILDREN_CACHE.lock() {
-        let entry = CompositeChildrenCacheEntry {
-            _inputs: inputs,
-            output,
-        };
-        let entry_bytes = entry.bytes();
-        if let Some(old) = state.cache.put(key, entry) {
-            state.bytes = state.bytes.saturating_sub(old.bytes());
-        }
-        state.bytes = state.bytes.saturating_add(entry_bytes);
-        trim_composite_children_cache(
-            &mut state,
-            COMPOSITE_CHILDREN_CACHE_ENTRIES,
-            composite_children_cache_byte_cap(),
+    if let Ok(mut cache) = COMPOSITE_CHILDREN_CACHE.lock() {
+        cache.put(
+            key,
+            CompositeChildrenCacheEntry {
+                _inputs: inputs,
+                output,
+            },
         );
-    }
-}
-
-fn trim_composite_children_cache(
-    state: &mut CompositeChildrenCacheState,
-    max_entries: usize,
-    max_bytes: usize,
-) {
-    while state.cache.len() > max_entries || state.bytes > max_bytes {
-        let Some((_, evicted)) = state.cache.pop_lru() else {
-            break;
-        };
-        state.bytes = state.bytes.saturating_sub(evicted.bytes());
+        while cache.len() > COMPOSITE_CHILDREN_CACHE_ENTRIES {
+            cache.pop_lru();
+        }
     }
 }
 
@@ -447,15 +388,6 @@ mod tests {
     use crate::shapes::Rectangle;
     use crate::vector::{Node, Paint};
 
-    // `COMPOSITE_CHILDREN_CACHE` is a process-wide static, so tests that
-    // read or write it must not interleave with each other under the
-    // default parallel test runner. Poison is recovered rather than
-    // propagated so one panicking test doesn't cascade-fail the rest.
-    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
-    fn lock_cache_for_test() -> std::sync::MutexGuard<'static, ()> {
-        CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     fn rect(w: f32, h: f32) -> Rectangle {
         Rectangle {
             size: Vec2(w, h),
@@ -616,7 +548,6 @@ mod tests {
 
     #[test]
     fn composite_children_reuses_cached_batch_for_same_input_storage() {
-        let _guard = lock_cache_for_test();
         clear_composite_children_cache_for_tests();
         let child = DummyRaster;
         let placed = [(Vec2::ZERO, Vec2(1.0, 1.0), &child as &dyn RasterComponent)];
@@ -635,68 +566,5 @@ mod tests {
         assert_eq!(ctx.gpu.composites, 1);
         assert_eq!(ctx.readbacks, 0);
         clear_composite_children_cache_for_tests();
-    }
-
-    #[test]
-    fn trim_evicts_lru_entries_to_satisfy_byte_cap() {
-        fn small_image() -> RasterImage {
-            // 4x4 Rgba8 = 64 bytes; each entry holds one input plus the
-            // output, so 128 bytes per entry.
-            RasterImage::cpu(4, 4, PixelFormat::Rgba8, vec![0u8; 4 * 4 * 4])
-        }
-
-        let mut state = CompositeChildrenCacheState {
-            cache: LruCache::unbounded(),
-            bytes: 0,
-        };
-        for i in 0..5u32 {
-            let key = CompositeChildrenCacheKey {
-                target: Resolution::new(i, 0),
-                inputs: Vec::new(),
-            };
-            let entry = CompositeChildrenCacheEntry {
-                _inputs: vec![small_image()],
-                output: small_image(),
-            };
-            let entry_bytes = entry.bytes();
-            if let Some(old) = state.cache.put(key, entry) {
-                state.bytes = state.bytes.saturating_sub(old.bytes());
-            }
-            state.bytes = state.bytes.saturating_add(entry_bytes);
-        }
-        assert_eq!(state.bytes, 5 * 128);
-
-        // A tiny byte cap forces eviction well before the 32-entry cap.
-        trim_composite_children_cache(&mut state, 32, 300);
-
-        assert_eq!(state.cache.len(), 2);
-        assert_eq!(state.bytes, 256);
-        assert!(state.bytes <= 300);
-    }
-
-    #[test]
-    fn clear_composite_children_cache_empties_state_and_resets_bytes() {
-        let _guard = lock_cache_for_test();
-        clear_composite_children_cache_for_tests();
-        let child = DummyRaster;
-        let placed = [(Vec2::ZERO, Vec2(1.0, 1.0), &child as &dyn RasterComponent)];
-        let paint_rect = Rect {
-            origin: Vec2::ZERO,
-            size: Vec2(1.0, 1.0),
-        };
-        let mut ctx = FakeContext::new();
-        let _ = composite_children(paint_rect, Resolution::new(1, 1), &placed, &mut ctx);
-
-        {
-            let state = COMPOSITE_CHILDREN_CACHE.lock().unwrap();
-            assert!(!state.cache.is_empty());
-            assert!(state.bytes > 0);
-        }
-
-        clear_composite_children_cache();
-
-        let state = COMPOSITE_CHILDREN_CACHE.lock().unwrap();
-        assert_eq!(state.cache.len(), 0);
-        assert_eq!(state.bytes, 0);
     }
 }
