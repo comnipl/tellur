@@ -16,73 +16,8 @@
 //! source pixels skip the write entirely and fully-opaque ones go
 //! through a 4-byte copy.
 
-use std::sync::{LazyLock, Mutex};
-
-use lru::LruCache;
-
-use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, RasterStorageId, Resolution};
+use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
-
-const COMPOSITE_FRAMES_CACHE_ENTRIES: usize = 32;
-
-static COMPOSITE_FRAMES_CACHE: LazyLock<
-    Mutex<LruCache<CompositeFramesCacheKey, CompositeFramesCacheEntry>>,
-> = LazyLock::new(|| Mutex::new(LruCache::unbounded()));
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CompositeFramesCacheKey {
-    target: Resolution,
-    inputs: Vec<RasterStorageId>,
-}
-
-#[derive(Clone)]
-struct CompositeFramesCacheEntry {
-    _inputs: Vec<RasterImage>,
-    output: RasterImage,
-}
-
-#[cfg(test)]
-fn clear_composite_frames_cache_for_tests() {
-    if let Ok(mut cache) = COMPOSITE_FRAMES_CACHE.lock() {
-        cache.clear();
-    }
-}
-
-fn composite_frames_cache_key(
-    frames: &[RasterImage],
-    target: Resolution,
-) -> CompositeFramesCacheKey {
-    CompositeFramesCacheKey {
-        target,
-        inputs: frames.iter().map(RasterImage::storage_id).collect(),
-    }
-}
-
-fn cached_composite_frames(key: &CompositeFramesCacheKey) -> Option<RasterImage> {
-    COMPOSITE_FRAMES_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get(key).map(|entry| entry.output.clone()))
-}
-
-fn cache_composite_frames(
-    key: CompositeFramesCacheKey,
-    inputs: Vec<RasterImage>,
-    output: RasterImage,
-) {
-    if let Ok(mut cache) = COMPOSITE_FRAMES_CACHE.lock() {
-        cache.put(
-            key,
-            CompositeFramesCacheEntry {
-                _inputs: inputs,
-                output,
-            },
-        );
-        while cache.len() > COMPOSITE_FRAMES_CACHE_ENTRIES {
-            cache.pop_lru();
-        }
-    }
-}
 
 /// Source-over composites `src` onto `dst` at pixel offset
 /// `(offset_x, offset_y)`. Both buffers hold 8-bit straight-alpha RGBA
@@ -161,12 +96,6 @@ pub(crate) fn composite_frames_over(
         _ => {}
     }
 
-    let cache_key = composite_frames_cache_key(&frames, target);
-    if let Some(image) = cached_composite_frames(&cache_key) {
-        return Some(image);
-    }
-    let cache_inputs = frames.clone();
-
     if ctx.prefers_gpu() {
         let inputs: Vec<CompositeInput<'_>> = frames
             .iter()
@@ -178,7 +107,6 @@ pub(crate) fn composite_frames_over(
             .collect();
         if let Some(gpu) = ctx.gpu_backend() {
             if let Some(image) = gpu.composite(target, &inputs) {
-                cache_composite_frames(cache_key, cache_inputs, image.clone());
                 return Some(image);
             }
         }
@@ -189,9 +117,12 @@ pub(crate) fn composite_frames_over(
         let frame = ctx.readback(frame);
         composite_at(&mut buffer, target, &frame, 0, 0);
     }
-    let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buffer);
-    cache_composite_frames(cache_key, cache_inputs, image.clone());
-    Some(image)
+    Some(RasterImage::cpu(
+        target.width,
+        target.height,
+        PixelFormat::Rgba8,
+        buffer,
+    ))
 }
 
 /// Source-over blends `span_w` consecutive RGBA pixels of `src` onto
@@ -474,7 +405,6 @@ mod tests {
 
     #[test]
     fn composite_frames_uses_gpu_batch_without_readback() {
-        clear_composite_frames_cache_for_tests();
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
@@ -489,12 +419,10 @@ mod tests {
         assert_eq!(ctx.readbacks, 0);
         assert_eq!(ctx.gpu.composite_calls, 1);
         assert_eq!(ctx.gpu.composite_inputs, vec![2]);
-        clear_composite_frames_cache_for_tests();
     }
 
     #[test]
-    fn composite_frames_reuses_cached_batch_for_same_input_storage() {
-        clear_composite_frames_cache_for_tests();
+    fn composite_frames_recomposites_same_input_storage() {
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
@@ -503,34 +431,35 @@ mod tests {
 
         let _ = composite_frames_over(frames.clone(), Resolution::new(1, 1), &mut ctx)
             .expect("first composite produces an output");
-        let cached = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("cached composite produces an output");
-        let cached = cached.into_cpu().expect("fake GPU returns CPU image");
+        let recomposited = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
+            .expect("second composite produces an output");
+        let recomposited = recomposited.into_cpu().expect("fake GPU returns CPU image");
 
-        assert_eq!(cached.pixels.as_ref(), &[42, 42, 42, 42]);
+        assert_eq!(recomposited.pixels.as_ref(), &[42, 42, 42, 42]);
         assert_eq!(ctx.readbacks, 0);
-        assert_eq!(ctx.gpu.composite_calls, 1);
-        assert_eq!(ctx.gpu.composite_inputs, vec![2]);
-        clear_composite_frames_cache_for_tests();
+        assert_eq!(ctx.gpu.composite_calls, 2);
+        assert_eq!(ctx.gpu.composite_inputs, vec![2, 2]);
     }
 
     #[test]
-    fn composite_frames_falls_back_to_cpu_when_gpu_declines() {
-        clear_composite_frames_cache_for_tests();
+    fn composite_frames_cpu_fallback_recomposites_same_input_storage() {
         let frames = vec![
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![255, 0, 0, 255]),
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0, 0, 255, 255]),
         ];
         let mut ctx = FakeContext::new(false);
 
-        let image = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("frames produce an output");
-        let image = image.into_cpu().expect("CPU fallback returns CPU image");
+        let first = composite_frames_over(frames.clone(), Resolution::new(1, 1), &mut ctx)
+            .expect("first composite produces an output");
+        let second = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
+            .expect("second composite produces an output");
 
-        assert_eq!(image.pixels.as_ref(), &[0, 0, 255, 255]);
-        assert_eq!(ctx.readbacks, 2);
-        assert_eq!(ctx.gpu.composite_calls, 1);
-        assert_eq!(ctx.gpu.composite_inputs, vec![2]);
-        clear_composite_frames_cache_for_tests();
+        for image in [first, second] {
+            let image = image.into_cpu().expect("CPU fallback returns CPU image");
+            assert_eq!(image.pixels.as_ref(), &[0, 0, 255, 255]);
+        }
+        assert_eq!(ctx.readbacks, 4);
+        assert_eq!(ctx.gpu.composite_calls, 2);
+        assert_eq!(ctx.gpu.composite_inputs, vec![2, 2]);
     }
 }

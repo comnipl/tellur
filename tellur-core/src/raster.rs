@@ -122,23 +122,6 @@ impl Hash for PixelBytes {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum RasterStorageId {
-    Cpu {
-        width: u32,
-        height: u32,
-        format: PixelFormat,
-        id: PixelStorageId,
-    },
-    Gpu {
-        width: u32,
-        height: u32,
-        format: PixelFormat,
-        backend: &'static str,
-        ptr: usize,
-    },
-}
-
 impl RasterImage {
     pub fn cpu(width: u32, height: u32, format: PixelFormat, pixels: impl Into<Bytes>) -> Self {
         Self::Cpu(CpuRasterImage::new(width, height, format, pixels))
@@ -198,24 +181,6 @@ impl RasterImage {
                 )
             }
             _ => false,
-        }
-    }
-
-    pub(crate) fn storage_id(&self) -> RasterStorageId {
-        match self {
-            Self::Cpu(image) => RasterStorageId::Cpu {
-                width: image.width,
-                height: image.height,
-                format: image.format,
-                id: image.storage_id(),
-            },
-            Self::Gpu(surface) => RasterStorageId::Gpu {
-                width: surface.width,
-                height: surface.height,
-                format: surface.format,
-                backend: surface.backend,
-                ptr: Arc::as_ptr(&surface.handle) as *const () as usize,
-            },
         }
     }
 }
