@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, LazyLock, Mutex,
+    Arc, LazyLock, Mutex, MutexGuard,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +35,28 @@ use tellur_plugin::TimelineInfo;
 const LIVE_PREVIEW_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const VIDEO_SEGMENT_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const VIDEO_SEGMENT_CACHE_ENTRIES: usize = 128;
+
+/// A panicking render thread must not permanently poison the server: the
+/// renderer keeps its state consistent across unwinds (its caches are plain
+/// data behind their own locks), so recovering the lock after a panic is safe.
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Extracts a human-readable message from a `catch_unwind` panic payload and
+/// logs it, since a caught panic would otherwise vanish silently once turned
+/// into an HTTP error response.
+fn render_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "render panicked with a non-string payload".to_owned());
+    eprintln!("render panicked: {message}");
+    message
+}
 
 static VIDEO_SEGMENT_CACHE: LazyLock<Mutex<VideoSegmentCache>> =
     LazyLock::new(|| Mutex::new(VideoSegmentCache::default()));
@@ -178,9 +200,7 @@ pub fn serve(options: ServerOptions) -> Result<(), Box<dyn Error>> {
         compile_state,
     }));
     {
-        let mut app = app
-            .lock()
-            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        let mut app = lock_unpoisoned(&app);
         app.reload_plugin_if_changed()?;
     }
     print_startup_banner(StartupBannerInputs {
@@ -241,9 +261,7 @@ type PreviewPrewarmStats = (String, Duration, Duration, Duration, Duration, bool
 fn preview_prewarm(
     app: &Arc<Mutex<PreviewApp>>,
 ) -> Result<Option<PreviewPrewarmStats>, Box<dyn Error>> {
-    let mut app = app
-        .lock()
-        .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+    let mut app = lock_unpoisoned(app);
     app.reload_plugin_if_changed()?;
     let Some(info) = app
         .plugin
@@ -303,9 +321,7 @@ fn handle_connection(
         }
         "/api/events" => handle_event_stream(app, stream),
         "/api/info" | "/api/frame" | "/api/stream" | "/api/arrangement" => {
-            let mut app = app
-                .lock()
-                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let mut app = lock_unpoisoned(&app);
             app.handle_api(stream, request)
         }
         other => serve_static(&mut stream, other),
@@ -327,9 +343,7 @@ fn handle_event_stream(
     let mut last_body = String::new();
     loop {
         let body = {
-            let mut app = app
-                .lock()
-                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let mut app = lock_unpoisoned(&app);
             app.info_body()?
         };
         if body != last_body {
@@ -412,6 +426,9 @@ impl PreviewApp {
             self.ctx.clear();
             self.ctx.clear_metrics();
             clear_video_segment_cache();
+            // The reloaded plugin invalidates storage ids the caches were keyed
+            // on; leftover entries are dead weight pinning VRAM until eviction.
+            tellur_core::clear_composite_caches();
         }
         Ok(changed)
     }
@@ -670,21 +687,32 @@ impl PreviewApp {
         self.ctx.set_motion_blur_enabled(motion_blur);
         let before = collect_stats.then(|| self.ctx.metrics());
         let render_start = Instant::now();
-        let build_start = Instant::now();
-        let image = self
-            .plugin
-            .collection()?
-            .build(
-                timeline_id,
-                TimelineTime::new(seconds),
-                resolution,
-                &mut self.ctx,
-            )
-            .ok_or("timeline did not produce a frame")?;
-        let build_time = build_start.elapsed();
-        let readback_start = Instant::now();
-        let image = self.ctx.readback(image);
-        let readback_time = readback_start.elapsed();
+        // AssertUnwindSafe: a render panic (e.g. GPU readback exhaustion) leaves
+        // the renderer's own state consistent across the unwind, so catching it
+        // here and turning it into an error is safe — the alternative is a
+        // poisoned app mutex that kills the whole server.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let build_start = Instant::now();
+            let image = self
+                .plugin
+                .collection()?
+                .build(
+                    timeline_id,
+                    TimelineTime::new(seconds),
+                    resolution,
+                    &mut self.ctx,
+                )
+                .ok_or("timeline did not produce a frame")?;
+            let build_time = build_start.elapsed();
+            let readback_start = Instant::now();
+            let image = self.ctx.readback(image);
+            let readback_time = readback_start.elapsed();
+            Ok::<_, Box<dyn Error>>((image, build_time, readback_time))
+        }));
+        let (image, build_time, readback_time) = match panicked {
+            Ok(result) => result?,
+            Err(payload) => return Err(render_panic_message(payload).into()),
+        };
         let render_time = render_start.elapsed();
         if image.format != PixelFormat::Rgba8 {
             return Err(format!("h264 stream requires Rgba8, got {:?}", image.format).into());
@@ -860,17 +888,26 @@ impl PreviewApp {
 
         let before = self.ctx.metrics();
         let render_start = Instant::now();
-        let image = self
-            .plugin
-            .collection()?
-            .build(
-                &info.id,
-                TimelineTime::new(seconds),
-                resolution,
-                &mut self.ctx,
-            )
-            .ok_or("timeline did not produce a frame")?;
-        let image = self.ctx.readback(image);
+        // AssertUnwindSafe: see render_video_rgba — a render panic leaves the
+        // renderer's own state consistent across the unwind, and catching it
+        // here avoids poisoning the app mutex for every subsequent request.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let image = self
+                .plugin
+                .collection()?
+                .build(
+                    &info.id,
+                    TimelineTime::new(seconds),
+                    resolution,
+                    &mut self.ctx,
+                )
+                .ok_or("timeline did not produce a frame")?;
+            Ok::<_, Box<dyn Error>>(self.ctx.readback(image))
+        }));
+        let image = match panicked {
+            Ok(result) => result?,
+            Err(payload) => return Err(render_panic_message(payload).into()),
+        };
         let render_time = render_start.elapsed();
         let after = self.ctx.metrics();
         let gpu_init_error = self.ctx.gpu_init_error().map(str::to_owned);
@@ -1070,9 +1107,7 @@ fn handle_video_stream(
             .get("session")
             .cloned()
             .unwrap_or_else(|| "default".to_owned());
-        let mut epochs = video_epochs
-            .lock()
-            .map_err(|_| -> Box<dyn Error> { "video epoch lock poisoned".into() })?;
+        let mut epochs = lock_unpoisoned(&video_epochs);
         Arc::clone(
             epochs
                 .entry(session)
@@ -1082,9 +1117,7 @@ fn handle_video_stream(
     let stream_epoch = video_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
     let setup_start = Instant::now();
     let setup = {
-        let mut app = app
-            .lock()
-            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        let mut app = lock_unpoisoned(&app);
         app.reload_plugin_if_changed()?;
         let timelines = app.plugin.collection()?.timelines();
         let Some(info) = select_timeline(&timelines, query.get("timeline")) else {
@@ -1179,9 +1212,7 @@ fn handle_video_stream(
     // file when this function returns.
     let audio_start = Instant::now();
     let audio_wav = {
-        let mut app = app
-            .lock()
-            .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+        let mut app = lock_unpoisoned(&app);
         app.reload_plugin_if_changed()?;
         app.plugin
             .collection()
@@ -1391,12 +1422,7 @@ fn handle_video_stream(
     let mut stdin_write_total = Duration::ZERO;
     let mut end_reason = "complete";
     let cache_metrics_before = if setup.verbose {
-        Some(
-            app.lock()
-                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?
-                .ctx
-                .metrics(),
-        )
+        Some(lock_unpoisoned(&app).ctx.metrics())
     } else {
         None
     };
@@ -1423,9 +1449,7 @@ fn handle_video_stream(
             setup.fps,
         );
         let image = {
-            let mut app = app
-                .lock()
-                .map_err(|_| -> Box<dyn Error> { "preview app lock poisoned".into() })?;
+            let mut app = lock_unpoisoned(&app);
             let verbose = app.verbose;
             let frame = app.render_video_rgba(
                 &setup.timeline_id,
@@ -1526,9 +1550,8 @@ fn handle_video_stream(
             stderr_text.len(),
         );
         if let Some(before) = cache_metrics_before {
-            if let Ok(app) = app.lock() {
-                log_cache_metrics_delta(&before, &app.ctx.metrics());
-            }
+            let app = lock_unpoisoned(&app);
+            log_cache_metrics_delta(&before, &app.ctx.metrics());
         }
     }
     if !status.success() && client_alive.load(Ordering::Relaxed) {
