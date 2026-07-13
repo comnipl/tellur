@@ -410,15 +410,6 @@ impl GpuRenderer {
 
         self.cpu_upload_cache_cap_bytes = 0;
         self.clear_upload_cache();
-        if let Some(reservation) = try_reserve_vram(bytes) {
-            self.note_vram_reserve_success();
-            return Some(reservation);
-        }
-
-        // The composite caches in tellur-core hold Arc clones of GPU surfaces
-        // that may also be tracked here, so they must be cleared before a
-        // last-resort reservation attempt can actually free VRAM.
-        tellur_core::clear_composite_caches();
         let reservation = try_reserve_vram(bytes)?;
         self.note_vram_reserve_success();
         Some(reservation)
