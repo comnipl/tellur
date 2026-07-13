@@ -311,6 +311,15 @@ pub enum PixelFormat {
     Rgba16Float,
 }
 
+/// Bytes needed to store one pixel of `format`. Used by cache byte-accounting
+/// to bound the VRAM/RAM a cached `RasterImage` pins.
+pub(crate) fn pixel_stride(format: PixelFormat) -> usize {
+    match format {
+        PixelFormat::Rgba8 => 4,
+        PixelFormat::Rgba16Float => 8,
+    }
+}
+
 /// Target output resolution for a `RasterComponent::render` call, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Resolution {
