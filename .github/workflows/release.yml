@@ -16,7 +16,7 @@ jobs:
     if: >
       github.event.action != 'closed'
       && startsWith(github.head_ref, 'release/')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -30,7 +30,7 @@ jobs:
 
       - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
 
-      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: publish-dry-run
 
@@ -50,7 +50,7 @@ jobs:
       github.event.action == 'closed'
       && github.event.pull_request.merged == true
       && startsWith(github.head_ref, 'release/')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -88,7 +88,7 @@ jobs:
       github.event.action == 'closed'
       && github.event.pull_request.merged == true
       && startsWith(github.head_ref, 'release/')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     environment: release
     permissions:
       id-token: write
@@ -108,7 +108,7 @@ jobs:
 
       - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
 
-      - uses: useblacksmith/rust-cache@f53e7f127245d2a269b3d90879ccf259876842d5 # v3
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: publish
 
