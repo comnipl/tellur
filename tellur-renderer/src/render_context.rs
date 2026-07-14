@@ -1,4 +1,5 @@
-//! LRU-backed implementation of [`tellur_core::render_context::RenderContext`].
+//! Reuse- and cost-aware implementation of
+//! [`tellur_core::render_context::RenderContext`].
 //!
 //! [`CachingRenderContext`] memoizes [`RasterImage`] outputs keyed by
 //! `(TypeId, content_hash, size, target)`. The cache is bounded in
@@ -30,8 +31,8 @@ use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution}
 use tellur_core::render_context::{CachePolicy, GpuPreference, GpuRasterBackend, RenderContext};
 
 use crate::cache::{
-    AdmissionPreparation, AdmissionRejectReason, CommitWithError, EntryMeta, ImmediateCache,
-    Lookup, RemovedEntry,
+    AdmissionPlanning, AdmissionPreparation, AdmissionRejectReason, CommitWithError, EntryMeta,
+    FrequencyCache, Lookup, RemovedEntry,
 };
 use crate::gpu::{GpuRenderStats, GpuRenderer};
 
@@ -156,7 +157,7 @@ pub struct CacheMetrics {
     pub vram_used_bytes: usize,
     /// Configured process-wide Tellur-managed VRAM budget.
     pub vram_budget_bytes: usize,
-    /// Bytes released through LRU eviction (capacity-driven).
+    /// Bytes released through policy-selected eviction.
     pub bytes_evicted: u64,
     /// Misses where the freshly-produced image was not admitted
     /// because system memory pressure was over threshold.
@@ -278,6 +279,10 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+fn render_cost_nanos(duration: Duration) -> u64 {
+    duration.as_nanos().clamp(1, u64::MAX as u128) as u64
+}
+
 fn format_bytes(b: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -305,9 +310,10 @@ fn pixel_stride(format: PixelFormat) -> usize {
 ///
 /// Construct one per export / preview session and pass it into
 /// [`tellur_core::timeline::Timeline::build`]; the cache persists across
-/// frames so any time-invariant subtree only re-renders once.
+/// frames, admitting a subtree after its second observation and retaining the
+/// entries expected to save the most render time per byte.
 pub struct CachingRenderContext {
-    cache: ImmediateCache<CacheKey, RenderCacheClass, CachedRasterImage>,
+    cache: FrequencyCache<CacheKey, RenderCacheClass, CachedRasterImage>,
     gpu_cache_max_bytes: usize,
     gpu_cache_spare_successes: u8,
     gpu_vram_failures_seen: u64,
@@ -344,7 +350,7 @@ impl CachingRenderContext {
     /// Create a context with a custom byte capacity.
     pub fn with_capacity_bytes(cap_bytes: usize) -> Self {
         let (gpu_cache_cap_bytes, gpu_cache_max_bytes) = gpu_cache_limits();
-        let mut cache = ImmediateCache::new();
+        let mut cache = FrequencyCache::new();
         drop(cache.set_capacity(RenderCacheClass::Cpu, cache_ram_capacity(cap_bytes)));
         drop(cache.set_capacity(RenderCacheClass::Gpu, gpu_cache_cap_bytes));
         Self {
@@ -719,7 +725,9 @@ impl RenderContext for CachingRenderContext {
                     // admit it. Nested `ctx.render` calls happen inside
                     // `component.render`, which is why timing is wrapped
                     // around the whole block.
+                    let render_start = Instant::now();
                     let img = component.render(size, target, self);
+                    let observed_cost = render_cost_nanos(render_start.elapsed());
                     self.adjust_gpu_cache_budget_after_render();
                     let bytes = Self::image_bytes(&img);
                     let class = match &img {
@@ -729,9 +737,9 @@ impl RenderContext for CachingRenderContext {
 
                     match self
                         .cache
-                        .prepare_admission(ticket, EntryMeta::new(class, bytes))
+                        .plan_admission(ticket, EntryMeta::with_cost(class, bytes, observed_cost))
                     {
-                        AdmissionPreparation::Rejected(AdmissionRejectReason::Overweight {
+                        AdmissionPlanning::Rejected(AdmissionRejectReason::Overweight {
                             ..
                         }) => match class {
                             RenderCacheClass::Cpu => self.oversize_skips += 1,
@@ -741,25 +749,36 @@ impl RenderContext for CachingRenderContext {
                         // this call received its owned miss ticket. Keep that
                         // resident. Future strategy-specific rejections also
                         // leave the freshly-rendered value uncached here.
-                        AdmissionPreparation::Rejected(_) => {}
-                        AdmissionPreparation::Ready { admission, evicted } => {
-                            self.account_evicted(evicted);
-
+                        AdmissionPlanning::Rejected(_) => {}
+                        AdmissionPlanning::Planned(planned) => {
                             if self.under_memory_pressure() {
                                 self.shed_under_pressure();
                                 self.pressure_skips += 1;
                             } else {
-                                match self.cache.commit_with(admission, || {
-                                    Self::cache_entry(img.clone(), bytes).ok_or(())
-                                }) {
-                                    Ok(()) => {}
-                                    Err(CommitWithError::Create(())) => self.budget_skips += 1,
-                                    Err(CommitWithError::Policy(reason)) => {
+                                match self.cache.prepare_admission(planned) {
+                                    AdmissionPreparation::Rejected(reason) => {
                                         debug_assert!(
                                             false,
-                                            "admission plan became invalid before commit: {reason:?}"
+                                            "planned admission became invalid before preparation: {reason:?}"
                                         );
-                                        self.budget_skips += 1;
+                                    }
+                                    AdmissionPreparation::Ready { admission, evicted } => {
+                                        self.account_evicted(evicted);
+                                        match self.cache.commit_with(admission, || {
+                                            Self::cache_entry(img.clone(), bytes).ok_or(())
+                                        }) {
+                                            Ok(()) => {}
+                                            Err(CommitWithError::Create(())) => {
+                                                self.budget_skips += 1
+                                            }
+                                            Err(CommitWithError::Policy(reason)) => {
+                                                debug_assert!(
+                                                    false,
+                                                    "admission plan became invalid before commit: {reason:?}"
+                                                );
+                                                self.budget_skips += 1;
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -799,6 +818,7 @@ impl RenderContext for CachingRenderContext {
 mod tests {
     use std::any::TypeId;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tellur_core::color::Color;
     use tellur_core::geometry::{Constraints, Vec2};
@@ -810,8 +830,18 @@ mod tests {
     use tellur_core::vector::Paint;
 
     use super::{CacheKey, CachedRasterImage, CachingRenderContext, RenderCacheClass};
-    use crate::cache::{AdmissionPreparation, EntryMeta, Lookup};
+    use crate::cache::{AdmissionPlanning, AdmissionPreparation, EntryMeta, Lookup};
     use crate::rasterize::Rasterizable;
+
+    #[test]
+    fn render_cost_conversion_is_nonzero_and_saturating() {
+        assert_eq!(super::render_cost_nanos(Duration::ZERO), 1);
+        assert_eq!(super::render_cost_nanos(Duration::from_nanos(7)), 7);
+        assert_eq!(
+            super::render_cost_nanos(Duration::new(u64::MAX, 999_999_999)),
+            u64::MAX
+        );
+    }
 
     fn scene() -> Layer {
         Layer::builder()
@@ -842,8 +872,8 @@ mod tests {
 
     // A transparent `Positioned` must not change pixels: routing its child
     // through the context (so the child owns the cache slot) has to produce
-    // exactly what an uncached pass produces, on both the first (miss) and
-    // second (hit) frame.
+    // exactly what an uncached pass produces on the first miss, the second
+    // render that admits the value, and the first actual hit.
     #[test]
     fn passthrough_and_cache_agree_through_positioned() {
         let size = Vec2(40.0, 30.0);
@@ -864,9 +894,14 @@ mod tests {
             let img = scene().render(size, target, &mut cache);
             cache.readback(img)
         };
+        let third = {
+            let img = scene().render(size, target, &mut cache);
+            cache.readback(img)
+        };
 
         assert_eq!(a.pixels, first.pixels);
         assert_eq!(a.pixels, second.pixels);
+        assert_eq!(a.pixels, third.pixels);
     }
 
     #[derive(PartialEq, Hash)]
@@ -921,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn immediate_admission_caches_first_miss() {
+    fn frequency_admission_caches_second_miss() {
         let size = Vec2(1.0, 1.0);
         let target = Resolution::new(1, 1);
         let one = SolidRaster { id: 1 };
@@ -929,28 +964,50 @@ mod tests {
             .with_gpu_preference(GpuPreference::Disabled);
 
         render_and_readback(&mut cache, &one, size, target);
-        render_and_readback(&mut cache, &one, size, target);
+        let first = cache.metrics();
+        assert_eq!(first.hits, 0);
+        assert_eq!(first.misses, 1);
+        assert_eq!(first.bytes_cached, 0);
 
+        render_and_readback(&mut cache, &one, size, target);
+        let admitted = cache.metrics();
+        assert_eq!(admitted.hits, 0);
+        assert_eq!(admitted.misses, 2);
+        assert_eq!(admitted.bytes_cached, 4);
+
+        render_and_readback(&mut cache, &one, size, target);
         let metrics = cache.metrics();
         assert_eq!(metrics.hits, 1);
-        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.misses, 2);
         assert_eq!(metrics.bytes_cached, 4);
     }
 
     #[test]
-    fn cpu_capacity_eviction_updates_cache_metrics() {
-        let size = Vec2(1.0, 1.0);
-        let target = Resolution::new(1, 1);
+    fn cpu_admission_eviction_updates_cache_metrics() {
         let mut cache = CachingRenderContext::with_capacity_bytes(1024)
             .with_gpu_preference(GpuPreference::Disabled);
         drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
 
-        render_and_readback(&mut cache, &SolidRaster { id: 1 }, size, target);
-        render_and_readback(&mut cache, &SolidRaster { id: 2 }, size, target);
+        let first_key = CacheKey {
+            type_id: TypeId::of::<SolidRaster>(),
+            content_hash: 1,
+            size_x_bits: 1,
+            size_y_bits: 1,
+            target_width: 1,
+            target_height: 1,
+        };
+        let second_key = CacheKey {
+            content_hash: 2,
+            ..first_key
+        };
+        let first = RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![1, 0, 0, 255]);
+        let second = RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![2, 0, 0, 255]);
+        insert_test_entry(&mut cache, first_key, first, RenderCacheClass::Cpu, 4, 10);
+        insert_test_entry(&mut cache, second_key, second, RenderCacheClass::Cpu, 4, 20);
 
         let metrics = cache.metrics();
         assert_eq!(metrics.hits, 0);
-        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.misses, 0);
         assert_eq!(metrics.bytes_cached, 4);
         assert_eq!(metrics.bytes_evicted, 4);
     }
@@ -962,6 +1019,7 @@ mod tests {
         let mut cache = CachingRenderContext::with_capacity_bytes(1024)
             .with_gpu_preference(GpuPreference::Disabled);
         drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
+        render_and_readback(&mut cache, &SolidRaster { id: 1 }, size, target);
         render_and_readback(&mut cache, &SolidRaster { id: 1 }, size, target);
 
         cache.clear();
@@ -987,6 +1045,7 @@ mod tests {
         let mut gpu_cache = CachingRenderContext::with_capacity_bytes(1024)
             .with_gpu_preference(GpuPreference::Disabled);
         drop(gpu_cache.cache.set_capacity(RenderCacheClass::Gpu, 4));
+        let _ = gpu_cache.render(&GpuRaster { id: 1 }, size, Resolution::new(1, 1));
         let _ = gpu_cache.render(&GpuRaster { id: 1 }, size, Resolution::new(1, 1));
         let _ = gpu_cache.render(&GpuRaster { id: 2 }, size, Resolution::new(2, 2));
         let gpu_metrics = gpu_cache.metrics();
@@ -1026,8 +1085,8 @@ mod tests {
         };
         drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
         drop(cache.cache.set_capacity(RenderCacheClass::Gpu, 400));
-        insert_test_entry(&mut cache, cpu_key, cpu, RenderCacheClass::Cpu, 4);
-        insert_test_entry(&mut cache, gpu_key, gpu, RenderCacheClass::Gpu, 400);
+        insert_test_entry(&mut cache, cpu_key, cpu, RenderCacheClass::Cpu, 4, 10);
+        insert_test_entry(&mut cache, gpu_key, gpu, RenderCacheClass::Gpu, 400, 10);
 
         let removed = cache.cache.reclaim_to_fit(RenderCacheClass::Gpu, 1);
         cache.account_evicted(removed);
@@ -1094,7 +1153,14 @@ mod tests {
                 target_width: 1,
                 target_height: 1,
             };
-            insert_test_entry(&mut cache, key, image, RenderCacheClass::Gpu, entry_bytes);
+            insert_test_entry(
+                &mut cache,
+                key,
+                image,
+                RenderCacheClass::Gpu,
+                entry_bytes,
+                10,
+            );
         }
 
         cache.evict_gpu_cache_until_vram_available(needed);
@@ -1114,30 +1180,50 @@ mod tests {
         image: RasterImage,
         class: RenderCacheClass,
         bytes: usize,
+        observed_cost: u64,
     ) {
-        let ticket = match cache.cache.lookup(key, |_| ()) {
-            Lookup::Hit(()) => panic!("test cache key was already resident"),
-            Lookup::Miss(ticket) => ticket,
-        };
-        let (admission, evicted) = match cache
-            .cache
-            .prepare_admission(ticket, EntryMeta::new(class, bytes))
-        {
-            AdmissionPreparation::Ready { admission, evicted } => (admission, evicted),
-            AdmissionPreparation::Rejected(reason) => {
-                panic!("test admission rejected: {reason:?}")
+        let mut image = Some(image);
+        for observation in 1..=2 {
+            let ticket = match cache.cache.lookup(key, |_| ()) {
+                Lookup::Hit(()) => panic!("test cache key was already resident"),
+                Lookup::Miss(ticket) => ticket,
+            };
+            match cache
+                .cache
+                .plan_admission(ticket, EntryMeta::with_cost(class, bytes, observed_cost))
+            {
+                AdmissionPlanning::Rejected(_) if observation == 1 => {}
+                AdmissionPlanning::Planned(planned) if observation == 2 => {
+                    match cache.cache.prepare_admission(planned) {
+                        AdmissionPreparation::Ready { admission, evicted } => {
+                            cache.account_evicted(evicted);
+                            cache
+                                .cache
+                                .commit_with(admission, || {
+                                    Ok::<_, ()>(CachedRasterImage {
+                                        image: image
+                                            .take()
+                                            .expect("test image must be inserted once"),
+                                        _ram_reservation: None,
+                                    })
+                                })
+                                .expect("test cache admission must commit");
+                            return;
+                        }
+                        AdmissionPreparation::Rejected(reason) => {
+                            panic!("test admission preparation rejected: {reason:?}")
+                        }
+                    }
+                }
+                AdmissionPlanning::Rejected(reason) => {
+                    panic!("test admission {observation} rejected unexpectedly: {reason:?}")
+                }
+                AdmissionPlanning::Planned(_) => {
+                    panic!("test admission became ready before its second observation")
+                }
             }
-        };
-        assert!(evicted.is_empty());
-        cache
-            .cache
-            .commit_with(admission, || {
-                Ok::<_, ()>(CachedRasterImage {
-                    image,
-                    _ram_reservation: None,
-                })
-            })
-            .expect("test cache admission must commit");
+        }
+        panic!("test cache admission did not commit")
     }
 
     fn render_and_readback(

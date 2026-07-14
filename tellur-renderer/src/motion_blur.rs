@@ -10,12 +10,12 @@
 //! existing content-hash cache key with NO cache changes:
 //!
 //! - While the child animates, each sample bakes a different state, so each
-//!   sub-frame earns its own cache entry (and overlapping shutters across
-//!   frames share entries).
+//!   sub-frame has independent reuse history (and overlapping shutters can
+//!   admit and share entries on their second observation).
 //! - Once the child's animation saturates (every Phase clamped), all samples
-//!   bake the SAME state, every `ctx.render` returns one shared cache entry,
-//!   and the average short-circuits to that entry — a static stretch costs
-//!   the same as having no blur at all.
+//!   bake the SAME state. After the second-use warm-up, every `ctx.render`
+//!   returns one shared cache entry and the average short-circuits to that
+//!   entry — a static stretch costs the same as having no blur at all.
 //!
 //! The averaging itself happens at the IMAGE layer (like a container's
 //! per-frame composite), so a blurred result can never alias an unblurred
@@ -350,7 +350,7 @@ mod tests {
 
     /// A timeless raster leaf: routed through `ctx.render` by the blanket
     /// `RasterComponent → TimelineComponent` impl, so identical samples
-    /// resolve to one shared cache entry.
+    /// resolve to one shared cache entry after second-use warm-up.
     #[derive(PartialEq, Hash)]
     struct StaticSquare;
 
@@ -387,10 +387,14 @@ mod tests {
         let second = blurred
             .frame(clock_at(&table, 5.0), size, target, &mut ctx)
             .expect("visible");
-        // Both frames are the SAME cache entry: the average short-circuited
+        let third = blurred
+            .frame(clock_at(&table, 9.0), size, target, &mut ctx)
+            .expect("visible");
+        // The first frame warms the second-use admission history. Once warm,
+        // both frames are the SAME cache entry: the average short-circuited
         // instead of re-accumulating (an averaged copy would live in a fresh
         // buffer and alpha-divide cleanly, hiding the regression).
-        assert!(first.shares_storage(&second));
+        assert!(second.shares_storage(&third));
         let cpu = ctx.readback(first);
         assert_eq!(cpu.pixels.as_ref(), &[200u8; 2 * 2 * 4]);
     }
