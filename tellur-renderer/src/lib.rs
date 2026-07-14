@@ -1,3 +1,5 @@
+mod cache;
+
 pub mod gpu;
 pub mod host_info;
 pub mod motion_blur;

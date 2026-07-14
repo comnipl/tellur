@@ -18,7 +18,6 @@ use std::fmt;
 use std::hash::Hasher;
 use std::time::{Duration, Instant};
 
-use lru::LruCache;
 use rustc_hash::FxHasher;
 use sysinfo::System;
 use tellur_core::cache_budget::{
@@ -30,6 +29,10 @@ use tellur_core::geometry::Vec2;
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
 use tellur_core::render_context::{CachePolicy, GpuPreference, GpuRasterBackend, RenderContext};
 
+use crate::cache::{
+    AdmissionPreparation, AdmissionRejectReason, CommitWithError, EntryMeta, ImmediateCache,
+    Lookup, RemovedEntry,
+};
 use crate::gpu::{GpuRenderStats, GpuRenderer};
 
 /// Default cache size in bytes (1 GiB) when constructed with
@@ -40,10 +43,6 @@ pub const DEFAULT_CAPACITY_BYTES: usize = 1024 * 1024 * 1024;
 /// admitting new entries and starts shedding existing ones.
 pub const MEMORY_PRESSURE_THRESHOLD: f32 = 0.90;
 
-const DEFAULT_PROBATION_ENTRIES: usize = 4096;
-const VOLATILE_LARGE_IMAGE_BYTES: usize = 1024 * 1024;
-const VOLATILE_MIN_MISSES: u64 = 8;
-const VOLATILE_MAX_HIT_RATE: f64 = 0.75;
 const GPU_CACHE_INITIAL_FRACTION_DIVISOR: usize = 4;
 const GPU_CACHE_MAX_FRACTION_DIVISOR: usize = 2;
 const GPU_CACHE_SHRINK_NUMERATOR: usize = 3;
@@ -51,23 +50,6 @@ const GPU_CACHE_SHRINK_DENOMINATOR: usize = 4;
 const GPU_CACHE_GROW_SUCCESS_STREAK: u8 = 64;
 const GPU_CACHE_GROW_FRACTION_DIVISOR: usize = 64;
 const MIB: usize = 1024 * 1024;
-
-/// Controls when a freshly-rendered image becomes a cache entry.
-///
-/// `Immediate` is the export-oriented default: every miss is admitted while
-/// capacity allows. `SecondUse` admits only keys that appear at least twice.
-/// `SkipVolatileLarge` starts with immediate admission, but stops admitting
-/// large images for component types that build up many misses with a weak hit
-/// rate. That keeps live previews from filling the cache with per-frame
-/// full-screen animation states while still letting static large entries warm
-/// immediately.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum CacheAdmissionPolicy {
-    #[default]
-    Immediate,
-    SecondUse,
-    SkipVolatileLarge,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -103,14 +85,13 @@ impl CacheKey {
 
 struct CachedRasterImage {
     image: RasterImage,
-    bytes: usize,
     _ram_reservation: Option<BudgetReservation>,
 }
 
-impl CachedRasterImage {
-    fn is_gpu(&self) -> bool {
-        matches!(self.image, RasterImage::Gpu(_))
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RenderCacheClass {
+    Cpu,
+    Gpu,
 }
 
 /// Per-concrete-type hit/miss tally.
@@ -183,9 +164,6 @@ pub struct CacheMetrics {
     /// Misses where the freshly-produced image was not admitted
     /// because a single image exceeded the configured cap.
     pub oversize_skips: u64,
-    /// Misses where the freshly-produced image was not admitted by the
-    /// configured admission policy.
-    pub admission_skips: u64,
     /// Misses where the freshly-produced image was not admitted because the
     /// process-wide cache RAM budget was exhausted.
     pub budget_skips: u64,
@@ -223,7 +201,7 @@ impl fmt::Display for CacheMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
             f,
-            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips, {} admission skips, {} budget skips",
+            "Cache  {} hits / {} misses ({:.1}% hit) — {} cached, {} evicted, {} pressure skips, {} oversize skips, {} budget skips",
             self.hits,
             self.misses,
             self.hit_rate() * 100.0,
@@ -231,7 +209,6 @@ impl fmt::Display for CacheMetrics {
             format_bytes(self.bytes_evicted),
             self.pressure_skips,
             self.oversize_skips,
-            self.admission_skips,
             self.budget_skips,
         )?;
         writeln!(
@@ -330,13 +307,7 @@ fn pixel_stride(format: PixelFormat) -> usize {
 /// [`tellur_core::timeline::Timeline::build`]; the cache persists across
 /// frames so any time-invariant subtree only re-renders once.
 pub struct CachingRenderContext {
-    cache: LruCache<CacheKey, CachedRasterImage>,
-    probation: LruCache<CacheKey, ()>,
-    cur_bytes: usize,
-    cpu_cache_bytes: usize,
-    cap_bytes: usize,
-    gpu_cache_bytes: usize,
-    gpu_cache_cap_bytes: usize,
+    cache: ImmediateCache<CacheKey, RenderCacheClass, CachedRasterImage>,
     gpu_cache_max_bytes: usize,
     gpu_cache_spare_successes: u8,
     gpu_vram_failures_seen: u64,
@@ -349,10 +320,8 @@ pub struct CachingRenderContext {
     bytes_evicted: u64,
     pressure_skips: u64,
     oversize_skips: u64,
-    admission_skips: u64,
     budget_skips: u64,
     per_type: HashMap<TypeId, (TypeStats, &'static str)>,
-    admission_policy: CacheAdmissionPolicy,
     gpu_preference: GpuPreference,
     gpu: Option<GpuRenderer>,
     gpu_init_attempted: bool,
@@ -375,14 +344,11 @@ impl CachingRenderContext {
     /// Create a context with a custom byte capacity.
     pub fn with_capacity_bytes(cap_bytes: usize) -> Self {
         let (gpu_cache_cap_bytes, gpu_cache_max_bytes) = gpu_cache_limits();
+        let mut cache = ImmediateCache::new();
+        drop(cache.set_capacity(RenderCacheClass::Cpu, cache_ram_capacity(cap_bytes)));
+        drop(cache.set_capacity(RenderCacheClass::Gpu, gpu_cache_cap_bytes));
         Self {
-            cache: LruCache::unbounded(),
-            probation: LruCache::unbounded(),
-            cur_bytes: 0,
-            cpu_cache_bytes: 0,
-            cap_bytes: cache_ram_capacity(cap_bytes),
-            gpu_cache_bytes: 0,
-            gpu_cache_cap_bytes,
+            cache,
             gpu_cache_max_bytes,
             gpu_cache_spare_successes: 0,
             gpu_vram_failures_seen: 0,
@@ -392,10 +358,8 @@ impl CachingRenderContext {
             bytes_evicted: 0,
             pressure_skips: 0,
             oversize_skips: 0,
-            admission_skips: 0,
             budget_skips: 0,
             per_type: HashMap::new(),
-            admission_policy: CacheAdmissionPolicy::Immediate,
             gpu_preference: GpuPreference::Auto,
             gpu: None,
             gpu_init_attempted: false,
@@ -408,19 +372,6 @@ impl CachingRenderContext {
     pub fn with_gpu_preference(mut self, gpu_preference: GpuPreference) -> Self {
         self.gpu_preference = gpu_preference;
         self
-    }
-
-    pub fn with_cache_admission_policy(mut self, policy: CacheAdmissionPolicy) -> Self {
-        self.admission_policy = policy;
-        self
-    }
-
-    pub fn with_second_use_admission(self) -> Self {
-        self.with_cache_admission_policy(CacheAdmissionPolicy::SecondUse)
-    }
-
-    pub fn with_volatile_large_admission(self) -> Self {
-        self.with_cache_admission_policy(CacheAdmissionPolicy::SkipVolatileLarge)
     }
 
     pub fn set_gpu_preference(&mut self, gpu_preference: GpuPreference) {
@@ -459,12 +410,12 @@ impl CachingRenderContext {
 
     /// Current memory footprint of cached images, in bytes.
     pub fn current_bytes(&self) -> usize {
-        self.cur_bytes
+        self.cache.total_weight()
     }
 
     /// Configured maximum capacity in bytes.
     pub fn capacity_bytes(&self) -> usize {
-        self.cap_bytes
+        self.cache.class_capacity(RenderCacheClass::Cpu)
     }
 
     /// The last GPU initialization error, when backend creation was attempted
@@ -486,16 +437,15 @@ impl CachingRenderContext {
         CacheMetrics {
             hits: self.hits,
             misses: self.misses,
-            bytes_cached: self.cur_bytes,
-            gpu_cache_bytes: self.gpu_cache_bytes,
-            gpu_cache_cap_bytes: self.gpu_cache_cap_bytes,
+            bytes_cached: self.cache.total_weight(),
+            gpu_cache_bytes: self.cache.class_weight(RenderCacheClass::Gpu),
+            gpu_cache_cap_bytes: self.cache.class_capacity(RenderCacheClass::Gpu),
             gpu_cache_max_bytes: self.gpu_cache_max_bytes,
             vram_used_bytes: vram_used_bytes(),
             vram_budget_bytes: configured_vram_bytes(),
             bytes_evicted: self.bytes_evicted,
             pressure_skips: self.pressure_skips,
             oversize_skips: self.oversize_skips,
-            admission_skips: self.admission_skips,
             budget_skips: self.budget_skips,
             gpu_preference: self.gpu_preference,
             gpu_init_attempted: self.gpu_init_attempted,
@@ -516,7 +466,6 @@ impl CachingRenderContext {
         self.bytes_evicted = 0;
         self.pressure_skips = 0;
         self.oversize_skips = 0;
-        self.admission_skips = 0;
         self.budget_skips = 0;
         self.per_type.clear();
         self.total_render_time = Duration::ZERO;
@@ -525,47 +474,6 @@ impl CachingRenderContext {
     /// Drop all cached entries.
     pub fn clear(&mut self) {
         self.cache.clear();
-        self.probation.clear();
-        self.cur_bytes = 0;
-        self.cpu_cache_bytes = 0;
-        self.gpu_cache_bytes = 0;
-    }
-
-    fn should_admit(&mut self, key: CacheKey, type_id: TypeId, bytes: usize) -> bool {
-        match self.admission_policy {
-            CacheAdmissionPolicy::Immediate => true,
-            CacheAdmissionPolicy::SecondUse => {
-                if self.probation.pop(&key).is_some() {
-                    true
-                } else {
-                    self.probation.put(key, ());
-                    while self.probation.len() > DEFAULT_PROBATION_ENTRIES {
-                        let _ = self.probation.pop_lru();
-                    }
-                    self.admission_skips = self.admission_skips.saturating_add(1);
-                    false
-                }
-            }
-            CacheAdmissionPolicy::SkipVolatileLarge => {
-                if bytes < VOLATILE_LARGE_IMAGE_BYTES {
-                    return true;
-                }
-                let volatile = self
-                    .per_type
-                    .get(&type_id)
-                    .map(|(stats, _)| {
-                        stats.misses >= VOLATILE_MIN_MISSES
-                            && stats.hit_rate() <= VOLATILE_MAX_HIT_RATE
-                    })
-                    .unwrap_or(false);
-                if volatile {
-                    self.admission_skips = self.admission_skips.saturating_add(1);
-                    false
-                } else {
-                    true
-                }
-            }
-        }
     }
 
     /// Refresh and check system-wide memory utilization.
@@ -597,89 +505,37 @@ impl CachingRenderContext {
         };
         Some(CachedRasterImage {
             image,
-            bytes,
             _ram_reservation: ram_reservation,
         })
     }
 
-    fn account_evicted(&mut self, entry: &CachedRasterImage) {
-        self.cur_bytes = self.cur_bytes.saturating_sub(entry.bytes);
-        if entry.is_gpu() {
-            self.gpu_cache_bytes = self.gpu_cache_bytes.saturating_sub(entry.bytes);
-        } else {
-            self.cpu_cache_bytes = self.cpu_cache_bytes.saturating_sub(entry.bytes);
-        }
-        self.bytes_evicted = self.bytes_evicted.saturating_add(entry.bytes as u64);
-    }
-
-    fn evict_gpu_cache_to_fit(&mut self, needed: usize) {
-        if self.gpu_cache_bytes.saturating_add(needed) <= self.gpu_cache_cap_bytes {
-            return;
-        }
-
-        let mut keep = Vec::with_capacity(self.cache.len());
-        while self.gpu_cache_bytes.saturating_add(needed) > self.gpu_cache_cap_bytes {
-            match self.cache.pop_lru() {
-                Some((_, entry)) if entry.is_gpu() => self.account_evicted(&entry),
-                Some((key, entry)) => keep.push((key, entry)),
-                None => break,
-            }
-        }
-        for (key, entry) in keep {
-            self.cache.put(key, entry);
+    fn account_evicted(
+        &mut self,
+        entries: impl IntoIterator<Item = RemovedEntry<CacheKey, RenderCacheClass, CachedRasterImage>>,
+    ) {
+        for entry in entries {
+            let RemovedEntry { key, meta, value } = entry;
+            self.bytes_evicted = self.bytes_evicted.saturating_add(meta.weight as u64);
+            let _ = key;
+            drop(value);
         }
     }
 
-    /// Evict least-recently-used entries until `needed` more bytes fit
-    /// under the configured cap.
-    fn evict_cpu_cache_to_fit(&mut self, needed: usize) {
-        if self.cpu_cache_bytes.saturating_add(needed) <= self.cap_bytes {
-            return;
-        }
-
-        let mut keep = Vec::with_capacity(self.cache.len());
-        while self.cpu_cache_bytes.saturating_add(needed) > self.cap_bytes {
-            match self.cache.pop_lru() {
-                Some((_, entry)) if !entry.is_gpu() => self.account_evicted(&entry),
-                Some((key, entry)) => keep.push((key, entry)),
-                None => break,
-            }
-        }
-        for (key, entry) in keep {
-            self.cache.put(key, entry);
-        }
+    fn account_one_evicted(
+        &mut self,
+        entry: RemovedEntry<CacheKey, RenderCacheClass, CachedRasterImage>,
+    ) {
+        self.account_evicted(std::iter::once(entry));
     }
 
     /// Evict entries until system memory pressure subsides or the cache
     /// is empty.
     fn shed_under_pressure(&mut self) {
         while self.under_memory_pressure() {
-            let mut keep = Vec::with_capacity(self.cache.len());
-            let mut evicted = false;
-            match self.cache.pop_lru() {
-                Some((_, entry)) if !entry.is_gpu() => {
-                    self.account_evicted(&entry);
-                    evicted = true;
-                }
-                Some((key, entry)) => keep.push((key, entry)),
-                None => break,
-            }
-            while !evicted {
-                match self.cache.pop_lru() {
-                    Some((_, entry)) if !entry.is_gpu() => {
-                        self.account_evicted(&entry);
-                        evicted = true;
-                    }
-                    Some((key, entry)) => keep.push((key, entry)),
-                    None => break,
-                }
-            }
-            for (key, entry) in keep {
-                self.cache.put(key, entry);
-            }
-            if !evicted {
+            let Some(entry) = self.cache.evict_one(RenderCacheClass::Cpu) else {
                 break;
-            }
+            };
+            self.account_one_evicted(entry);
         }
     }
 
@@ -697,7 +553,8 @@ impl CachingRenderContext {
 
         let limit = configured_vram_bytes();
         let used = vram_used_bytes();
-        if self.gpu_cache_cap_bytes >= self.gpu_cache_max_bytes
+        let gpu_cache_cap_bytes = self.cache.class_capacity(RenderCacheClass::Gpu);
+        if gpu_cache_cap_bytes >= self.gpu_cache_max_bytes
             || used.saturating_mul(4) >= limit.saturating_mul(3)
         {
             self.gpu_cache_spare_successes = 0;
@@ -707,10 +564,12 @@ impl CachingRenderContext {
         self.gpu_cache_spare_successes = self.gpu_cache_spare_successes.saturating_add(1);
         if self.gpu_cache_spare_successes >= GPU_CACHE_GROW_SUCCESS_STREAK {
             let step = (limit / GPU_CACHE_GROW_FRACTION_DIVISOR).max(MIB);
-            self.gpu_cache_cap_bytes = self
-                .gpu_cache_cap_bytes
+            let next = gpu_cache_cap_bytes
                 .saturating_add(step)
                 .min(self.gpu_cache_max_bytes);
+            let removed = self.cache.set_capacity(RenderCacheClass::Gpu, next);
+            debug_assert!(removed.is_empty(), "growing a cache cannot evict entries");
+            self.account_evicted(removed);
             self.gpu_cache_spare_successes = 0;
         }
     }
@@ -721,17 +580,20 @@ impl CachingRenderContext {
 
     fn shrink_gpu_cache_budget_for_pressure(&mut self, needed: usize) {
         self.gpu_cache_spare_successes = 0;
-        let old = self.gpu_cache_cap_bytes;
+        let old = self.cache.class_capacity(RenderCacheClass::Gpu);
         let mut next =
             old.saturating_mul(GPU_CACHE_SHRINK_NUMERATOR) / GPU_CACHE_SHRINK_DENOMINATOR;
         if old > 0 && next == old {
             next = old - 1;
         }
-        let non_cache_vram = vram_used_bytes().saturating_sub(self.gpu_cache_bytes);
+        let non_cache_vram =
+            vram_used_bytes().saturating_sub(self.cache.class_weight(RenderCacheClass::Gpu));
         let pressure_cap =
             configured_vram_bytes().saturating_sub(non_cache_vram.saturating_add(needed));
-        self.gpu_cache_cap_bytes = next.min(pressure_cap);
-        self.evict_gpu_cache_to_fit(0);
+        let removed = self
+            .cache
+            .set_capacity(RenderCacheClass::Gpu, next.min(pressure_cap));
+        self.account_evicted(removed);
     }
 
     fn evict_gpu_cache_until_vram_available(&mut self, needed: usize) {
@@ -740,16 +602,11 @@ impl CachingRenderContext {
             return;
         }
 
-        let mut keep = Vec::with_capacity(self.cache.len());
         while vram_used_bytes().saturating_add(needed) > configured_vram_bytes() {
-            match self.cache.pop_lru() {
-                Some((_, entry)) if entry.is_gpu() => self.account_evicted(&entry),
-                Some((key, entry)) => keep.push((key, entry)),
-                None => break,
-            }
-        }
-        for (key, entry) in keep {
-            self.cache.put(key, entry);
+            let Some(entry) = self.cache.evict_one(RenderCacheClass::Gpu) else {
+                break;
+            };
+            self.account_one_evicted(entry);
         }
     }
 }
@@ -855,10 +712,9 @@ impl RenderContext for CachingRenderContext {
         // matters when `counted`.
         let (img, was_hit, counted) = match key {
             None => (component.render(size, target, self), false, false),
-            Some(key) => {
-                if let Some(entry) = self.cache.get(&key) {
-                    (entry.image.clone(), true, true)
-                } else {
+            Some(key) => match self.cache.lookup(key, |entry| entry.image.clone()) {
+                Lookup::Hit(img) => (img, true, true),
+                Lookup::Miss(ticket) => {
                     // Miss path: produce the image, then decide whether to
                     // admit it. Nested `ctx.render` calls happen inside
                     // `component.render`, which is why timing is wrapped
@@ -866,42 +722,52 @@ impl RenderContext for CachingRenderContext {
                     let img = component.render(size, target, self);
                     self.adjust_gpu_cache_budget_after_render();
                     let bytes = Self::image_bytes(&img);
-                    let is_gpu = matches!(img, RasterImage::Gpu(_));
+                    let class = match &img {
+                        RasterImage::Cpu(_) => RenderCacheClass::Cpu,
+                        RasterImage::Gpu(_) => RenderCacheClass::Gpu,
+                    };
 
-                    if !is_gpu && bytes > self.cap_bytes {
-                        self.oversize_skips += 1;
-                    } else if !self.should_admit(key, type_id, bytes) {
-                    } else {
-                        if is_gpu {
-                            self.evict_gpu_cache_to_fit(bytes);
-                        }
-                        if is_gpu
-                            && self.gpu_cache_bytes.saturating_add(bytes) > self.gpu_cache_cap_bytes
-                        {
-                            self.budget_skips += 1;
-                        } else {
-                            if !is_gpu {
-                                self.evict_cpu_cache_to_fit(bytes);
-                            }
+                    match self
+                        .cache
+                        .prepare_admission(ticket, EntryMeta::new(class, bytes))
+                    {
+                        AdmissionPreparation::Rejected(AdmissionRejectReason::Overweight {
+                            ..
+                        }) => match class {
+                            RenderCacheClass::Cpu => self.oversize_skips += 1,
+                            RenderCacheClass::Gpu => self.budget_skips += 1,
+                        },
+                        // A nested render may have populated the same key after
+                        // this call received its owned miss ticket. Keep that
+                        // resident. Future strategy-specific rejections also
+                        // leave the freshly-rendered value uncached here.
+                        AdmissionPreparation::Rejected(_) => {}
+                        AdmissionPreparation::Ready { admission, evicted } => {
+                            self.account_evicted(evicted);
+
                             if self.under_memory_pressure() {
                                 self.shed_under_pressure();
                                 self.pressure_skips += 1;
-                            } else if let Some(entry) = Self::cache_entry(img.clone(), bytes) {
-                                self.cache.put(key, entry);
-                                self.cur_bytes += bytes;
-                                if is_gpu {
-                                    self.gpu_cache_bytes += bytes;
-                                } else {
-                                    self.cpu_cache_bytes += bytes;
-                                }
                             } else {
-                                self.budget_skips += 1;
+                                match self.cache.commit_with(admission, || {
+                                    Self::cache_entry(img.clone(), bytes).ok_or(())
+                                }) {
+                                    Ok(()) => {}
+                                    Err(CommitWithError::Create(())) => self.budget_skips += 1,
+                                    Err(CommitWithError::Policy(reason)) => {
+                                        debug_assert!(
+                                            false,
+                                            "admission plan became invalid before commit: {reason:?}"
+                                        );
+                                        self.budget_skips += 1;
+                                    }
+                                }
                             }
                         }
                     }
                     (img, false, true)
                 }
-            }
+            },
         };
 
         let inclusive = start.elapsed();
@@ -943,7 +809,8 @@ mod tests {
     use tellur_core::shapes::Rectangle;
     use tellur_core::vector::Paint;
 
-    use super::{CacheKey, CachedRasterImage, CachingRenderContext, VOLATILE_MIN_MISSES};
+    use super::{CacheKey, CachedRasterImage, CachingRenderContext, RenderCacheClass};
+    use crate::cache::{AdmissionPreparation, EntryMeta, Lookup};
     use crate::rasterize::Rasterizable;
 
     fn scene() -> Layer {
@@ -1027,61 +894,106 @@ mod tests {
         }
     }
 
-    #[test]
-    fn second_use_admission_skips_one_off_keys() {
-        let size = Vec2(1.0, 1.0);
-        let target = Resolution::new(1, 1);
-        let one = SolidRaster { id: 1 };
-        let two = SolidRaster { id: 2 };
-        let mut cache = CachingRenderContext::with_capacity_bytes(1024)
-            .with_gpu_preference(GpuPreference::Disabled)
-            .with_second_use_admission();
+    #[derive(PartialEq, Hash)]
+    struct GpuRaster {
+        id: u8,
+    }
 
-        render_and_readback(&mut cache, &one, size, target);
-        render_and_readback(&mut cache, &two, size, target);
-        let metrics = cache.metrics();
-        assert_eq!(metrics.hits, 0);
-        assert_eq!(metrics.misses, 2);
-        assert_eq!(metrics.admission_skips, 2);
-        assert_eq!(metrics.bytes_cached, 0);
+    impl RasterComponent for GpuRaster {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(1.0, 1.0))
+        }
 
-        render_and_readback(&mut cache, &one, size, target);
-        let metrics = cache.metrics();
-        assert_eq!(metrics.hits, 0);
-        assert_eq!(metrics.misses, 3);
-        assert_eq!(metrics.admission_skips, 2);
-        assert!(metrics.bytes_cached > 0);
-
-        render_and_readback(&mut cache, &one, size, target);
-        let metrics = cache.metrics();
-        assert_eq!(metrics.hits, 1);
-        assert_eq!(metrics.misses, 3);
-        assert_eq!(metrics.admission_skips, 2);
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            RasterImage::Gpu(GpuSurface::new(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                "test",
+                Arc::new(()),
+            ))
+        }
     }
 
     #[test]
-    fn volatile_large_admission_skips_repeated_large_misses() {
+    fn immediate_admission_caches_first_miss() {
         let size = Vec2(1.0, 1.0);
-        let target = Resolution::new(512, 512);
-        let mut cache = CachingRenderContext::with_capacity_bytes(64 * 1024 * 1024)
-            .with_gpu_preference(GpuPreference::Disabled)
-            .with_volatile_large_admission();
+        let target = Resolution::new(1, 1);
+        let one = SolidRaster { id: 1 };
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled);
 
-        for id in 0..VOLATILE_MIN_MISSES {
-            render_and_readback(&mut cache, &SolidRaster { id: id as u8 }, size, target);
-        }
-        let warmed = cache.metrics();
-        assert_eq!(warmed.hits, 0);
-        assert_eq!(warmed.misses, VOLATILE_MIN_MISSES);
-        assert_eq!(warmed.admission_skips, 0);
-        assert!(warmed.bytes_cached > 0);
+        render_and_readback(&mut cache, &one, size, target);
+        render_and_readback(&mut cache, &one, size, target);
 
-        render_and_readback(&mut cache, &SolidRaster { id: 99 }, size, target);
-        let skipped = cache.metrics();
-        assert_eq!(skipped.hits, 0);
-        assert_eq!(skipped.misses, VOLATILE_MIN_MISSES + 1);
-        assert_eq!(skipped.admission_skips, 1);
-        assert_eq!(skipped.bytes_cached, warmed.bytes_cached);
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.bytes_cached, 4);
+    }
+
+    #[test]
+    fn cpu_capacity_eviction_updates_cache_metrics() {
+        let size = Vec2(1.0, 1.0);
+        let target = Resolution::new(1, 1);
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled);
+        drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
+
+        render_and_readback(&mut cache, &SolidRaster { id: 1 }, size, target);
+        render_and_readback(&mut cache, &SolidRaster { id: 2 }, size, target);
+
+        let metrics = cache.metrics();
+        assert_eq!(metrics.hits, 0);
+        assert_eq!(metrics.misses, 2);
+        assert_eq!(metrics.bytes_cached, 4);
+        assert_eq!(metrics.bytes_evicted, 4);
+    }
+
+    #[test]
+    fn clear_drops_entries_without_counting_an_eviction() {
+        let size = Vec2(1.0, 1.0);
+        let target = Resolution::new(1, 1);
+        let mut cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled);
+        drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
+        render_and_readback(&mut cache, &SolidRaster { id: 1 }, size, target);
+
+        cache.clear();
+
+        assert_eq!(cache.current_bytes(), 0);
+        assert_eq!(cache.capacity_bytes(), 4);
+        assert_eq!(cache.metrics().bytes_evicted, 0);
+    }
+
+    #[test]
+    fn overweight_images_map_to_cpu_and_gpu_skip_metrics() {
+        let size = Vec2(1.0, 1.0);
+
+        let mut cpu_cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled);
+        drop(cpu_cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
+        let _ = cpu_cache.render(&SolidRaster { id: 1 }, size, Resolution::new(2, 2));
+        let cpu_metrics = cpu_cache.metrics();
+        assert_eq!(cpu_metrics.oversize_skips, 1);
+        assert_eq!(cpu_metrics.budget_skips, 0);
+        assert_eq!(cpu_metrics.bytes_cached, 0);
+
+        let mut gpu_cache = CachingRenderContext::with_capacity_bytes(1024)
+            .with_gpu_preference(GpuPreference::Disabled);
+        drop(gpu_cache.cache.set_capacity(RenderCacheClass::Gpu, 4));
+        let _ = gpu_cache.render(&GpuRaster { id: 1 }, size, Resolution::new(1, 1));
+        let _ = gpu_cache.render(&GpuRaster { id: 2 }, size, Resolution::new(2, 2));
+        let gpu_metrics = gpu_cache.metrics();
+        assert_eq!(gpu_metrics.oversize_skips, 0);
+        assert_eq!(gpu_metrics.budget_skips, 1);
+        assert_eq!(gpu_metrics.gpu_cache_bytes, 4);
+        assert_eq!(gpu_metrics.bytes_evicted, 0);
     }
 
     #[test]
@@ -1112,31 +1024,17 @@ mod tests {
             target_width: 10,
             target_height: 10,
         };
-        cache.cache.put(
-            cpu_key,
-            CachedRasterImage {
-                image: cpu,
-                bytes: 4,
-                _ram_reservation: None,
-            },
-        );
-        cache.cache.put(
-            gpu_key,
-            CachedRasterImage {
-                image: gpu,
-                bytes: 400,
-                _ram_reservation: None,
-            },
-        );
-        cache.cur_bytes = 404;
-        cache.gpu_cache_bytes = 400;
-        cache.gpu_cache_cap_bytes = 128;
+        drop(cache.cache.set_capacity(RenderCacheClass::Cpu, 4));
+        drop(cache.cache.set_capacity(RenderCacheClass::Gpu, 400));
+        insert_test_entry(&mut cache, cpu_key, cpu, RenderCacheClass::Cpu, 4);
+        insert_test_entry(&mut cache, gpu_key, gpu, RenderCacheClass::Gpu, 400);
 
-        cache.evict_gpu_cache_to_fit(1);
+        let removed = cache.cache.reclaim_to_fit(RenderCacheClass::Gpu, 1);
+        cache.account_evicted(removed);
 
         assert_eq!(cache.cache.len(), 1);
-        assert_eq!(cache.cur_bytes, 4);
-        assert_eq!(cache.gpu_cache_bytes, 0);
+        assert_eq!(cache.cache.total_weight(), 4);
+        assert_eq!(cache.cache.class_weight(RenderCacheClass::Gpu), 0);
         assert_eq!(cache.bytes_evicted, 400);
     }
 
@@ -1144,11 +1042,11 @@ mod tests {
     fn gpu_cache_budget_shrinks_after_vram_pressure() {
         let mut cache = CachingRenderContext::with_capacity_bytes(1024 * 1024)
             .with_gpu_preference(GpuPreference::PreferGpu);
-        cache.gpu_cache_cap_bytes = 1024;
+        drop(cache.cache.set_capacity(RenderCacheClass::Gpu, 1024));
 
         cache.shrink_gpu_cache_budget();
 
-        assert_eq!(cache.gpu_cache_cap_bytes, 768);
+        assert_eq!(cache.cache.class_capacity(RenderCacheClass::Gpu), 768);
     }
 
     #[test]
@@ -1171,6 +1069,11 @@ mod tests {
 
         let mut cache = CachingRenderContext::with_capacity_bytes(1024 * 1024)
             .with_gpu_preference(GpuPreference::PreferGpu);
+        drop(
+            cache
+                .cache
+                .set_capacity(RenderCacheClass::Gpu, entry_bytes * 3),
+        );
         for content_hash in 1..=3 {
             let reservation =
                 try_reserve_vram(entry_bytes).expect("cache entry reservation should fit");
@@ -1191,24 +1094,50 @@ mod tests {
                 target_width: 1,
                 target_height: 1,
             };
-            cache.cache.put(
-                key,
-                CachedRasterImage {
-                    image,
-                    bytes: entry_bytes,
-                    _ram_reservation: None,
-                },
-            );
+            insert_test_entry(&mut cache, key, image, RenderCacheClass::Gpu, entry_bytes);
         }
-        cache.cur_bytes = entry_bytes * 3;
-        cache.gpu_cache_bytes = entry_bytes * 3;
 
         cache.evict_gpu_cache_until_vram_available(needed);
 
         assert_eq!(cache.cache.len(), 2);
-        assert_eq!(cache.cur_bytes, entry_bytes * 2);
-        assert_eq!(cache.gpu_cache_bytes, entry_bytes * 2);
+        assert_eq!(cache.cache.total_weight(), entry_bytes * 2);
+        assert_eq!(
+            cache.cache.class_weight(RenderCacheClass::Gpu),
+            entry_bytes * 2
+        );
         assert_eq!(cache.bytes_evicted, entry_bytes as u64);
+    }
+
+    fn insert_test_entry(
+        cache: &mut CachingRenderContext,
+        key: CacheKey,
+        image: RasterImage,
+        class: RenderCacheClass,
+        bytes: usize,
+    ) {
+        let ticket = match cache.cache.lookup(key, |_| ()) {
+            Lookup::Hit(()) => panic!("test cache key was already resident"),
+            Lookup::Miss(ticket) => ticket,
+        };
+        let (admission, evicted) = match cache
+            .cache
+            .prepare_admission(ticket, EntryMeta::new(class, bytes))
+        {
+            AdmissionPreparation::Ready { admission, evicted } => (admission, evicted),
+            AdmissionPreparation::Rejected(reason) => {
+                panic!("test admission rejected: {reason:?}")
+            }
+        };
+        assert!(evicted.is_empty());
+        cache
+            .cache
+            .commit_with(admission, || {
+                Ok::<_, ()>(CachedRasterImage {
+                    image,
+                    _ram_reservation: None,
+                })
+            })
+            .expect("test cache admission must commit");
     }
 
     fn render_and_readback(
