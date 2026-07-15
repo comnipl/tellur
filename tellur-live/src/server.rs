@@ -43,8 +43,8 @@ static VIDEO_SEGMENT_CACHE: LazyLock<Mutex<VideoSegmentCache>> =
 struct VideoSegmentCacheKey {
     plugin_cache_key: String,
     timeline_id: String,
-    start_seconds_bits: u32,
-    video_seconds_bits: u32,
+    start_seconds_bits: u64,
+    video_seconds_bits: u64,
     width: u32,
     height: u32,
     fps: u32,
@@ -561,7 +561,7 @@ impl PreviewApp {
         let timeline_id = query.get("timeline").cloned();
         let mut seconds = query
             .get("time")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.0);
 
         write!(
@@ -572,8 +572,8 @@ impl PreviewApp {
              Connection: close\r\n\r\n"
         )?;
 
-        let frame_step = 1.0 / fps as f32;
-        let frame_duration = Duration::from_secs_f32(frame_step);
+        let frame_step = 1.0 / fps as f64;
+        let frame_duration = Duration::from_secs_f64(frame_step);
         loop {
             let frame_start = Instant::now();
             let mut q = HashMap::new();
@@ -615,7 +615,7 @@ impl PreviewApp {
         let timeline_id = query.get("timeline").cloned();
         let mut seconds = query
             .get("time")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.0);
         let frame_bytes = (resolution.width as usize) * (resolution.height as usize) * 4;
 
@@ -632,8 +632,8 @@ impl PreviewApp {
             resolution.width, resolution.height, fps, frame_bytes,
         )?;
 
-        let frame_step = 1.0 / fps as f32;
-        let frame_duration = Duration::from_secs_f32(frame_step);
+        let frame_step = 1.0 / fps as f64;
+        let frame_duration = Duration::from_secs_f64(frame_step);
         loop {
             let frame_start = Instant::now();
             let mut q = HashMap::new();
@@ -661,7 +661,7 @@ impl PreviewApp {
     fn render_video_rgba(
         &mut self,
         timeline_id: &str,
-        seconds: f32,
+        seconds: f64,
         resolution: Resolution,
         motion_blur: bool,
         collect_stats: bool,
@@ -835,8 +835,8 @@ impl PreviewApp {
         let seconds = query
             .get("frame")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(|frame| frame as f32 / fps as f32)
-            .or_else(|| query.get("time").and_then(|v| v.parse::<f32>().ok()))
+            .map(|frame| frame as f64 / fps as f64)
+            .or_else(|| query.get("time").and_then(|v| v.parse::<f64>().ok()))
             .unwrap_or(0.0);
         // Clamp into the half-open renderable range so a `time=<duration>`
         // request (a frontend scrubbed to the very end) returns the last frame
@@ -901,17 +901,17 @@ impl PreviewApp {
 
 struct VideoStreamSetup {
     timeline_id: String,
-    duration: f32,
+    duration: f64,
     /// The full timeline length, used to clamp each frame's requested time into
     /// the half-open renderable range (`< total_duration`).
-    total_duration: f32,
+    total_duration: f64,
     fps: u32,
     resolution: Resolution,
     gop: u32,
     crf: u8,
     motion_blur: bool,
     color_range: ColorRange,
-    start_seconds: f32,
+    start_seconds: f64,
     cache_control: &'static str,
     realtime: bool,
     verbose: bool,
@@ -920,7 +920,7 @@ struct VideoStreamSetup {
 fn video_segment_cache_key(
     setup: &VideoStreamSetup,
     plugin_cache_key: &str,
-    video_seconds: f32,
+    video_seconds: f64,
 ) -> VideoSegmentCacheKey {
     VideoSegmentCacheKey {
         plugin_cache_key: plugin_cache_key.to_owned(),
@@ -1085,13 +1085,13 @@ fn handle_video_stream(
             .unwrap_or(23);
         let start_seconds = query
             .get("time")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.0)
             .clamp(0.0, info.duration.max(0.0));
         let remaining = (info.duration - start_seconds).max(0.0);
         let duration = query
             .get("duration")
-            .and_then(|v| v.parse::<f32>().ok())
+            .and_then(|v| v.parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v > 0.0)
             .map(|v| v.min(remaining))
             .unwrap_or(remaining);
@@ -1124,8 +1124,8 @@ fn handle_video_stream(
 
     // The frame-quantized video length, used to BOUND the output below with `-t`
     // (instead of `-shortest`; see that arg). This is also the loop's frame count.
-    let total_frames = (setup.duration * setup.fps as f32).ceil().max(0.0) as u64;
-    let video_seconds = total_frames as f32 / setup.fps as f32;
+    let total_frames = (setup.duration * setup.fps as f64).ceil().max(0.0) as u64;
+    let video_seconds = total_frames as f64 / setup.fps as f64;
     let segment_cache_key = if setup.cache_control != "no-store" {
         query
             .get("v")
@@ -1205,6 +1205,7 @@ fn handle_video_stream(
         .is_multiple_of(setup.fps)
         .then(|| AUDIO_RATE / setup.fps);
 
+    let video_duration_arg = video_seconds.to_string();
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-hide_banner")
         .args(["-loglevel", "error"])
@@ -1290,7 +1291,7 @@ fn handle_video_stream(
         // and ends the output EARLY — dropping the tail frame(s) and opening a
         // startup gap (the offline export avoids this by pre-fitting audio to the
         // video length). `-t` cuts on output PTS, so every fed frame survives.
-        .args(["-t", &format!("{video_seconds:.6}")])
+        .args(["-t", &video_duration_arg])
         .args(["-muxdelay", "0"])
         .args(["-muxpreload", "0"])
         .args(["-flush_packets", "1"])
@@ -1364,8 +1365,8 @@ fn handle_video_stream(
         text
     });
 
-    let frame_step = 1.0 / setup.fps as f32;
-    let frame_duration = Duration::from_secs_f32(frame_step);
+    let frame_step = 1.0 / setup.fps as f64;
+    let frame_duration = Duration::from_secs_f64(frame_step);
     let mut frames_rendered = 0u64;
     let mut frames_written = 0u64;
     let mut render_total = Duration::ZERO;
@@ -1399,7 +1400,7 @@ fn handle_video_stream(
         // full-length stream (which can land on `total_duration`) renders the
         // last frame rather than erroring with `timeline did not produce a frame`.
         let seconds = clamp_to_renderable(
-            setup.start_seconds + frame as f32 * frame_step,
+            setup.start_seconds + frame as f64 * frame_step,
             setup.total_duration,
             setup.fps,
         );
@@ -1529,7 +1530,7 @@ struct RenderedImage {
 
 struct FrameRenderStats {
     timeline_id: String,
-    seconds: f32,
+    seconds: f64,
     resolution: Resolution,
     render_time: Duration,
     encode_time: Duration,
@@ -1986,8 +1987,8 @@ fn export_preview_png<W: Write>(image: &CpuRasterImage, writer: W) -> Result<(),
 /// and lands in the final frame's interval. A zero/sub-frame timeline clamps to
 /// `0.0`. This is the server-side root guard: an end-of-timeline request returns
 /// the last frame instead of erroring.
-fn clamp_to_renderable(seconds: f32, duration: f32, fps: u32) -> f32 {
-    let frame_step = 1.0 / fps.max(1) as f32;
+fn clamp_to_renderable(seconds: f64, duration: f64, fps: u32) -> f64 {
+    let frame_step = 1.0 / fps.max(1) as f64;
     let last_frame = (duration - frame_step).max(0.0);
     seconds.clamp(0.0, last_frame)
 }
@@ -2264,7 +2265,7 @@ fn arrangement_json(node: &Arrangement) -> String {
     )
 }
 
-fn finite_json_number(v: f32) -> String {
+fn finite_json_number(v: f64) -> String {
     if v.is_finite() {
         v.to_string()
     } else {
@@ -2320,9 +2321,9 @@ mod tests {
     // `timeline did not produce a frame`).
     #[test]
     fn clamp_to_renderable_maps_exact_duration_to_last_frame() {
-        let duration = 7.6_f32;
+        let duration = 7.6_f64;
         let fps = 60;
-        let frame_step = 1.0 / fps as f32;
+        let frame_step = 1.0 / fps as f64;
 
         let clamped = clamp_to_renderable(duration, duration, fps);
         // Strictly inside the timeline (the half-open endpoint is excluded).
@@ -2338,6 +2339,30 @@ mod tests {
 
         // A past-the-end request clamps to the same last frame.
         assert_eq!(clamp_to_renderable(duration + 5.0, duration, fps), clamped);
+    }
+
+    #[test]
+    fn video_segment_cache_key_preserves_f64_time_bits() {
+        let mut setup = VideoStreamSetup {
+            timeline_id: "main".to_owned(),
+            duration: 1.0,
+            total_duration: 1_000.0,
+            fps: 60,
+            resolution: Resolution::new(16, 9),
+            gop: 15,
+            crf: 23,
+            motion_blur: false,
+            color_range: ColorRange::Full,
+            start_seconds: 512.0,
+            cache_control: "no-store",
+            realtime: false,
+            verbose: false,
+        };
+        let first = video_segment_cache_key(&setup, "plugin", 1.0);
+        setup.start_seconds += 1.0 / 48_000.0;
+        let next_sample = video_segment_cache_key(&setup, "plugin", 1.0);
+
+        assert_ne!(first, next_sample);
     }
 
     #[test]
@@ -2591,11 +2616,11 @@ mod tests {
             label: String::new(),
             name: None,
             source: None,
-            start: f32::INFINITY,
-            end: f32::NAN,
+            start: f64::INFINITY,
+            end: f64::NAN,
             trim: None,
             triggers: vec![TriggerMark {
-                time: f32::INFINITY,
+                time: f64::INFINITY,
                 name: None,
             }],
             children: Vec::new(),

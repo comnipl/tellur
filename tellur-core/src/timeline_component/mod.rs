@@ -21,13 +21,18 @@
 //! `.sketch/02-resolve-pass.md` for the resolve-pass architecture every method
 //! here leans on (ownership model §3/§7, `Clock` §8, trigger table §11).
 
+mod audio_effect;
+mod audio_render;
 mod clock;
 mod component;
 mod output;
 mod placed;
 mod resolve;
 mod trigger;
+mod trim;
 
+pub use audio_effect::{AudioEffects, AudioEffectsBuilder, EnvelopePoint, GainEnvelope};
+pub use audio_render::{AudioBlockMut, AudioRenderContext, AudioRenderRequest};
 pub use clock::Clock;
 pub use component::{TimelineBuilder, TimelineComponent};
 pub use output::{Arrangement, AudioBuffer, Cue, NodeKind, SourceLoc, TriggerMark};
@@ -37,6 +42,7 @@ pub use resolve::{
     DEFAULT_CANVAS,
 };
 pub use trigger::{peel_source, Event, Sourced, Triggered, Triggers, TriggersBuilder};
+pub use trim::{Trim, TrimBounds};
 
 #[cfg(test)]
 mod event_path_tests;

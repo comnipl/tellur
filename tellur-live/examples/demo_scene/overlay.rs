@@ -23,11 +23,11 @@ use super::common::*;
 // to its last sub-event end. The matching value is `time.window(START, END)`
 // clamped, so it freezes once the effect is over and before it begins —
 // stable, and therefore cacheable, on every frame outside the window.
-pub const OVERLAY_BOOT_START: f32 = 0.05;
-pub const OVERLAY_BOOT_END: f32 = 0.55;
-pub const OVERLAY_FLASH_START: f32 = 4.9;
-pub const OVERLAY_FLASH_END: f32 = 5.35;
-pub const OVERLAY_FADE_START: f32 = 7.25;
+pub const OVERLAY_BOOT_START: f64 = 0.05;
+pub const OVERLAY_BOOT_END: f64 = 0.55;
+pub const OVERLAY_FLASH_START: f64 = 4.9;
+pub const OVERLAY_FLASH_END: f64 = 5.35;
+pub const OVERLAY_FADE_START: f64 = 7.25;
 // The fade runs to the end of the timeline, so its window end is `DURATION`.
 
 #[tellur_core::component(vector)]

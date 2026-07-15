@@ -1,14 +1,13 @@
 //! The overlay [`Timeline`] and the one-after-another [`Sequence`].
 
-use crate::audio::AudioMix;
 use crate::composite::composite_frames_over;
 use crate::geometry::Vec2;
 use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time};
 use crate::timeline_component::{
-    peel_source, Arrangement, AudioBuffer, Clock, Cue, NodeKind, Placed, ResolveCtx, SourceLoc,
-    TimelineComponent,
+    peel_source, Arrangement, AudioBlockMut, AudioRenderContext, Clock, Cue, NodeKind, Placed,
+    ResolveCtx, SourceLoc, TimelineComponent,
 };
 
 // ── Containers ───────────────────────────────────────────────────────────────
@@ -76,14 +75,14 @@ impl ChildView<'_> {
     /// gate. This is intentionally conservative for fill, bare, and custom
     /// components: only a placement window can prove that a child is inactive
     /// without rendering it.
-    fn may_contribute_at(&self, t: f32) -> bool {
+    fn may_contribute_at(&self, t: f64) -> bool {
         match self {
             Self::Fill(..) | Self::Bare(..) => true,
             Self::PlacedAt(placed, _) => {
                 let placement = placed.placement();
                 match placement.end() {
                     Some(end) => t >= placement.start() && t < end,
-                    None => match placed.child().duration() {
+                    None => match placed.child().measure() {
                         Some(duration) => {
                             t >= placement.start() && t < placement.start() + duration
                         }
@@ -96,12 +95,12 @@ impl ChildView<'_> {
 }
 
 impl TimelineComponent for Timeline {
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         // max over the NON-fill children of each child's measure footprint
         // (relative start folded in by `Placed::measure`). Fill children are
         // EXCLUDED (the load-bearing acyclicity invariant, `.sketch/02 §5`). If
         // no non-fill child has a length, the container is timeless (`None`).
-        let mut acc: Option<f32> = None;
+        let mut acc: Option<f64> = None;
         for view in self.classify() {
             let m = match view {
                 ChildView::Fill(..) => continue,
@@ -109,16 +108,16 @@ impl TimelineComponent for Timeline {
                 ChildView::Bare(child) => child.measure(),
             };
             if let Some(end) = m {
-                acc = Some(acc.map_or(end, |cur: f32| cur.max(end)));
+                acc = Some(acc.map_or(end, |cur: f64| cur.max(end)));
             }
         }
         acc
     }
 
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         // Sub-pass 1 — non-fill children: place each at its relative start and
         // fold the max end into the container length.
-        let mut length = 0.0_f32;
+        let mut length = 0.0_f64;
         let mut saw_non_fill = false;
         let mut saw_fill = false;
         for view in self.classify() {
@@ -128,16 +127,20 @@ impl TimelineComponent for Timeline {
                 }
                 ChildView::PlacedAt(placed, _) => {
                     saw_non_fill = true;
-                    // `Placed::resolve` recurses at the relative start and
-                    // returns the placed length; its footprint end is
-                    // `relative_start + placed_len`.
-                    let len = placed.resolve(abs_start, out);
-                    length = length.max(placed.placement().start() + len);
+                    let resolved = placed.resolve(abs_start, out);
+                    // `Placed::resolve` deliberately returns its playable
+                    // interval (the contract used by an outer Triggered), while
+                    // `measure()` carries the leading-offset footprint a
+                    // container must fold into its extent.
+                    length = length.max(placed.measure().unwrap_or(resolved));
                 }
                 ChildView::Bare(child) => {
                     saw_non_fill = true;
-                    let len = child.resolve(abs_start, out);
-                    length = length.max(len);
+                    let resolved = child.resolve(abs_start, out);
+                    // An outer transparent/effect wrapper may delegate a Placed
+                    // resolve return that excludes its leading offset. Its
+                    // delegated measure remains the authoritative footprint.
+                    length = length.max(child.measure().unwrap_or(resolved));
                 }
             }
         }
@@ -151,19 +154,21 @@ impl TimelineComponent for Timeline {
             );
         }
 
-        // Sub-pass 2 — fill children take the resolved container length. Recurse
-        // into the INNER component (the fill `Placed` is a start-0.0 wrapper) so
-        // its triggers / cues compose at the container base.
+        // Sub-pass 2 — fill children take the resolved container length. Keep
+        // the Placed wrapper in the recursive path: for a timed child it folds
+        // `content_duration / container_length` into the resolve clock so
+        // interior/end triggers land on their stretched global times; for a
+        // timeless child it remains the identity used before this stretch fix.
         for view in self.classify() {
             if let ChildView::Fill(placed, _) = view {
-                placed.child().resolve(abs_start, out);
+                placed.resolve_fill(abs_start, length, out);
             }
         }
 
         length
     }
 
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         // Concat children cues at `offset + child relative start`. `Placed::cues`
         // already adds its own relative start and stamps a windowed timeless
         // child's interval. A FILL child has no window, so its interval is the
@@ -173,14 +178,7 @@ impl TimelineComponent for Timeline {
         for view in self.classify() {
             match view {
                 ChildView::Fill(placed, _) => {
-                    let mut child_cues = placed.child().cues(offset);
-                    if placed.child().duration().is_none() {
-                        let abs_end = offset + fill_len;
-                        for cue in &mut child_cues {
-                            cue.end = abs_end;
-                        }
-                    }
-                    cues.extend(child_cues);
+                    cues.extend(placed.cues_fill(offset, fill_len));
                 }
                 ChildView::PlacedAt(placed, _) => cues.extend(placed.cues(offset)),
                 ChildView::Bare(child) => cues.extend(child.cues(offset)),
@@ -241,31 +239,74 @@ impl TimelineComponent for Timeline {
             residency
         };
         let mut frames = Vec::new();
-        for child in &self.children {
-            if let Some(img) = child.frame(clock, canvas, target, child_residency, ctx) {
+        for view in self.classify() {
+            let image = match view {
+                ChildView::Fill(placed, _) => match length {
+                    Some(fill_length) => {
+                        placed.frame_fill(clock, fill_length, canvas, target, child_residency, ctx)
+                    }
+                    None => placed.frame(clock, canvas, target, child_residency, ctx),
+                },
+                ChildView::PlacedAt(placed, _) => {
+                    placed.frame(clock, canvas, target, child_residency, ctx)
+                }
+                ChildView::Bare(child) => child.frame(clock, canvas, target, child_residency, ctx),
+            };
+            if let Some(img) = image {
                 frames.push(img);
             }
         }
         composite_frames_over(frames, target, residency, ctx)
     }
 
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // The eager mix-down uses `mix_into`; this per-window seam is unused.
-        let _ = (clock, window);
-        None
-    }
-
-    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
-        // Overlay: every child shares the container's base start, so each is
-        // mixed at the SAME `start_secs` (a `.at(start..)` child is a `Placed`
-        // that adds its own relative start; a `.fill()` child spans from 0).
-        // Summing all children into one mix IS the audio overlay.
-        for child in &self.children {
-            child.mix_into(mix, start_secs, speed);
+    fn render_audio_block(&self, mut block: AudioBlockMut<'_>, ctx: &mut AudioRenderContext) {
+        let request = block.request();
+        let length = self.measure();
+        if length.is_some_and(|length| !request.may_overlap_local(0.0, length)) {
+            block.clear();
+            return;
         }
+        block.clear();
+        let mut scratch = ctx.take_scratch(request.sample_len());
+        for view in self.classify() {
+            match view {
+                ChildView::Fill(placed, _) => match length {
+                    Some(fill_length) => placed.render_audio_fill(
+                        AudioBlockMut::new(request, &mut scratch),
+                        fill_length,
+                        ctx,
+                    ),
+                    None => {
+                        placed.render_audio_block(AudioBlockMut::new(request, &mut scratch), ctx)
+                    }
+                },
+                ChildView::PlacedAt(placed, _) => {
+                    placed.render_audio_block(AudioBlockMut::new(request, &mut scratch), ctx)
+                }
+                ChildView::Bare(child) => {
+                    child.render_audio_block(AudioBlockMut::new(request, &mut scratch), ctx)
+                }
+            }
+            for (output, contribution) in block.samples_mut().iter_mut().zip(&scratch) {
+                *output += contribution;
+            }
+        }
+
+        // A fill or otherwise timeless child is capped by the overlay's own
+        // resolved interval, just like the video path.
+        if let Some(length) = length {
+            let channels = request.channels() as usize;
+            for frame in 0..request.frame_count() {
+                let t = request.time_at(frame);
+                if t < 0.0 || t >= length {
+                    block.samples_mut()[frame * channels..(frame + 1) * channels].fill(0.0);
+                }
+            }
+        }
+        ctx.recycle_scratch(scratch);
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // Overlay: every child shares the container base `offset`. The resolved
         // length is the measured length (fill children excluded); a `.fill()`
         // child spans `[offset, offset + length]`. Mirror `cues`'s classify walk
@@ -275,13 +316,10 @@ impl TimelineComponent for Timeline {
         for view in self.classify() {
             match view {
                 ChildView::Fill(placed, source) => {
-                    // A fill child takes the container length; build the INNER
-                    // component at the base and stamp the span end onto a
-                    // timeless inner node (same rule `cues` applies to fill cues).
-                    let mut node = placed.child().arrangement(offset);
-                    if placed.child().duration().is_none() {
-                        node.end = offset + length;
-                    }
+                    // Keep the Placed remap so a timed node, all descendants,
+                    // and its trigger markers stretch to the container length.
+                    // Timeless nodes retain the old end-stamping behaviour.
+                    let mut node = placed.arrangement_fill(offset, length);
                     // Re-stamp the call site the peeled-away `Sourced` carried.
                     if node.source.is_none() {
                         node.source = source;
@@ -331,7 +369,7 @@ pub struct Sequence {
     pub children: Vec<Box<dyn TimelineComponent + Send>>,
     /// Gap inserted between consecutive children (seconds). `0.0` by default.
     #[builder(default)]
-    pub spacing: f32,
+    pub spacing: f64,
 }
 
 impl Sequence {
@@ -348,8 +386,8 @@ impl Sequence {
     /// Counts up to two children whose sequence slots can contribute at
     /// `local_t`, mirroring the cursor walk in [`TimelineComponent::frame`].
     /// Timeless children have no finite slot and remain possible contributors.
-    fn possible_contributors_at(&self, local_t: f32) -> usize {
-        let mut cursor = 0.0_f32;
+    fn possible_contributors_at(&self, local_t: f64) -> usize {
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         let mut count = 0usize;
         for child in &self.children {
@@ -381,11 +419,11 @@ impl Sequence {
 }
 
 impl TimelineComponent for Sequence {
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         // Σ over the NON-fill children of each child's length, plus spacing
         // between them. A fill child contributes nothing (it is an error at
         // place time). All-`None` children ⇒ the sequence is timeless.
-        let mut total = 0.0_f32;
+        let mut total = 0.0_f64;
         let mut any = false;
         let mut count = 0usize;
         for child in &self.children {
@@ -401,15 +439,15 @@ impl TimelineComponent for Sequence {
         if !any {
             return None;
         }
-        let gaps = count.saturating_sub(1) as f32;
+        let gaps = count.saturating_sub(1) as f64;
         Some(total + self.spacing * gaps)
     }
 
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         // Cursor from 0: child N starts at `abs_start + Σ prior lengths (+gaps)`,
         // the time version of `compute_stack_pass`'s Start branch. A `.fill()`
         // child is a fatal error — record it and skip its length contribution.
-        let mut cursor = 0.0_f32;
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
@@ -425,18 +463,22 @@ impl TimelineComponent for Sequence {
             // The cursor is in THIS sequence's local seconds; scale it to absolute
             // by the enclosing window stretch (1.0 unless the whole Sequence sits
             // inside a stretched `.at(a..b)`), mirroring `Placed::resolve`.
-            let len = child.resolve(abs_start + cursor * out.local_scale(), out);
-            cursor += len;
+            let resolved = child.resolve(abs_start + cursor * out.local_scale(), out);
+            // Advance by the measured component footprint when available. This
+            // retains a Placed child's leading offset even through an outer
+            // effect wrapper, while its resolve return keeps the established
+            // trigger-interval semantics.
+            cursor += child.measure().unwrap_or(resolved);
             placed_any = true;
         }
         cursor
     }
 
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         // Re-flow the cursor the same way `resolve` does so cues land at the
         // child's absolute start. Fill children are skipped (an error).
         let mut cues = Vec::new();
-        let mut cursor = 0.0_f32;
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
@@ -466,7 +508,7 @@ impl TimelineComponent for Sequence {
         // cursorN` — carrying the slot length as its window. Half-open slots mean
         // exactly one child draws at a seam (no double-draw); a child outside its
         // slot contributes nothing (`.sketch/02 §8`).
-        let mut cursor = 0.0_f32;
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         let mut frames = Vec::new();
         let local_t = clock.local().seconds();
@@ -510,17 +552,16 @@ impl TimelineComponent for Sequence {
         composite_frames_over(frames, target, residency, ctx)
     }
 
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // The eager mix-down uses `mix_into`; this per-window seam is unused.
-        let _ = (clock, window);
-        None
-    }
-
-    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
-        // Re-flow the cursor exactly as `resolve` / `frame` / `cues` do: child N
-        // is mixed at `start_secs + Σ prior lengths (+ gaps)`. A `.fill()` child
-        // is a resolve error (skipped here defensively, matching `frame`).
-        let mut cursor = 0.0_f32;
+    fn render_audio_block(&self, mut block: AudioBlockMut<'_>, ctx: &mut AudioRenderContext) {
+        let request = block.request();
+        block.clear();
+        let mut scratch = ctx.take_scratch(request.sample_len());
+        let request_latest = (request.frame_count() > 0).then(|| {
+            request
+                .time_at(0)
+                .max(request.time_at(request.frame_count() - 1))
+        });
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
@@ -530,31 +571,49 @@ impl TimelineComponent for Sequence {
                 cursor += self.spacing;
             }
             let slot = child.measure();
-            let child_start = start_secs + cursor;
-            if let Some(len) = slot {
-                // Windowed live audio should not even ask off-window clips to
-                // decode/conform; in long sequences this is the hot path.
-                if child_start + len <= 0.0 {
-                    cursor += len;
-                    placed_any = true;
-                    continue;
-                }
-                if child_start >= mix.duration() {
-                    break;
+            // Children are ordered. Once a finite future slot begins strictly
+            // after the request's latest local sample, this and every later
+            // finite slot are unreachable; stop instead of walking the tail.
+            // A timeless slot remains observable at any time, matching frame().
+            if slot.is_some()
+                && request_latest.is_some_and(|request_latest| request_latest < cursor)
+            {
+                break;
+            }
+            if slot.is_some_and(|len| !request.may_overlap_local(cursor, cursor + len)) {
+                cursor += slot.unwrap_or(0.0);
+                placed_any = true;
+                continue;
+            }
+            let child_request = request.shift_local(-cursor);
+            child.render_audio_block(AudioBlockMut::new(child_request, &mut scratch), ctx);
+
+            let channels = request.channels() as usize;
+            for frame in 0..request.frame_count() {
+                let parent_t = request.time_at(frame);
+                let active = match slot {
+                    Some(len) => parent_t >= cursor && parent_t < cursor + len,
+                    None => true,
+                };
+                if active {
+                    let base = frame * channels;
+                    for channel in 0..channels {
+                        block.samples_mut()[base + channel] += scratch[base + channel];
+                    }
                 }
             }
-            child.mix_into(mix, child_start, speed);
             cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
+        ctx.recycle_scratch(scratch);
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // Re-flow the cursor exactly as `resolve` / `cues` do so child N's node
         // lands at its absolute start `offset + Σ prior lengths (+ gaps)`. Fill
         // children are skipped (an error inside a `Sequence`).
         let mut children = Vec::with_capacity(self.children.len());
-        let mut cursor = 0.0_f32;
+        let mut cursor = 0.0_f64;
         let mut placed_any = false;
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {

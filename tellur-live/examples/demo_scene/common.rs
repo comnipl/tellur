@@ -19,7 +19,7 @@ pub use tellur_core::shapes::{Circle, Rectangle};
 pub use tellur_core::text::{Text, TextSpan, MONOSPACE};
 pub use tellur_core::vector::{Stroke, VectorTransform};
 
-pub const DURATION: f32 = 7.6;
+pub const DURATION: f64 = 7.6;
 pub const SCENE_SIZE: Vec2 = Vec2(1920.0, 1080.0);
 pub const CX: f32 = 960.0;
 pub const CY: f32 = 540.0;

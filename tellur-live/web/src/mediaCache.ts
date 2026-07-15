@@ -17,7 +17,7 @@ const LEGACY_MEDIA_CACHE_PREFIX = "tellur-live-media-v1-";
 // ---------------------------------------------------------------------------
 
 interface SegmentEntry {
-  /** Compound key: `${groupKey}\n${start.toFixed(4)}\n${end.toFixed(4)}` */
+  /** Compound key using the shortest round-tripping decimal for each boundary. */
   id: string;
   groupKey: string;
   pluginKey: string;
@@ -551,7 +551,7 @@ function canUseIndexedDb(): boolean {
 }
 
 function segmentId(groupKey: string, start: number, end: number): string {
-  return `${groupKey}\n${start.toFixed(4)}\n${end.toFixed(4)}`;
+  return `${groupKey}\n${String(start)}\n${String(end)}`;
 }
 
 // ---------------------------------------------------------------------------

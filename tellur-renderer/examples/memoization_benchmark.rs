@@ -58,7 +58,7 @@ fn bench(
 ) {
     let start = Instant::now();
     for frame_idx in 0..total_frames {
-        let t = TimelineTime::new(frame_idx as f32 / fps as f32);
+        let t = TimelineTime::new(frame_idx as f64 / fps as f64);
         // Pull the image into a local so the optimizer can't elide the
         // render — `bytes::Bytes` clone is cheap so this doesn't skew
         // the comparison.
@@ -78,8 +78,8 @@ fn main() {
     let scene_size = Vec2(1280.0, 720.0);
     let resolution = Resolution::new(1920, 1080);
     let fps = 60u32;
-    let duration = 5.0f32;
-    let total_frames = (duration * fps as f32).ceil() as u64;
+    let duration = 5.0f64;
+    let total_frames = (duration * fps as f64).ceil() as u64;
 
     let tl = timeline(duration, move |t, target, residency, ctx| {
         DecoratedBox::builder()

@@ -151,7 +151,7 @@ pub enum FfmpegError {
     #[error("fps must be greater than zero")]
     ZeroFps,
     #[error("duration must be finite and non-negative, got {0}")]
-    InvalidDuration(f32),
+    InvalidDuration(f64),
 }
 
 impl FfmpegEncoder {
@@ -217,13 +217,13 @@ impl FfmpegEncoder {
             return Err(FfmpegError::InvalidDuration(duration));
         }
         // ceil(duration * fps), saturating to u64.
-        let total_frames = (duration * self.fps as f32).ceil().max(0.0) as u64;
+        let total_frames = (duration * self.fps as f64).ceil().max(0.0) as u64;
 
         // No audio input for the old path: pass no extra args, so the command
         // is byte-identical to the pre-step-8 behaviour.
         let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         self.drive_ffmpeg(&[], total_frames, out, |frame_idx| {
-            let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
+            let t = TimelineTime::new(frame_idx as f64 / self.fps as f64);
             let image = tl.build(t, self.resolution, RasterResidency::Cpu, &mut ctx);
             Ok(ctx.readback(image))
         })
@@ -261,10 +261,10 @@ impl FfmpegEncoder {
         if !duration.is_finite() || duration < 0.0 {
             return Err(FfmpegError::InvalidDuration(duration));
         }
-        let total_frames = (duration * self.fps as f32).ceil().max(0.0) as u64;
+        let total_frames = (duration * self.fps as f64).ceil().max(0.0) as u64;
         // Frame-quantized video length: the audio is rendered to exactly this
         // many seconds so the two streams end together.
-        let video_seconds = total_frames as f32 / self.fps as f32;
+        let video_seconds = total_frames as f64 / self.fps as f64;
 
         // Render + write the mixed audio track to a temp WAV.
         let mut mixed = resolved.render_audio(AUDIO_RATE, AUDIO_CHANNELS);
@@ -296,7 +296,7 @@ impl FfmpegEncoder {
 
         let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         let result = self.drive_ffmpeg(&audio_args, total_frames, out, |frame_idx| {
-            let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
+            let t = TimelineTime::new(frame_idx as f64 / self.fps as f64);
             let image = resolved
                 .frame(t, self.resolution, RasterResidency::Cpu, &mut ctx)
                 .unwrap_or_else(|| transparent_frame(self.resolution));
@@ -580,9 +580,9 @@ fn unique_temp_wav() -> PathBuf {
 /// Pads / truncates an interleaved f32 buffer to exactly `seconds` at `rate` /
 /// `channels` so the audio matches the frame-quantized video length (see
 /// `encode_timeline`'s doc — this is what stops `-shortest` tail-clipping).
-fn fit_audio_to_seconds(samples: &mut Vec<f32>, rate: u32, channels: u16, seconds: f32) {
+fn fit_audio_to_seconds(samples: &mut Vec<f32>, rate: u32, channels: u16, seconds: f64) {
     let ch = channels.max(1) as usize;
-    let target_frames = (seconds.max(0.0) * rate as f32).round() as usize;
+    let target_frames = (seconds.max(0.0) * rate as f64).round() as usize;
     samples.resize(target_frames * ch, 0.0);
 }
 
@@ -1118,7 +1118,7 @@ mod av_mux_tests {
 
         let video = "/tmp/media_in_video.mp4";
         let audio = "/tmp/media_in_audio.wav";
-        let dur = 4.0_f32;
+        let dur = 4.0_f64;
         let fps = 30u32;
 
         let tl = Timeline::builder()
@@ -1146,7 +1146,7 @@ mod av_mux_tests {
             .trim()
             .parse()
             .unwrap_or(0);
-        let expected = (dur * fps as f32).ceil() as usize;
+        let expected = (dur * fps as f64).ceil() as usize;
         assert_eq!(
             count, expected,
             "export contains every frame (no dropped tail)"
@@ -1159,13 +1159,13 @@ mod av_mux_tests {
             .arg(&out)
             .output()
             .expect("ffprobe pts runs");
-        let mut pts: Vec<f32> = String::from_utf8_lossy(&pts_out.stdout)
+        let mut pts: Vec<f64> = String::from_utf8_lossy(&pts_out.stdout)
             .lines()
             .filter_map(|l| l.split(',').next())
             .filter_map(|s| s.trim().parse().ok())
             .collect();
         pts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let step = 1.0 / fps as f32;
+        let step = 1.0 / fps as f64;
         for w in pts.windows(2) {
             let d = w[1] - w[0];
             assert!(

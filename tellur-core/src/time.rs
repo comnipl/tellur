@@ -38,12 +38,12 @@ use crate::Keyable;
 /// express their own representation via [`Self::seconds`] and
 /// [`Self::from_seconds`].
 pub trait Time: Copy + Sized {
-    fn seconds(&self) -> f32;
-    fn from_seconds(seconds: f32) -> Self;
+    fn seconds(&self) -> f64;
+    fn from_seconds(seconds: f64) -> Self;
 
     /// Gate-only combinator: returns `Some(self)` (unchanged time, same type)
     /// when `seconds()` is within `[start, end)`, otherwise `None`.
-    fn during(&self, start: f32, end: f32) -> Option<Self> {
+    fn during(&self, start: f64, end: f64) -> Option<Self> {
         let s = self.seconds();
         if s >= start && s < end {
             Some(*self)
@@ -59,22 +59,22 @@ pub trait Time: Copy + Sized {
         if fps == 0 {
             return *self;
         }
-        let step = 1.0 / fps as f32;
+        let step = 1.0 / fps as f64;
         Self::from_seconds((self.seconds() / step).floor() * step)
     }
 
     /// Sawtooth decomposition: the phase rises linearly 0 → 1 across each
     /// `period`-second cycle (cycle 0 starts at `seconds() == 0`) and resets.
     /// The cycle index, when needed, is `(seconds() / period).floor()`.
-    fn cycle(&self, period: f32) -> Phase {
+    fn cycle(&self, period: f64) -> Phase {
         assert_valid_period(period, "Time::cycle");
-        Phase::saturating(self.seconds().rem_euclid(period) / period)
+        Phase::saturating((self.seconds().rem_euclid(period) / period) as f32)
     }
 
     /// Triangle-wave decomposition: the phase rises 0 → 1 across the first
     /// half of each `period`-second cycle and falls 1 → 0 across the second
     /// half.
-    fn bounce(&self, period: f32) -> Phase {
+    fn bounce(&self, period: f64) -> Phase {
         assert_valid_period(period, "Time::bounce");
         let p = self.cycle(period).get();
         Phase::saturating(1.0 - (2.0 * p - 1.0).abs())
@@ -86,10 +86,10 @@ pub trait Time: Copy + Sized {
     /// turnarounds (`(1 - cos(2πt/period)) / 2`). The natural driver for
     /// idle oscillation (drift, breathing, shimmer); a `±amp` swing is
     /// `t.wave(period).linear(-amp, amp)`.
-    fn wave(&self, period: f32) -> Phase {
+    fn wave(&self, period: f64) -> Phase {
         assert_valid_period(period, "Time::wave");
         let u = self.seconds() / period;
-        Phase::saturating(0.5 - 0.5 * (std::f32::consts::TAU * u).cos())
+        Phase::saturating((0.5 - 0.5 * (std::f64::consts::TAU * u).cos()) as f32)
     }
 
     /// Maps `[start, end]` to `[0.0, 1.0]` linearly, clamping outside.
@@ -99,9 +99,9 @@ pub trait Time: Copy + Sized {
     /// seconds, elapsed/remaining durations — reach for [`Self::window`]
     /// instead and project to a Phase late via
     /// [`Window::phase`](crate::window::Window::phase).
-    fn phase(&self, start: f32, end: f32) -> Phase {
+    fn phase(&self, start: f64, end: f64) -> Phase {
         assert_valid_span(start, end, "Time::phase");
-        Phase::saturating((self.seconds() - start) / (end - start))
+        Phase::saturating(((self.seconds() - start) / (end - start)) as f32)
     }
 
     /// Packages this time and a `[start, end)` interval into a [`Window`]
@@ -109,19 +109,19 @@ pub trait Time: Copy + Sized {
     /// Phase alone cannot represent: seconds-based sub-windows
     /// ([`Window::sub_secs`]), unbounded [`Window::elapsed`] /
     /// [`Window::after`] durations, and the countdown [`Window::remaining`].
-    fn window(&self, start: f32, end: f32) -> Window {
+    fn window(&self, start: f64, end: f64) -> Window {
         Window::new(start, end, self.seconds())
     }
 }
 
-fn assert_valid_span(start: f32, end: f32, caller: &str) {
+fn assert_valid_span(start: f64, end: f64, caller: &str) {
     assert!(
         start.is_finite() && end.is_finite() && end > start,
         "{caller} requires finite start/end with end > start"
     );
 }
 
-fn assert_valid_period(period: f32, caller: &str) {
+fn assert_valid_period(period: f64, caller: &str) {
     assert!(
         period.is_finite() && period > 0.0,
         "{caller} requires a finite positive period"
@@ -133,20 +133,20 @@ fn assert_valid_period(period: f32, caller: &str) {
 /// construct it directly.
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct TimelineTime {
-    seconds: f32,
+    seconds: f64,
 }
 
 impl TimelineTime {
-    pub const fn new(seconds: f32) -> Self {
+    pub const fn new(seconds: f64) -> Self {
         Self { seconds }
     }
 }
 
 impl Time for TimelineTime {
-    fn seconds(&self) -> f32 {
+    fn seconds(&self) -> f64 {
         self.seconds
     }
-    fn from_seconds(seconds: f32) -> Self {
+    fn from_seconds(seconds: f64) -> Self {
         Self { seconds }
     }
 }
@@ -156,20 +156,20 @@ impl Time for TimelineTime {
 /// produces one as its local axis.
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct LocalTime {
-    seconds: f32,
+    seconds: f64,
 }
 
 impl LocalTime {
-    pub const fn new(seconds: f32) -> Self {
+    pub const fn new(seconds: f64) -> Self {
         Self { seconds }
     }
 }
 
 impl Time for LocalTime {
-    fn seconds(&self) -> f32 {
+    fn seconds(&self) -> f64 {
         self.seconds
     }
-    fn from_seconds(seconds: f32) -> Self {
+    fn from_seconds(seconds: f64) -> Self {
         Self { seconds }
     }
 }
@@ -210,7 +210,7 @@ mod tests {
     fn fps_floors_and_preserves_type() {
         let t = TimelineTime::new(1.234);
         let q = t.fps(24);
-        let expected = (29.0_f32) / 24.0;
+        let expected = 29.0_f64 / 24.0;
         assert!((q.seconds() - expected).abs() < 1e-5);
         // Type preserved.
         let _is_timeline_time: TimelineTime = q;
@@ -228,6 +228,14 @@ mod tests {
         // during preserves LocalTime → LocalTime.
         let gated: LocalTime = t.during(0.0, 1.0).expect("in range");
         assert_eq!(gated, LocalTime::new(0.8));
+    }
+
+    #[test]
+    fn timeline_time_distinguishes_adjacent_48khz_samples_at_large_offsets() {
+        let base = 512.0;
+        let next_sample = base + 1.0 / 48_000.0;
+        assert_ne!(TimelineTime::new(base), TimelineTime::new(next_sample));
+        assert_eq!(TimelineTime::new(next_sample).seconds(), next_sample);
     }
 
     #[test]

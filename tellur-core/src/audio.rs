@@ -1,4 +1,4 @@
-//! Audio decode + eager mix-down for the timeline AUDIO channel — STEP 8.
+//! Audio decode and format conformance for the timeline AUDIO channel.
 //!
 //! Two pieces live here:
 //!
@@ -7,13 +7,11 @@
 //!    `symphonia`. It honours a SOURCE-clock trim (`.trim(a..b)`) by decoding
 //!    only that span of seconds.
 //!
-//! 2. [`AudioMix`] — the eager mix-down accumulator (B4 v1, `.sketch/01` ZONE C
-//!    / `.sketch/02 §15`). One fixed output rate + channel layout is chosen at
-//!    the encoder boundary; every leaf resamples / re-channels / gain-scales its
-//!    decoded buffer into that layout and SUMS into the mix at its resolved
-//!    sample offset. This is simpler than a per-window `samples(Clock, window)`
-//!    pull and is what the audit endorses for v1 (the encoder only ever needs
-//!    the whole mixed buffer).
+//! 2. Decode/conform helpers and the compatibility [`AudioMix`] accumulator.
+//!    Timeline rendering itself uses integer-frame
+//!    [`AudioRenderRequest`](crate::timeline_component::AudioRenderRequest)
+//!    blocks and direct component-tree recursion; overlay containers sum each
+//!    child's block while temporal/effect wrappers remap it before recursion.
 //!
 //! Resampling is naive linear interpolation; a placement-window speed change
 //! therefore PITCH-SHIFTS the source, which is acceptable for v1.
@@ -64,11 +62,11 @@ struct CachedAudioBuffer {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ConformedAudioCacheKey {
     source: AudioCacheKey,
-    trim: Option<(u32, u32)>,
+    trim: Option<(u64, u64)>,
     rate: u32,
     channels: u16,
     gain_bits: u32,
-    speed_bits: u32,
+    speed_bits: u64,
 }
 
 struct ConformedAudioCache {
@@ -243,7 +241,7 @@ fn map_err(e: SymphoniaError) -> io::Error {
 /// The returned [`AudioBuffer`] carries the native rate and channel count; the
 /// mix-down resamples / re-channels it into the encoder's fixed layout. A `None`
 /// trim decodes the whole file.
-pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuffer> {
+pub fn decode_file(path: &str, trim: Option<(f64, f64)>) -> io::Result<AudioBuffer> {
     let key = audio_cache_key(path)?;
 
     if let Some(cached) = cached_full_audio(&key) {
@@ -263,21 +261,22 @@ pub fn decode_file(path: &str, trim: Option<(f32, f32)>) -> io::Result<AudioBuff
 
 /// Decoded duration in seconds, using the same cache as [`decode_file`] without
 /// cloning a large sample buffer just to count frames.
-pub fn decoded_duration(path: &str, trim: Option<(f32, f32)>) -> io::Result<f32> {
+pub fn decoded_duration(path: &str, trim: Option<(f64, f64)>) -> io::Result<f64> {
     let key = audio_cache_key(path)?;
 
     if let Some(cached) = cached_full_audio(&key) {
-        return Ok(audio_buffer_duration(&slice_audio_buffer(&cached, trim)));
+        return Ok(audio_buffer_duration_for_trim(&cached, trim));
     }
 
     let should_cache_full = trim.is_none() || key.len <= CACHE_FULL_ON_TRIM_SOURCE_BYTES_LIMIT;
-    let decoded = if should_cache_full {
+    if should_cache_full {
         let decoded = Arc::new(decode_file_uncached(&key.path, None)?);
+        let duration = audio_buffer_duration_for_trim(&decoded, trim);
         cache_full_audio(key, Arc::clone(&decoded));
-        slice_audio_buffer(&decoded, trim)
-    } else {
-        decode_file_uncached(&key.path, trim)?
-    };
+        return Ok(duration);
+    }
+
+    let decoded = decode_file_uncached(&key.path, trim)?;
     Ok(audio_buffer_duration(&decoded))
 }
 
@@ -286,11 +285,11 @@ pub fn decoded_duration(path: &str, trim: Option<(f32, f32)>) -> io::Result<f32>
 /// instead of re-decoding and re-resampling the same media on every request.
 pub(crate) fn conform_file_cached(
     path: &str,
-    trim: Option<(f32, f32)>,
+    trim: Option<(f64, f64)>,
     rate: u32,
     channels: u16,
     gain: f32,
-    speed: f32,
+    speed: f64,
 ) -> io::Result<Arc<AudioBuffer>> {
     let source = audio_cache_key(path)?;
     let key = ConformedAudioCacheKey {
@@ -317,7 +316,7 @@ pub(crate) fn conform_file_cached(
     Ok(conformed)
 }
 
-fn decode_file_uncached(path: &Path, trim: Option<(f32, f32)>) -> io::Result<AudioBuffer> {
+fn decode_file_uncached(path: &Path, trim: Option<(f64, f64)>) -> io::Result<AudioBuffer> {
     let file = std::fs::File::open(path)?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -360,7 +359,7 @@ fn decode_file_uncached(path: &Path, trim: Option<(f32, f32)>) -> io::Result<Aud
 
     let (start_secs, end_secs) = trim
         .map(|(start, end)| (start.max(0.0), end.max(0.0)))
-        .unwrap_or((0.0, f32::INFINITY));
+        .unwrap_or((0.0, f64::INFINITY));
     if end_secs <= start_secs {
         return Ok(AudioBuffer {
             samples: Vec::new(),
@@ -466,7 +465,7 @@ fn decode_file_uncached(path: &Path, trim: Option<(f32, f32)>) -> io::Result<Aud
     })
 }
 
-pub(crate) fn slice_audio_buffer(buffer: &AudioBuffer, trim: Option<(f32, f32)>) -> AudioBuffer {
+pub(crate) fn slice_audio_buffer(buffer: &AudioBuffer, trim: Option<(f64, f64)>) -> AudioBuffer {
     let Some((start, end)) = trim else {
         return buffer.clone();
     };
@@ -494,14 +493,32 @@ pub(crate) fn slice_audio_buffer(buffer: &AudioBuffer, trim: Option<(f32, f32)>)
     }
 }
 
-fn audio_buffer_duration(buffer: &AudioBuffer) -> f32 {
+fn audio_buffer_duration(buffer: &AudioBuffer) -> f64 {
     let channels = buffer.channels.max(1) as usize;
     let frames = buffer.samples.len() / channels;
-    frames as f32 / buffer.rate.max(1) as f32
+    frames as f64 / buffer.rate.max(1) as f64
 }
 
-fn seconds_to_frame(seconds: f32, rate: u32) -> u64 {
-    (seconds.max(0.0) * rate as f32).round().max(0.0) as u64
+/// Duration of a source-clock slice without cloning the slice's PCM.
+fn audio_buffer_duration_for_trim(buffer: &AudioBuffer, trim: Option<(f64, f64)>) -> f64 {
+    let channels = buffer.channels.max(1) as usize;
+    let total_frames = buffer.samples.len() / channels;
+    let Some((start, end)) = trim else {
+        return total_frames as f64 / buffer.rate.max(1) as f64;
+    };
+
+    let start = start.max(0.0);
+    let end = end.max(0.0);
+    if end <= start {
+        return 0.0;
+    }
+    let start_frame = seconds_to_frame(start, buffer.rate).min(total_frames as u64);
+    let end_frame = seconds_to_frame(end, buffer.rate).min(total_frames as u64);
+    end_frame.saturating_sub(start_frame) as f64 / buffer.rate.max(1) as f64
+}
+
+fn seconds_to_frame(seconds: f64, rate: u32) -> u64 {
+    (seconds.max(0.0) * rate as f64).round().max(0.0) as u64
 }
 
 fn time_to_frame(time: SymphoniaTime, rate: u32) -> u64 {
@@ -578,14 +595,14 @@ fn rechannel(samples: &[f32], from: u16, to: u16) -> Vec<f32> {
 /// Time-scales an interleaved buffer by `speed` (a placement-window stretch):
 /// `speed > 1` plays faster (fewer output frames, higher pitch). Implemented as
 /// a resample by `1 / speed`; a no-op at unity speed.
-fn time_scale(buf: AudioBuffer, speed: f32) -> AudioBuffer {
-    if (speed - 1.0).abs() < f32::EPSILON || speed <= 0.0 || buf.samples.is_empty() {
+fn time_scale(buf: AudioBuffer, speed: f64) -> AudioBuffer {
+    if (speed - 1.0).abs() < f64::EPSILON || speed <= 0.0 || buf.samples.is_empty() {
         return buf;
     }
     // Playing at `speed` over the same source means the output covers
     // `len / speed` seconds, i.e. resample to `rate / speed` then relabel back
     // to `rate` so the timeline reads it at the target rate.
-    let scaled_rate = ((buf.rate as f32) / speed).round().max(1.0) as u32;
+    let scaled_rate = ((buf.rate as f64) / speed).round().max(1.0) as u32;
     let samples = resample(&buf.samples, buf.channels, buf.rate, scaled_rate);
     AudioBuffer {
         samples,
@@ -596,7 +613,7 @@ fn time_scale(buf: AudioBuffer, speed: f32) -> AudioBuffer {
 
 /// Conforms `buf` to the target `rate` / `channels` and applies `gain` and the
 /// placement `speed`, returning an interleaved buffer ready to sum into a mix.
-pub fn conform(buf: AudioBuffer, rate: u32, channels: u16, gain: f32, speed: f32) -> Vec<f32> {
+pub fn conform(buf: AudioBuffer, rate: u32, channels: u16, gain: f32, speed: f64) -> Vec<f32> {
     // 1. Speed (pitch-shifting time scale) on the native buffer.
     let buf = time_scale(buf, speed);
     // 2. Resample to the target rate, then re-channel to the target layout.
@@ -613,9 +630,10 @@ pub fn conform(buf: AudioBuffer, rate: u32, channels: u16, gain: f32, speed: f32
 
 // ── The mix-down accumulator ─────────────────────────────────────────────────
 
-/// The eager mix-down target: one interleaved f32 buffer at a fixed `rate` /
-/// `channels`, sized to the resolved timeline length. Leaves [`add`](Self::add)
-/// their conformed buffers at a resolved sample offset; sums keep f32 headroom.
+/// A low-level interleaved f32 accumulator retained for callers that already
+/// have conformed buffers. Timeline components no longer render through it;
+/// [`ResolvedTimeline::render_audio`](crate::timeline_component::ResolvedTimeline::render_audio)
+/// recursively evaluates caller-sized blocks instead.
 #[derive(Debug, Clone)]
 pub struct AudioMix {
     samples: Vec<f32>,
@@ -625,8 +643,8 @@ pub struct AudioMix {
 
 impl AudioMix {
     /// A silent mix of `duration` seconds at `rate` / `channels`.
-    pub fn new(duration: f32, rate: u32, channels: u16) -> Self {
-        let frames = (duration.max(0.0) * rate as f32).ceil() as usize;
+    pub fn new(duration: f64, rate: u32, channels: u16) -> Self {
+        let frames = (duration.max(0.0) * rate as f64).ceil() as usize;
         Self {
             samples: vec![0.0f32; frames * channels.max(1) as usize],
             rate,
@@ -645,10 +663,10 @@ impl AudioMix {
     }
 
     /// The mix duration in seconds.
-    pub fn duration(&self) -> f32 {
+    pub fn duration(&self) -> f64 {
         let ch = self.channels.max(1) as usize;
         let frames = self.samples.len() / ch;
-        frames as f32 / self.rate.max(1) as f32
+        frames as f64 / self.rate.max(1) as f64
     }
 
     /// Sums an already-conformed (rate/channels/gain/speed-matched) interleaved
@@ -656,9 +674,9 @@ impl AudioMix {
     /// `[-1, 1]`; limiting/clipping belongs at the ffmpeg output stage. Frames
     /// before the mix start and past the mix end are dropped (the resolved
     /// length is authoritative).
-    pub fn add(&mut self, conformed: &[f32], start_secs: f32) {
+    pub fn add(&mut self, conformed: &[f32], start_secs: f64) {
         let ch = self.channels.max(1) as usize;
-        let start_frame = (start_secs * self.rate as f32).round() as isize;
+        let start_frame = (start_secs * self.rate as f64).round() as isize;
         let (base, source_offset) = if start_frame >= 0 {
             (start_frame as usize * ch, 0)
         } else {
@@ -784,6 +802,29 @@ mod tests {
         // Same rate, mono→mono, gain 0.5 halves the samples.
         let out = conform(buf, 48_000, 1, 0.5, 1.0);
         assert_eq!(out, vec![0.25, 0.25]);
+    }
+
+    #[test]
+    fn cached_buffer_duration_counts_trimmed_frames_without_slicing() {
+        let buffer = AudioBuffer {
+            samples: vec![0.0; 8],
+            rate: 4,
+            channels: 2,
+        };
+
+        assert_eq!(audio_buffer_duration_for_trim(&buffer, None), 1.0);
+        assert_eq!(
+            audio_buffer_duration_for_trim(&buffer, Some((0.25, 0.75))),
+            0.5
+        );
+        assert_eq!(
+            audio_buffer_duration_for_trim(&buffer, Some((-1.0, 2.0))),
+            1.0
+        );
+        assert_eq!(
+            audio_buffer_duration_for_trim(&buffer, Some((0.75, 0.25))),
+            0.0
+        );
     }
 
     #[test]

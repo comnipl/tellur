@@ -56,7 +56,12 @@ pub use tellur_core as __core;
 /// `TimelineComponent::frame` and `TimelineCollection::build` gained residency
 /// arguments. Stale `v4` plugins must fail before calling through any changed
 /// trait object.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v5\0";
+///
+/// Bumped to `v6` for double-precision timeline seconds: `TimelineTime` and
+/// the timeline component/collection duration, placement, arrangement, and
+/// audio-window methods now carry `f64`. Stale `v5` plugins therefore have
+/// incompatible value layouts and vtable signatures and must fail at lookup.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v6\0";
 
 pub mod abi;
 pub use abi::{
@@ -84,7 +89,7 @@ pub type EntryFn = unsafe extern "Rust" fn() -> Box<dyn TimelineCollection>;
 pub struct TimelineInfo {
     pub id: String,
     pub title: String,
-    pub duration: f32,
+    pub duration: f64,
     /// A resolve-time error for this timeline, if its tree failed to resolve
     /// (e.g. a media probe failure or a timeless root). Mirrors the
     /// `last_error` display the server already surfaces for plugin load
@@ -115,7 +120,7 @@ pub trait TimelineCollection: Send {
         None
     }
 
-    /// The eager audio mix-down for `id` at `rate` / `channels`, for the live
+    /// The block-rendered audio mix-down for `id` at `rate` / `channels`, for the live
     /// preview to mux into its video stream. `None` means the collection
     /// contributes no audio (the preview then muxes a silent track for a
     /// consistent A/V stream structure). Defaulted so collections migrate in
@@ -124,7 +129,7 @@ pub trait TimelineCollection: Send {
         None
     }
 
-    /// Eager audio mix-down for `[start, start + duration)`, used by the live
+    /// Block-rendered audio mix-down for `[start, start + duration)`, used by the live
     /// preview when it encodes an individual cache segment. Custom collections
     /// must implement this explicitly to preview audio; falling back to the
     /// whole-track [`render_audio`](Self::render_audio) would reintroduce the
@@ -132,8 +137,8 @@ pub trait TimelineCollection: Send {
     fn render_audio_window(
         &self,
         _id: &str,
-        _start: f32,
-        _duration: f32,
+        _start: f64,
+        _duration: f64,
         _rate: u32,
         _channels: u16,
     ) -> Option<AudioBuffer> {
@@ -242,8 +247,8 @@ impl TimelineCollection for SingleTimeline {
     fn render_audio_window(
         &self,
         id: &str,
-        start: f32,
-        duration: f32,
+        start: f64,
+        duration: f64,
         rate: u32,
         channels: u16,
     ) -> Option<AudioBuffer> {
@@ -299,7 +304,7 @@ impl<T: Timeline + Send> Hash for LegacyTimeline<T> {
 }
 
 impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         Some(self.timeline.duration())
     }
 
@@ -317,7 +322,7 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
         Some(self.timeline.build(clock.global(), target, residency, ctx))
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // One Video-kind node spanning the whole timeline; no source crop,
         // no triggers, no children — the legacy timeline is opaque.
         Arrangement {
@@ -345,7 +350,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v5(
+        pub extern "Rust" fn tellur_timeline_collection_v6(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
@@ -353,7 +358,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v5(
+        pub extern "Rust" fn tellur_timeline_collection_v6(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -378,7 +383,7 @@ macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v5(
+        pub extern "Rust" fn tellur_timeline_collection_v6(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -395,7 +400,7 @@ macro_rules! export_timeline_collection {
     ($builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v5(
+        pub extern "Rust" fn tellur_timeline_collection_v6(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
@@ -450,7 +455,7 @@ mod tests {
     struct ResidencyTimeline;
 
     impl TimelineComponent for ResidencyTimeline {
-        fn duration(&self) -> Option<f32> {
+        fn duration(&self) -> Option<f64> {
             Some(1.0)
         }
 
@@ -475,7 +480,7 @@ mod tests {
             ))
         }
 
-        fn arrangement(&self, offset: f32) -> Arrangement {
+        fn arrangement(&self, offset: f64) -> Arrangement {
             Arrangement {
                 kind: NodeKind::Video,
                 label: String::new(),
@@ -488,6 +493,11 @@ mod tests {
                 children: Vec::new(),
             }
         }
+    }
+
+    #[test]
+    fn entry_symbol_marks_the_f64_timeline_abi() {
+        assert_eq!(ENTRY_SYMBOL, b"tellur_timeline_collection_v6\0");
     }
 
     #[test]

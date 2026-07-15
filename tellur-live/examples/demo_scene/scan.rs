@@ -119,7 +119,7 @@ pub fn Scan(time: LocalTime, palette: Palette) -> impl VectorComponent {
         .children((0..12).map(move |i| {
             let angle_label = ANGLE_LABELS[i];
             let a = i as f32 / 12.0 * TAU - PI * 0.5;
-            let stagger = i as f32 * 0.025;
+            let stagger = i as f64 * 0.025;
             let tk = time
                 .phase(3.85 + stagger, 4.3 + stagger)
                 .ease_out_cubic(0.0, 1.0);
@@ -148,7 +148,7 @@ pub fn Scan(time: LocalTime, palette: Palette) -> impl VectorComponent {
             let numeral = (tk > 0.0 && major && i != 3 && i != 9)
                 .then(|| {
                     let label_in = time
-                        .phase(4.1 + i as f32 * 0.012, 4.5 + i as f32 * 0.012)
+                        .phase(4.1 + i as f64 * 0.012, 4.5 + i as f64 * 0.012)
                         .ease_out_cubic(0.0, 1.0);
                     let label_alpha =
                         life * label_in * time.phase(5.0, 5.35).ease_in_out_expo(1.0, 0.0);
@@ -178,7 +178,7 @@ pub fn Scan(time: LocalTime, palette: Palette) -> impl VectorComponent {
                 * time.phase(4.9, 5.2).ease_in_out_expo(1.0, 0.0);
             (0..8).map(move |i| {
                 let a = i as f32 / 8.0 * TAU - PI * 0.5;
-                let stagger = i as f32 * 0.04;
+                let stagger = i as f64 * 0.04;
                 let sp = time
                     .phase(4.05 + stagger, 4.55 + stagger)
                     .ease_out_cubic(0.0, 1.0);
@@ -240,7 +240,8 @@ pub fn Scan(time: LocalTime, palette: Palette) -> impl VectorComponent {
                 // Slower rotation (~2.4s per full revolution) with a wider,
                 // longer trail so the sweep reads as deliberate observation
                 // rather than a quick flyby.
-                let base_angle = radar.elapsed() * (TAU / 2.4) - PI * 0.5;
+                let base_angle =
+                    (radar.elapsed() * (f64::from(TAU) / 2.4) - f64::from(PI) * 0.5) as f32;
                 let trail_count = 32_i32;
                 let trail_span = PI * 0.75;
                 (0..trail_count)
@@ -305,7 +306,7 @@ pub fn Scan(time: LocalTime, palette: Palette) -> impl VectorComponent {
             let sweep_in = time.phase(3.9, 4.2).ease_in_out_expo(0.0, 1.0);
             let sweep_active = sweep_in > 0.05;
             (theta_in > 0.0 && sweep_active).then(|| {
-                let base_angle = radar.elapsed() * (TAU / 2.4);
+                let base_angle = (radar.elapsed() * (f64::from(TAU) / 2.4)) as f32;
                 // Convert to degrees and wrap to [0, 360).
                 let deg = (base_angle.to_degrees().rem_euclid(360.0)) as i32;
                 Fragment::builder()

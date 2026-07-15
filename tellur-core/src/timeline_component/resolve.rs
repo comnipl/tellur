@@ -16,7 +16,7 @@ use super::*;
 /// place pass. Earliest-wins on insert; an absent id reads as `+∞`.
 #[derive(Debug, Clone, Default)]
 pub struct TriggerTable {
-    map: HashMap<u64, f32>,
+    map: HashMap<u64, f64>,
 }
 
 impl TriggerTable {
@@ -26,12 +26,12 @@ impl TriggerTable {
     }
 
     /// Records `time` for `event`, keeping the EARLIEST write (`.sketch/02 §6`).
-    pub fn record(&mut self, event: Event, time: f32) {
+    pub fn record(&mut self, event: Event, time: f64) {
         self.record_id(event.id(), time);
     }
 
     /// `record` by raw id (the resolve pass works in ids).
-    pub fn record_id(&mut self, id: u64, time: f32) {
+    pub fn record_id(&mut self, id: u64, time: f64) {
         self.map
             .entry(id)
             .and_modify(|t| {
@@ -44,12 +44,24 @@ impl TriggerTable {
 
     /// Resolved trigger time for `id`, or `+∞` if absent.
     pub fn get(&self, id: u64) -> TimelineTime {
-        TimelineTime::new(self.map.get(&id).copied().unwrap_or(f32::INFINITY))
+        TimelineTime::new(self.map.get(&id).copied().unwrap_or(f64::INFINITY))
     }
 
     /// Whether `id` has a recorded trigger time.
     pub fn contains(&self, id: u64) -> bool {
         self.map.contains_key(&id)
+    }
+
+    fn merge_in_range(&mut self, other: Self, range: std::ops::Range<f64>) {
+        for (id, time) in other.map {
+            // Audio/video samples use half-open intervals, but an Event is a
+            // boundary marker: `trigger_at_end` lives exactly at a component's
+            // resolved end. Preserve both trim boundaries so even a no-op
+            // `.trim(..)` cannot silently erase an end trigger.
+            if time >= range.start && time <= range.end {
+                self.record_id(id, time);
+            }
+        }
     }
 }
 
@@ -61,7 +73,7 @@ pub struct ResolveCtx {
     triggers: TriggerTable,
     /// Absolute start of the node currently being resolved. Top-down bookkeeping
     /// the container walk maintains; surfaced for leaves that need it.
-    abs_start: f32,
+    abs_start: f64,
     /// Non-fatal diagnostics collected during the walk (`.sketch/02 §9`). A
     /// container (step 4) emits here when, e.g., all of a non-fill container's
     /// children are `.fill()` — a determinate `0.0` that is almost always an
@@ -81,7 +93,7 @@ pub struct ResolveCtx {
     /// (`.sketch/01 §A.3`). `pub(super)` so the sibling [`Placed`] /
     /// [`Triggered`] impls can save/restore it around their recursion;
     /// other modules read it through [`Self::local_scale`].
-    pub(super) local_scale: f32,
+    pub(super) local_scale: f64,
 }
 
 impl Default for ResolveCtx {
@@ -113,19 +125,19 @@ impl ResolveCtx {
     }
 
     /// Absolute start of the node currently being resolved.
-    pub fn abs_start(&self) -> f32 {
+    pub fn abs_start(&self) -> f64 {
         self.abs_start
     }
 
     /// Cumulative window-stretch scale (absolute seconds per current-level local
     /// second). Containers in other modules multiply their local cursor offsets
     /// by this so children land at the right absolute start under a stretch.
-    pub fn local_scale(&self) -> f32 {
+    pub fn local_scale(&self) -> f64 {
         self.local_scale
     }
 
     /// Sets the absolute start for the node currently being resolved.
-    pub fn set_abs_start(&mut self, abs_start: f32) {
+    pub fn set_abs_start(&mut self, abs_start: f64) {
         self.abs_start = abs_start;
     }
 
@@ -150,6 +162,23 @@ impl ResolveCtx {
     /// The fatal diagnostics collected so far.
     pub fn errors(&self) -> &[String] {
         &self.errors
+    }
+
+    /// Resolves a trimmed child while retaining only triggers that survive the
+    /// wrapper's half-open output interval. Warnings/errors and local-scale
+    /// bookkeeping still flow through this context normally; only trigger
+    /// writes are captured locally and filtered before merging.
+    pub(crate) fn resolve_trimmed(
+        &mut self,
+        child: &dyn TimelineComponent,
+        child_abs_start: f64,
+        output_range: std::ops::Range<f64>,
+    ) -> f64 {
+        let parent_triggers = std::mem::take(&mut self.triggers);
+        let child_len = child.resolve(child_abs_start, self);
+        let child_triggers = std::mem::replace(&mut self.triggers, parent_triggers);
+        self.triggers.merge_in_range(child_triggers, output_range);
+        child_len
     }
 
     /// Consumes the context, yielding the finished trigger table.
@@ -204,7 +233,7 @@ pub struct ResolvedTimeline {
     triggers: TriggerTable,
     /// The root's resolved length in seconds. Never `None`: a timeless root is
     /// a [`ResolveError::Timeless`] instead (audit M4), not a coerced `0.0`.
-    duration: f32,
+    duration: f64,
     /// Non-fatal diagnostics surfaced from the walk (`.sketch/02 §9`), e.g. an
     /// all-fill container's determinate `0.0`.
     warnings: Vec<String>,
@@ -235,7 +264,7 @@ impl ResolvedTimeline {
     }
 
     /// The root's resolved length in seconds.
-    pub fn duration(&self) -> f32 {
+    pub fn duration(&self) -> f64 {
         self.duration
     }
 
@@ -271,52 +300,92 @@ impl ResolvedTimeline {
             .frame(clock, self.canvas, target, residency, ctx)
     }
 
-    /// Samples the audio channel for `[t, t + window)`.
+    /// Renders the complete audio track as interleaved f32 PCM.
     ///
-    /// The eager mix-down ([`render_audio`](Self::render_audio)) is the path the
-    /// encoder uses; this per-window pull is the (unused) `samples(Clock,
-    /// window)` seam, which forwards to the source's still-`None` `samples`.
-    pub fn samples(&self, t: TimelineTime, window: f32) -> Option<AudioBuffer> {
-        let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers());
-        self.source().samples(clock, window)
-    }
-
-    /// EAGER MIX-DOWN of the whole audio track (step 8, B4 v1 — `.sketch/01`
-    /// ZONE C / `.sketch/02 §15`).
-    ///
-    /// Allocates one interleaved f32 buffer of the resolved
-    /// [`duration`](Self::duration) at the encoder's fixed `rate` / `channels`,
-    /// then walks the source tree via [`mix_into`](TimelineComponent::mix_into):
-    /// each [`AudioFile`](crate::timeline_container::AudioFile) decodes (honoring
-    /// its `.trim`), resamples / re-channels / gain-scales into the fixed layout
-    /// at the placement speed, and SUMS into the mix at its resolved start while
-    /// preserving f32 headroom. The encoder feeds the result to ffmpeg as a temp
-    /// WAV second input.
+    /// The root advances in integer output frames and recursively asks the
+    /// component tree for bounded blocks. Components may remap or expand a
+    /// child request, but there is no separately compiled audio graph.
     pub fn render_audio(&self, rate: u32, channels: u16) -> AudioBuffer {
-        let mut mix = crate::audio::AudioMix::new(self.duration, rate, channels);
-        self.source().mix_into(&mut mix, 0.0, 1.0);
-        mix.into_buffer()
+        let frame_count = frames_for_duration(self.duration, rate);
+        self.render_audio_frames(0, frame_count, rate, channels)
     }
 
-    /// Eager mix-down for a timeline window.
+    /// Block-rendered mix-down for a timeline window.
     ///
-    /// This uses the same tree walk as [`render_audio`](Self::render_audio), but
-    /// the mix target is only `duration` seconds long and the global timeline is
-    /// shifted left by `start`, so live-preview cache segments do not allocate or
-    /// write a full-timeline WAV for every requested segment.
+    /// `start` is snapped once to the nearest output frame; recursive components
+    /// then retain that integer root-frame identity. This uses the same tree walk
+    /// as [`render_audio`](Self::render_audio), but the target is only `duration`
+    /// seconds long, so live-preview segments do not allocate a full-timeline WAV.
     pub fn render_audio_window(
         &self,
-        start: f32,
-        duration: f32,
+        start: f64,
+        duration: f64,
         rate: u32,
         channels: u16,
     ) -> AudioBuffer {
-        let start = start.max(0.0);
-        let duration = duration.max(0.0);
-        let mut mix = crate::audio::AudioMix::new(duration, rate, channels);
-        self.source().mix_into(&mut mix, -start, 1.0);
-        mix.into_buffer()
+        let start_frame = seconds_to_frame(start.max(0.0), rate);
+        let frame_count = frames_for_duration(duration, rate);
+        self.render_audio_frames(start_frame, frame_count, rate, channels)
     }
+
+    fn render_audio_frames(
+        &self,
+        start_frame: i64,
+        frame_count: usize,
+        rate: u32,
+        channels: u16,
+    ) -> AudioBuffer {
+        const BLOCK_FRAMES: usize = 4_096;
+
+        let rate = rate.max(1);
+        let channels = channels.max(1);
+        let mut samples = vec![0.0; frame_count.saturating_mul(channels as usize)];
+        let mut ctx = AudioRenderContext::default();
+        let root_request = AudioRenderRequest::new(start_frame, frame_count, rate, channels);
+        let mut rendered = 0usize;
+        while rendered < frame_count {
+            let block_frames = (frame_count - rendered).min(BLOCK_FRAMES);
+            let request = root_request.subrange(rendered, block_frames);
+            let sample_start = rendered * channels as usize;
+            let sample_end = sample_start + request.sample_len();
+            self.source().render_audio_block(
+                AudioBlockMut::new(request, &mut samples[sample_start..sample_end]),
+                &mut ctx,
+            );
+            rendered += block_frames;
+        }
+
+        // The resolved root interval is authoritative even for a custom or
+        // timeless child that does not gate itself.
+        for frame in 0..frame_count {
+            let absolute_frame = start_frame.saturating_add(frame as i64);
+            let t = absolute_frame as f64 / rate as f64;
+            if t < 0.0 || t >= self.duration {
+                let base = frame * channels as usize;
+                samples[base..base + channels as usize].fill(0.0);
+            }
+        }
+
+        AudioBuffer {
+            samples,
+            rate,
+            channels,
+        }
+    }
+}
+
+fn seconds_to_frame(seconds: f64, rate: u32) -> i64 {
+    if !seconds.is_finite() {
+        return 0;
+    }
+    (seconds * rate.max(1) as f64).round() as i64
+}
+
+fn frames_for_duration(duration: f64, rate: u32) -> usize {
+    if !duration.is_finite() || duration <= 0.0 {
+        return 0;
+    }
+    (duration * rate.max(1) as f64).ceil() as usize
 }
 
 impl std::fmt::Debug for ResolvedTimeline {

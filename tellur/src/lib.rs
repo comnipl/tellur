@@ -29,11 +29,34 @@ pub use tellur_plugin::{
 /// Common authoring imports: the component macros plus the most-used value types.
 ///
 /// `use tellur::prelude::*;` brings the `#[component]` / `#[derive(Keyable)]`
-/// macros and the everyday geometry/color types into scope.
+/// macros, everyday geometry/color types, and ordered timeline-effect verbs
+/// into scope.
 pub mod prelude {
     pub use tellur_core::color::Color;
     pub use tellur_core::geometry::{Anchor, Vec2};
+    pub use tellur_core::timeline_component::{
+        AudioEffects, AudioEffectsBuilder, EnvelopePoint, GainEnvelope, Timed, TimedBuilder, Trim,
+        TrimBounds,
+    };
     pub use tellur_core::{component, raster_component, vector_component, Keyable};
 
     pub use crate::{export_legacy_timeline, export_timeline, export_timeline_collection};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prelude::*;
+    use tellur_core::timeline_container::AudioFile;
+
+    #[test]
+    fn prelude_exposes_ordered_timeline_effect_verbs() {
+        let _: Trim<GainEnvelope<AudioFile>> = AudioFile::builder()
+            .path("missing.wav")
+            .fade_in(1.0)
+            .trim(0.5..);
+        let _: GainEnvelope<Trim<AudioFile>> = AudioFile::builder()
+            .path("missing.wav")
+            .trim(0.5..)
+            .fade_in(1.0);
+    }
 }

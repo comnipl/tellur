@@ -38,7 +38,7 @@ struct ResolvedAdapter {
 }
 
 impl Timeline for ResolvedAdapter {
-    fn duration(&self) -> f32 {
+    fn duration(&self) -> f64 {
         self.resolved.duration()
     }
 

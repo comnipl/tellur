@@ -148,7 +148,7 @@ Checks to run before reaching for a `const`:
    structurally with `Anchor`-relative placement or `Frame`/`Flex`/`Padding`.
    Locking a derivation formula inside a const hides it; it doesn't solve it
 2. **Is it a timetable?** A cascade of absolute times like
-   `const SCENE2_START: f32 = 12.3;` should become `Sequence` ordering,
+   `const SCENE2_START: f64 = 12.3;` should become `Sequence` ordering,
    `TimeBox` beats, and `Event` triggers, so that times are *derived from
    placement*. The correct structure survives a script reshuffle
 3. **Is the number used in two or more places?** A one-off staging literal
@@ -240,8 +240,17 @@ What makes this structure work:
 
 The temporal placement vocabulary is just four forms: `.at(secs)` (absolute),
 `.at(a..b)` (a window — a stretch for timed clips), `.fill()` (match the
-container's resolved length), `.trim(a..b)` (crop source seconds). "Beats" and
-"reserved duration" are `TimeBox`.
+container's resolved length), `.trim(a..b)` (wrap and rebase any component).
+Negative trim endpoints count backwards from the immediate child end; open end
+means the exact end. "Beats" and "reserved duration" are `TimeBox`.
+
+Audio gain effects are ordered wrappers too: `.gain_envelope((time, gain),
+(time, gain))`, `.fade_in(seconds)`, and `.fade_out(seconds)`. Builder calls
+wrap immediately, so `x.fade_in(1.0).trim(0.5..)` begins at the inner fade's
+0.5-second point, while `x.trim(0.5..).fade_in(1.0)` starts a new fade at local
+zero. Prefer source settings → effects → placement. `.fill()` is a structural
+marker and must stay the final, outermost verb: write
+`source.fade_out(0.25).fill()`, never `source.fill().fade_out(0.25)`.
 
 ## 8. Footgun list (from the tutorials — memorize)
 
@@ -267,6 +276,10 @@ container's resolved length), `.trim(a..b)` (crop source seconds). "Beats" and
 12. When using `#[component]` through a re-export (`some_crate::tellur`), the
     video crate must also declare a direct `tellur` dependency of the same
     version, for the macro's path resolution
+13. Temporal builder calls are ordered wrappers; swapping `.trim()` and an
+    audio effect intentionally changes which local clock the effect sees
+14. `.fill()` must remain the outermost temporal verb so its parent `Timeline`
+    can recognize and exclude it while resolving the container length
 
 ## 9. Reference implementations
 

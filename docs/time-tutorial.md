@@ -45,6 +45,8 @@ Broken into its three stages:
 2. **`Phase`** — a progress scalar validated into `[0.0, 1.0]`. `t.phase(start, end)` maps the interval linearly onto the unit interval and **saturates** outside it (pins to 0 or 1)
 3. **`PhaseEasing`** — `phase.ease_*(from, to)` applies a curve and carries you all the way to the target quantity (alpha, radius, position…). `linear` / `ease_smoothstep` / `ease_out_cubic` / `ease_out_quint` / `ease_in_out_quint` / `ease_in_out_expo` stay within `[from, to]`; `ease_in_back` / `ease_out_elastic` intentionally overshoot (the overshoot *is* the effect). When the named curves aren't enough, `ease_bezier(x1, y1, x2, y2, from, to)` lets you build your own curve from the same four control points as CSS `cubic-bezier` (put `y1`/`y2` outside the unit interval to overshoot deliberately)
 
+Timeline seconds are `f64` throughout the component, renderer, and live-preview boundaries. `Phase` and visual value-space quantities remain `f32`: the timeline keeps sample/frame positions precise, then narrows only when it has become a bounded progress or drawing value.
+
 A reverse animation just swaps `(from, to)`:
 
 ```rust
@@ -100,7 +102,7 @@ let reveal = time.window(0.05, 1.332);
 
 // The i-th horizon line slides in over [i*8ms, 0.4s + i*8ms] of the reveal.
 let line_in = reveal
-    .sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008))
+    .sub_secs((i as f64 * 0.008)..(0.4 + i as f64 * 0.008))
     .ease_in_out_expo(0.0, 1.0);
 ```
 
@@ -201,14 +203,54 @@ let alpha = match clock.window() {
 };
 ```
 
-The placement vocabulary is only three forms (plus `trim` for source cropping).
+The placement vocabulary is only three forms; `trim` is a separate temporal wrapper.
 
 ```rust
 clip.at(2.0)        // place at 2.0s, play at native length
 clip.at(0.0..3.0)   // an explicit window — for a timed clip this is a STRETCH
 clip.fill()         // stretch to the container's resolved length (Timeline only)
-media.trim(1.0..4.0)  // crop SOURCE seconds (the way to truncate)
+media.trim(1.0..4.0)  // keep child-local [1s, 4s), rebased to local 0
+media.trim(-3.0..-0.5) // endpoints < 0 count backwards from the child end
+media.trim(1.0..)       // an open end means the exact child end
 ```
+
+`trim` is a generic component wrapper, not media-leaf metadata. It affects video, audio, cues, triggers, and arrangement together. The standard range forms are half-open; inclusive ranges are intentionally unsupported.
+
+### Ordered audio effects
+
+Audio gain automation uses the same wrapper model. A numeric negative envelope point is relative to the immediate child's end; use `EnvelopePoint::End` for the exact end.
+
+```rust
+use tellur::core::timeline_container::AudioFile;
+use tellur::prelude::*;
+
+let voice = AudioFile::builder()
+    .path("voice.wav")
+    .gain_envelope((0.0, 0.0), (0.35, 1.0))
+    .fade_out(0.25)
+    .at(2.0);
+
+let tail = AudioFile::builder()
+    .path("tail.wav")
+    .gain_envelope((-0.5, 1.0), (EnvelopePoint::End, 0.0));
+```
+
+Builder calls wrap immediately, so the last call is outermost and order is semantic:
+
+```rust
+source.fade_in(1.0).trim(0.5..)
+// Trim<GainEnvelope<Source>>: output starts at the existing fade's 0.5s point.
+
+source.trim(0.5..).fade_in(1.0)
+// GainEnvelope<Trim<Source>>: a new fade starts at trimmed-local 0s.
+```
+
+The canonical order is source settings, then temporal/audio effects, then
+placement. Wrapping an `.at(..)` result is allowed when intentional, but its
+leading placement interval becomes part of the outer effect's clock. `.fill()`
+is the structural marker a `Timeline` uses to exclude a child from its own
+length calculation, so it must remain the final, outermost verb:
+`source.fade_out(0.25).fill()`, not `source.fill().fade_out(0.25)`.
 
 Where you want "just a length" — a beat inside a `Sequence`, a platform to hang triggers on, pinning down a `Timeline`'s duration — place a `TimeBox`. It draws nothing and sounds nothing; it is a leaf that merely has the `duration` you give it (the temporal counterpart of `SizedBox`).
 
@@ -277,6 +319,8 @@ What you get back is a **clamped snapshot** (§4): before the window opens — a
 | Reacting to another clip's resolved start | `Event` + `.trigger_*` + `event.phase(&clock, a, b)` |
 | Firing-based window for stagger / elapsed seconds | `event.window(&clock, a..b)` |
 | Fixed-length beat / trigger platform / reserving duration | `TimeBox` |
+| Crop any component, including from its end | `.trim(a..b)` / `.trim(-a..-b)` |
+| Fade or automate an audio contribution | `.fade_in(d)` / `.fade_out(d)` / `.gain_envelope(..)` |
 
 ## 9. Worked example — where the two worlds meet
 

@@ -29,8 +29,8 @@ impl AudioBuffer {
 /// One subtitle interval, absolute on the timeline (after [`cues`](super::TimelineComponent::cues)).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     pub text: String,
 }
 
@@ -40,7 +40,7 @@ pub struct Cue {
 /// self-contained, serializable snapshot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TriggerMark {
-    pub time: f32,
+    pub time: f64,
     pub name: Option<String>,
 }
 
@@ -57,10 +57,12 @@ pub struct SourceLoc {
 /// What the live UI draws — the resolved arrangement of a node and its
 /// children. Built by walking the RESOLVED tree (`.sketch/01` A.7 / B.4).
 ///
-/// `trim` carries the source crop separately so the UI can show both the placed
-/// bar and the source crop; `triggers` surfaces where [`Event`](super::Event)s fire (each a
-/// [`TriggerMark`] carrying the time and the event's optional name); `source` is
-/// the `.child(...)` call site that placed the node (see [`SourceLoc`]).
+/// `trim` carries the range selected by the outermost generic trim wrapper on
+/// this node's immediate input clock. It is operation metadata, not necessarily
+/// a media-file source range: ordered wrappers allow trimming a placement or a
+/// container too. `triggers` surfaces where [`Event`](super::Event)s fire (each
+/// a [`TriggerMark`] carrying the time and the event's optional name); `source`
+/// is the `.child(...)` call site that placed the node (see [`SourceLoc`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arrangement {
     pub kind: NodeKind,
@@ -75,9 +77,9 @@ pub struct Arrangement {
     /// generated container setter via `#[track_caller]`; `None` for the root and
     /// for nodes built outside a tracked setter.
     pub source: Option<SourceLoc>,
-    pub start: f32,
-    pub end: f32,
-    pub trim: Option<(f32, f32)>,
+    pub start: f64,
+    pub end: f64,
+    pub trim: Option<(f64, f64)>,
     pub triggers: Vec<TriggerMark>,
     pub children: Vec<Arrangement>,
 }

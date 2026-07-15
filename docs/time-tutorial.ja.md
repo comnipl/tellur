@@ -45,6 +45,8 @@ let hero_in = t.phase(0.55, 1.2).ease_out_cubic(0.0, 1.0);
 2. **`Phase`** — `[0.0, 1.0]` に検証済みの進捗スカラー。`t.phase(start, end)` は区間を単位区間へ線形写像し、外側では**飽和**（0 か 1 に張り付く）します
 3. **`PhaseEasing`** — `phase.ease_*(from, to)` がカーブを当てて目的の量（alpha・半径・座標…）まで一気に持っていきます。`linear` / `ease_smoothstep` / `ease_out_cubic` / `ease_out_quint` / `ease_in_out_quint` / `ease_in_out_expo` は `[from, to]` に収まり、`ease_in_back` / `ease_out_elastic` は意図的にはみ出します（その「行き過ぎ」が演出です）。名前付きカーブで足りないときは `ease_bezier(x1, y1, x2, y2, from, to)` — CSS の `cubic-bezier` と同じ 4 制御点でカーブを自作できます（`y1`/`y2` を単位区間の外に置けば、これも意図的にはみ出せます）
 
+タイムラインの秒数は、component・renderer・live preview の境界まで一貫して `f64` です。`Phase` と描画値は `f32` のままです。つまり、sample/frame 位置の精度は秒数として保ち、単位区間の進捗や描画値になった境界でだけ狭めます。
+
 逆方向のアニメーションは `(from, to)` を入れ替えるだけです。
 
 ```rust
@@ -100,7 +102,7 @@ let reveal = time.window(0.05, 1.332);
 
 // The i-th horizon line slides in over [i*8ms, 0.4s + i*8ms] of the reveal.
 let line_in = reveal
-    .sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008))
+    .sub_secs((i as f64 * 0.008)..(0.4 + i as f64 * 0.008))
     .ease_in_out_expo(0.0, 1.0);
 ```
 
@@ -207,8 +209,43 @@ let alpha = match clock.window() {
 clip.at(2.0)        // place at 2.0s, play at native length
 clip.at(0.0..3.0)   // an explicit window — for a timed clip this is a STRETCH
 clip.fill()         // stretch to the container's resolved length (Timeline only)
-media.trim(1.0..4.0)  // crop SOURCE seconds (the way to truncate)
+media.trim(1.0..4.0)   // child-local [1s, 4s) を残し、local 0 へ再基底化
+media.trim(-3.0..-0.5) // 負の端点は直接の child end から逆算
+media.trim(1.0..)       // open end は正確な child end
 ```
+
+`trim` は media leaf の metadata ではなく、汎用の component wrapper です。video・audio・cue・trigger・arrangement のすべてを同じ時計で切り詰めます。標準 range は半開区間で、inclusive range は意図的にサポートしません。
+
+### 順序を持つ audio effect
+
+audio のgain automationも同じ wrapper model です。負の数値は直接の child end からの秒数で、正確な終端には `EnvelopePoint::End` を使います。
+
+```rust
+use tellur::core::timeline_container::AudioFile;
+use tellur::prelude::*;
+
+let voice = AudioFile::builder()
+    .path("voice.wav")
+    .gain_envelope((0.0, 0.0), (0.35, 1.0))
+    .fade_out(0.25)
+    .at(2.0);
+
+let tail = AudioFile::builder()
+    .path("tail.wav")
+    .gain_envelope((-0.5, 1.0), (EnvelopePoint::End, 0.0));
+```
+
+builder call はその場で wrapper を作るため、最後の call が最も外側になり、順序が意味を持ちます。
+
+```rust
+source.fade_in(1.0).trim(0.5..)
+// Trim<GainEnvelope<Source>>: 既存fadeの0.5秒地点から出力が始まる
+
+source.trim(0.5..).fade_in(1.0)
+// GainEnvelope<Trim<Source>>: trim後のlocal 0秒から新しいfadeが始まる
+```
+
+標準の順序は、source 設定 → temporal/audio effect → 配置です。`.at(..)` 後の component を意図的にさらに wrap することもできますが、その場合は配置が作る先頭区間も外側effectの時計に含まれます。`.fill()` は `Timeline` が自分の尺計算からその child を除外するための構造markerなので、必ず最後・最外側に置きます。つまり `source.fade_out(0.25).fill()` であり、`source.fill().fade_out(0.25)` ではありません。
 
 「長さそのもの」だけが欲しい場面 — `Sequence` に間を置く、トリガーを掛ける台にする、`Timeline` の尺を確定させる — には `TimeBox` を置きます。何も描かず・鳴らさず、指定した `duration` を持つだけのリーフです（空間側 `SizedBox` の時間版）。
 
@@ -277,6 +314,8 @@ let ink = reveal.elapsed();                 // 発火からの経過秒（窓が
 | 別のクリップの解決済み開始に反応する | `Event` + `.trigger_*` + `event.phase(&clock, a, b)` |
 | 発火起点の窓でスタッガー・経過秒 | `event.window(&clock, a..b)` |
 | 固定長の間・トリガー台・尺の確保 | `TimeBox` |
+| end 基準を含む任意componentの切り詰め | `.trim(a..b)` / `.trim(-a..-b)` |
+| audio contributionのfade・automate | `.fade_in(d)` / `.fade_out(d)` / `.gain_envelope(..)` |
 
 ## 9. 実例 — 2つの世界の合流
 

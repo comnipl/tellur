@@ -30,10 +30,10 @@ const DEFAULT_FILL_LEAD: f32 = 0.07;
 const DEFAULT_FILL_DURATION: f32 = 0.24;
 const DEFAULT_STROKE_SPEED: f32 = 2400.0;
 const DEFAULT_MAX_STROKE_SPEED: f32 = 2400.0;
-const DEFAULT_PER_PATH_SECS: f32 = 0.17;
+const DEFAULT_PER_PATH_SECS: f64 = 0.17;
 const DEFAULT_LAG_RATIO: f32 = 0.5;
-const DEFAULT_TIMED_FILL_LEAD: f32 = 0.08;
-const DEFAULT_TIMED_FILL_DURATION: f32 = 0.18;
+const DEFAULT_TIMED_FILL_LEAD: f64 = 0.08;
+const DEFAULT_TIMED_FILL_DURATION: f64 = 0.18;
 const DEFAULT_COMPLETED_STROKE_OPACITY: f32 = 0.35;
 const QUAD_STEPS: usize = 16;
 const CUBIC_STEPS: usize = 24;
@@ -215,16 +215,16 @@ impl VectorComponent for Write {
         // `stroke_end`, leaving the tail of `progress` for fills to finish.
         let stroke_end = stroke_end_point(self.stroke_end);
         let (mut slots, span) = write_slots(&lengths, self.pacing, self.lag_ratio);
-        scale_slots(&mut slots, stroke_end / span);
+        scale_slots(&mut slots, stroke_end as f64 / span);
 
         let mut children = Vec::new();
         let mut fill_walk = FillWalk {
             slots: &slots,
             next: 0,
-            alpha_at: |completion: f32| {
+            alpha_at: |completion: f64| {
                 fill_alpha(
                     progress,
-                    completion,
+                    completion as f32,
                     self.fill_lead,
                     self.fill_delay,
                     self.fill_duration,
@@ -239,7 +239,7 @@ impl VectorComponent for Write {
         let mut stroke_walk = StrokeWalk {
             slots: &slots,
             next: 0,
-            cursor: progress,
+            cursor: progress as f64,
             completed_stroke_opacity: self.completed_stroke_opacity,
             fallback_stroke_width: self.stroke_width,
         };
@@ -271,13 +271,13 @@ impl VectorComponent for Write {
 #[crate::component(vector)]
 #[derive(Keyable)]
 pub struct TimedWrite {
-    pub time: f32,
-    pub start: f32,
+    pub time: f64,
+    pub start: f64,
     #[builder(default = WritePacing::PerPath)]
     pub pacing: WritePacing,
     /// Seconds each writable path takes under [`WritePacing::PerPath`].
     #[builder(default = DEFAULT_PER_PATH_SECS)]
-    pub per_path_secs: f32,
+    pub per_path_secs: f64,
     #[builder(default = DEFAULT_LAG_RATIO)]
     pub lag_ratio: f32,
     /// Pen speed in child units per second under [`WritePacing::ByLength`].
@@ -291,9 +291,9 @@ pub struct TimedWrite {
     #[builder(default = DEFAULT_STROKE_WIDTH)]
     pub stroke_width: f32,
     #[builder(default = DEFAULT_TIMED_FILL_LEAD)]
-    pub fill_lead: f32,
+    pub fill_lead: f64,
     #[builder(default = DEFAULT_TIMED_FILL_DURATION)]
-    pub fill_duration: f32,
+    pub fill_duration: f64,
     #[builder(default = DEFAULT_COMPLETED_STROKE_OPACITY)]
     pub completed_stroke_opacity: f32,
     #[builder(into)]
@@ -301,23 +301,23 @@ pub struct TimedWrite {
 }
 
 impl TimedWrite {
-    pub fn new<T: Time, C: VectorComponent + 'static>(time: T, start: f32, child: C) -> Self {
+    pub fn new<T: Time, C: VectorComponent + 'static>(time: T, start: f64, child: C) -> Self {
         Self::from_box(time, start, Box::new(child))
     }
 
-    pub fn from_box<T: Time>(time: T, start: f32, child: Box<dyn VectorComponent>) -> Self {
+    pub fn from_box<T: Time>(time: T, start: f64, child: Box<dyn VectorComponent>) -> Self {
         Self::with_defaults(time.seconds(), start, child)
     }
 
-    pub fn from_elapsed<C: VectorComponent + 'static>(elapsed: f32, child: C) -> Self {
+    pub fn from_elapsed<C: VectorComponent + 'static>(elapsed: f64, child: C) -> Self {
         Self::from_elapsed_box(elapsed, Box::new(child))
     }
 
-    pub fn from_elapsed_box(elapsed: f32, child: Box<dyn VectorComponent>) -> Self {
+    pub fn from_elapsed_box(elapsed: f64, child: Box<dyn VectorComponent>) -> Self {
         Self::with_defaults(elapsed, 0.0, child)
     }
 
-    fn with_defaults(time: f32, start: f32, child: Box<dyn VectorComponent>) -> Self {
+    fn with_defaults(time: f64, start: f64, child: Box<dyn VectorComponent>) -> Self {
         Self {
             time,
             start,
@@ -336,7 +336,7 @@ impl TimedWrite {
 
     /// Gives every writable path an equal `secs`-second slot and switches
     /// pacing to [`WritePacing::PerPath`].
-    pub fn per_path_secs(mut self, secs: f32) -> Self {
+    pub fn per_path_secs(mut self, secs: f64) -> Self {
         self.pacing = WritePacing::PerPath;
         self.per_path_secs = secs;
         self
@@ -384,12 +384,12 @@ impl TimedWrite {
         self
     }
 
-    pub fn fill_lead_secs(mut self, fill_lead: f32) -> Self {
+    pub fn fill_lead_secs(mut self, fill_lead: f64) -> Self {
         self.fill_lead = fill_lead;
         self
     }
 
-    pub fn fill_duration_secs(mut self, fill_duration: f32) -> Self {
+    pub fn fill_duration_secs(mut self, fill_duration: f64) -> Self {
         self.fill_duration = fill_duration;
         self
     }
@@ -399,14 +399,14 @@ impl TimedWrite {
         self
     }
 
-    fn elapsed(&self) -> f32 {
+    fn elapsed(&self) -> f64 {
         self.time - self.start
     }
 
     /// Seconds per abstract schedule unit (see [`write_slots`]).
-    fn seconds_per_unit(&self) -> f32 {
+    fn seconds_per_unit(&self) -> f64 {
         match self.pacing {
-            WritePacing::ByLength => 1.0 / timed_stroke_speed(self.stroke_speed),
+            WritePacing::ByLength => 1.0 / timed_stroke_speed(self.stroke_speed) as f64,
             WritePacing::PerPath => self.per_path_secs.max(0.000_1),
         }
     }
@@ -479,7 +479,7 @@ impl VectorComponent for TimedWrite {
         let mut fill_walk = FillWalk {
             slots: &slots,
             next: 0,
-            alpha_at: |completion: f32| {
+            alpha_at: |completion: f64| {
                 timed_fill_alpha(elapsed, completion, self.fill_lead, self.fill_duration)
             },
         };
@@ -521,19 +521,19 @@ pub trait VectorWrite: VectorComponent + Sized + 'static {
         Write::new(progress, self).stroke_width(stroke_width)
     }
 
-    fn write_from<T: Time>(self, time: T, start: f32) -> TimedWrite {
+    fn write_from<T: Time>(self, time: T, start: f64) -> TimedWrite {
         TimedWrite::new(time, start, self)
     }
 
-    fn write_from_with_speed<T: Time>(self, time: T, start: f32, stroke_speed: f32) -> TimedWrite {
+    fn write_from_with_speed<T: Time>(self, time: T, start: f64, stroke_speed: f32) -> TimedWrite {
         TimedWrite::new(time, start, self).stroke_speed(stroke_speed)
     }
 
-    fn write_elapsed(self, elapsed: f32) -> TimedWrite {
+    fn write_elapsed(self, elapsed: f64) -> TimedWrite {
         TimedWrite::from_elapsed(elapsed, self)
     }
 
-    fn write_elapsed_with_speed(self, elapsed: f32, stroke_speed: f32) -> TimedWrite {
+    fn write_elapsed_with_speed(self, elapsed: f64, stroke_speed: f32) -> TimedWrite {
         TimedWrite::from_elapsed(elapsed, self).stroke_speed(stroke_speed)
     }
 
@@ -563,19 +563,19 @@ pub trait VectorBuilderWrite: VectorBuilder {
         Write::new(progress, self.build_component()).stroke_width(stroke_width)
     }
 
-    fn write_from<T: Time>(self, time: T, start: f32) -> TimedWrite {
+    fn write_from<T: Time>(self, time: T, start: f64) -> TimedWrite {
         TimedWrite::new(time, start, self.build_component())
     }
 
-    fn write_from_with_speed<T: Time>(self, time: T, start: f32, stroke_speed: f32) -> TimedWrite {
+    fn write_from_with_speed<T: Time>(self, time: T, start: f64, stroke_speed: f32) -> TimedWrite {
         TimedWrite::new(time, start, self.build_component()).stroke_speed(stroke_speed)
     }
 
-    fn write_elapsed(self, elapsed: f32) -> TimedWrite {
+    fn write_elapsed(self, elapsed: f64) -> TimedWrite {
         TimedWrite::from_elapsed(elapsed, self.build_component())
     }
 
-    fn write_elapsed_with_speed(self, elapsed: f32, stroke_speed: f32) -> TimedWrite {
+    fn write_elapsed_with_speed(self, elapsed: f64, stroke_speed: f32) -> TimedWrite {
         TimedWrite::from_elapsed(elapsed, self.build_component()).stroke_speed(stroke_speed)
     }
 
@@ -672,11 +672,11 @@ fn collect_write_lengths(node: &Node, fallback_stroke_width: f32) -> Vec<f32> {
 /// A path's slot on the write clock, plus its pen length.
 #[derive(Clone, Copy)]
 struct Slot {
-    start: f32,
+    start: f64,
     /// Fill scheduling slot: fill starts fading at `start + duration`.
-    duration: f32,
+    duration: f64,
     /// How long the pen actually takes; >= duration when speed-capped.
-    stroke_duration: f32,
+    stroke_duration: f64,
     length: f32,
 }
 
@@ -685,14 +685,14 @@ struct Slot {
 /// scales the result into its own time units with [`scale_slots`]: [`Write`]
 /// normalizes the span onto the progress interval, [`TimedWrite`] converts
 /// schedule units into seconds.
-fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slot>, f32) {
+fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slot>, f64) {
     match pacing {
         WritePacing::ByLength => {
-            let mut walked = 0.0;
+            let mut walked = 0.0_f64;
             let slots = lengths
                 .iter()
                 .map(|&length| {
-                    let duration = length.max(0.0);
+                    let duration = length.max(0.0) as f64;
                     let slot = Slot {
                         start: walked,
                         duration,
@@ -706,9 +706,9 @@ fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slo
             (slots, walked)
         }
         WritePacing::PerPath => {
-            let lag = lag_ratio.max(0.0);
-            let mut start = 0.0;
-            let mut span: f32 = 0.0;
+            let lag = lag_ratio.max(0.0) as f64;
+            let mut start = 0.0_f64;
+            let mut span = 0.0_f64;
             let slots = lengths
                 .iter()
                 .map(|&length| {
@@ -738,7 +738,7 @@ fn write_slots(lengths: &[f32], pacing: WritePacing, lag_ratio: f32) -> (Vec<Slo
     }
 }
 
-fn scale_slots(slots: &mut [Slot], scale: f32) {
+fn scale_slots(slots: &mut [Slot], scale: f64) {
     for slot in slots {
         slot.start *= scale;
         slot.duration *= scale;
@@ -754,21 +754,21 @@ fn cap_stroke_speed(slots: &mut [Slot], max_speed: f32) {
     }
     for slot in slots {
         if slot.length > 0.0 {
-            slot.stroke_duration = slot.stroke_duration.max(slot.length / max_speed);
+            slot.stroke_duration = slot.stroke_duration.max((slot.length / max_speed) as f64);
         }
     }
 }
 
 /// Latest moment any pen is still drawing, accounting for speed caps.
-fn stroke_span(slots: &[Slot]) -> f32 {
+fn stroke_span(slots: &[Slot]) -> f64 {
     slots
         .iter()
         .map(|slot| slot.start + slot.stroke_duration)
-        .fold(0.0, f32::max)
+        .fold(0.0, f64::max)
 }
 
 /// Fraction of `slot` the write cursor has covered, saturating at both ends.
-fn slot_progress(cursor: f32, slot: Slot) -> f32 {
+fn slot_progress(cursor: f64, slot: Slot) -> f32 {
     if slot.stroke_duration <= 0.0 {
         if cursor >= slot.start {
             1.0
@@ -776,14 +776,14 @@ fn slot_progress(cursor: f32, slot: Slot) -> f32 {
             0.0
         }
     } else {
-        clamp_unit((cursor - slot.start) / slot.stroke_duration)
+        clamp_unit(((cursor - slot.start) / slot.stroke_duration) as f32)
     }
 }
 
 struct StrokeWalk<'a> {
     slots: &'a [Slot],
     next: usize,
-    cursor: f32,
+    cursor: f64,
     completed_stroke_opacity: f32,
     fallback_stroke_width: f32,
 }
@@ -1052,13 +1052,13 @@ fn segment_t(partial: f32, total: f32) -> f32 {
 /// Shared fill walk: `alpha_at` maps a path's completion moment on the write
 /// clock to a fill opacity ([`fill_alpha`] for [`Write`],
 /// [`timed_fill_alpha`] for [`TimedWrite`]).
-struct FillWalk<'a, F: Fn(f32) -> f32> {
+struct FillWalk<'a, F: Fn(f64) -> f32> {
     slots: &'a [Slot],
     next: usize,
     alpha_at: F,
 }
 
-fn fill_node<F: Fn(f32) -> f32>(node: Node, walk: &mut FillWalk<'_, F>) -> Node {
+fn fill_node<F: Fn(f64) -> f32>(node: Node, walk: &mut FillWalk<'_, F>) -> Node {
     match node {
         Node::Group(group) => Node::Group(Group {
             transform: group.transform,
@@ -1083,7 +1083,7 @@ fn fill_node<F: Fn(f32) -> f32>(node: Node, walk: &mut FillWalk<'_, F>) -> Node 
     }
 }
 
-fn fill_path_node<F: Fn(f32) -> f32>(path: Path, walk: &mut FillWalk<'_, F>) -> Node {
+fn fill_path_node<F: Fn(f64) -> f32>(path: Path, walk: &mut FillWalk<'_, F>) -> Node {
     let slot = walk.slots[walk.next];
     walk.next += 1;
 
@@ -1120,10 +1120,10 @@ fn fill_alpha(progress: f32, completion: f32, lead: f32, delay: f32, duration: f
     smoothstep(clamp_unit((progress - start) / duration))
 }
 
-fn timed_fill_alpha(elapsed: f32, completion: f32, lead: f32, duration: f32) -> f32 {
+fn timed_fill_alpha(elapsed: f64, completion: f64, lead: f64, duration: f64) -> f32 {
     let start = (completion - lead.max(0.0)).max(0.0);
     let duration = duration.max(0.000_1);
-    smoothstep(clamp_unit((elapsed - start) / duration))
+    smoothstep(clamp_unit(((elapsed - start) / duration) as f32))
 }
 
 fn timed_stroke_speed(stroke_speed: f32) -> f32 {
@@ -1133,7 +1133,7 @@ fn timed_stroke_speed(stroke_speed: f32) -> f32 {
 /// The moment (in seconds) a timed write is fully settled: the last outline
 /// is drawn at `stroke_span` and the last fill has finished fading after the
 /// nominal fill schedule ends at `fill_span`.
-fn timed_done_at(stroke_span: f32, fill_span: f32, fill_lead: f32, fill_duration: f32) -> f32 {
+fn timed_done_at(stroke_span: f64, fill_span: f64, fill_lead: f64, fill_duration: f64) -> f64 {
     let fill_done = (fill_span - fill_lead.max(0.0)).max(0.0) + fill_duration.max(0.000_1);
     stroke_span.max(fill_done)
 }
@@ -1771,7 +1771,7 @@ mod tests {
             panic!("capped write should still be revealing just before stroke end");
         };
         assert!(
-            root.children.len() >= 1,
+            !root.children.is_empty(),
             "should still be drawing the capped stroke"
         );
 

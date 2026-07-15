@@ -24,10 +24,10 @@ use super::common::*;
 // HUD intro/outro time windows. All bracket/tick/label staggers fit inside
 // the intro window expressed via `Window::sub_secs`; everything saturates by
 // `INTRO_END` and the component becomes byte-identical between frames.
-pub const HUD_INTRO_START: f32 = 0.15;
-pub const HUD_INTRO_END: f32 = 1.35;
-pub const HUD_OUTRO_START: f32 = 7.1;
-pub const HUD_OUTRO_END: f32 = 7.55;
+pub const HUD_INTRO_START: f64 = 0.15;
+pub const HUD_INTRO_END: f64 = 1.35;
+pub const HUD_OUTRO_START: f64 = 7.1;
+pub const HUD_OUTRO_END: f64 = 7.55;
 
 fn section_marker(section: u8, p: Palette) -> (&'static str, Color) {
     match section {
@@ -38,7 +38,7 @@ fn section_marker(section: u8, p: Palette) -> (&'static str, Color) {
     }
 }
 
-pub fn section_index_at(t: f32) -> u8 {
+pub fn section_index_at(t: f64) -> u8 {
     if t < 1.85 {
         0
     } else if t < 3.4 {
@@ -110,7 +110,7 @@ impl Hud {
                     .into_iter()
                     .enumerate()
                     .map(move |(i, (ax, ay, dx, dy))| {
-                        let stagger = i as f32 * 0.05;
+                        let stagger = i as f64 * 0.05;
                         let pop = intro
                             .sub_secs((0.1 + stagger)..(0.6 + stagger))
                             .ease_out_cubic(0.0, 1.0);
@@ -188,7 +188,7 @@ impl Hud {
             )
             // Bottom edge tick ruler — every 4th tick is taller.
             .children((0..17).map(move |i| {
-                let stagger = i as f32 * 0.018;
+                let stagger = i as f64 * 0.018;
                 let pop = intro
                     .sub_secs((0.3 + stagger)..(0.8 + stagger))
                     .ease_out_cubic(0.0, 1.0);
@@ -208,7 +208,7 @@ impl Hud {
             // Left + right edge tick rulers — completes the four-sided
             // instrument frame so the scaffold reads as a full HUD.
             .children((0..11).map(move |i| {
-                let stagger = i as f32 * 0.02;
+                let stagger = i as f64 * 0.02;
                 let pop = intro
                     .sub_secs((0.55 + stagger)..(1.0 + stagger))
                     .ease_out_cubic(0.0, 1.0);

@@ -10,8 +10,8 @@ use crate::render_context::{
     CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput, RenderContext,
 };
 use crate::timeline_component::{
-    resolve, Arrangement, NodeKind, ResolveCtx, ResolveError, Timed, TimedBuilder,
-    TimelineComponent,
+    resolve, Arrangement, AudioEffects, AudioEffectsBuilder, EnvelopePoint, GainEnvelope, NodeKind,
+    ResolveCtx, ResolveError, Timed, TimedBuilder, TimelineComponent, Trim,
 };
 use crate::vector::VectorGraphic;
 
@@ -132,6 +132,47 @@ fn fill_child_in_timeline_takes_container_length() {
 }
 
 #[test]
+fn outer_effect_over_placement_keeps_the_leading_offset_footprint() {
+    // The effect is deliberately OUTSIDE the placement. Its clock therefore
+    // includes the five seconds of leading silence, but delegating resolve must
+    // still return the same six-second footprint reported by measure().
+    let child = TimeBox::builder()
+        .duration(1.0)
+        .build()
+        .at(5.0)
+        .fade_in(1.0);
+    let timeline = Timeline::builder().child(child).build();
+
+    assert_eq!(timeline.measure(), Some(6.0));
+    let mut ctx = ResolveCtx::new();
+    assert_eq!(timeline.resolve(0.0, &mut ctx), 6.0);
+    assert!(ctx.errors().is_empty());
+    let resolved = resolve(timeline).expect("timed root");
+    assert_eq!(resolved.duration(), 6.0);
+}
+
+#[test]
+fn timed_fill_stretches_nested_cues_to_the_container_length() {
+    let timed_child = Timeline::builder()
+        .child(TimeBox::builder().duration(2.0))
+        .child(Subtitle::builder().text("nested").at(0.5..1.5))
+        .build();
+    let timeline = Timeline::builder()
+        .child(TimeBox::builder().duration(4.0))
+        .child(timed_child.fill())
+        .build();
+    let resolved = resolve(timeline).expect("the non-fill child sets a 4s length");
+
+    let cue = resolved
+        .source()
+        .cues(0.0)
+        .into_iter()
+        .find(|cue| cue.text == "nested")
+        .expect("nested cue");
+    assert_eq!((cue.start, cue.end), (1.0, 3.0));
+}
+
+#[test]
 fn all_fill_timeline_warns_and_collapses_to_zero() {
     let tl = Timeline::builder()
         .child(Subtitle::builder().text("a").fill())
@@ -167,6 +208,21 @@ fn subtitle_cue_absolute_offset_through_nesting() {
         .expect("subtitle cue");
     assert_eq!(hello.start, 2.0);
     assert_eq!(hello.end, 4.0);
+}
+
+#[test]
+fn placement_stretch_scales_nested_cues_and_arrangement() {
+    let sequence = Sequence::builder()
+        .child(Subtitle::builder().text("scaled").at(0.0..2.0))
+        .build()
+        .at(4.0..5.0);
+
+    let cue = sequence.cues(0.0).pop().expect("subtitle cue");
+    assert_eq!((cue.start, cue.end), (4.0, 5.0));
+
+    let node = sequence.arrangement(0.0);
+    assert_eq!((node.start, node.end), (4.0, 5.0));
+    assert_eq!((node.children[0].start, node.children[0].end), (4.0, 5.0));
 }
 
 // (f) The `.sketch/01` Dialogue shape (Timeline of Caption.fill() +
@@ -711,7 +767,7 @@ fn sequence_gates_each_child_to_its_slot() {
 struct GpuFrame;
 
 impl TimelineComponent for GpuFrame {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         Some(1.0)
     }
 
@@ -732,7 +788,7 @@ impl TimelineComponent for GpuFrame {
         )))
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         Arrangement {
             kind: NodeKind::Video,
             label: String::new(),
@@ -1003,8 +1059,8 @@ fn sequence_requests_gpu_variants_when_multiple_children_can_contribute() {
 // proving a stretched `.at` surfaces the window in the child's OWN units.
 #[derive(Clone)]
 struct WindowProbe {
-    log: Arc<Mutex<Vec<Option<f32>>>>,
-    duration: f32,
+    log: Arc<Mutex<Vec<Option<f64>>>>,
+    duration: f64,
 }
 impl PartialEq for WindowProbe {
     fn eq(&self, other: &Self) -> bool {
@@ -1017,7 +1073,7 @@ impl std::hash::Hash for WindowProbe {
     }
 }
 impl TimelineComponent for WindowProbe {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         Some(self.duration)
     }
     fn frame(
@@ -1040,7 +1096,7 @@ impl TimelineComponent for WindowProbe {
             vec![255u8; (target.width as usize) * (target.height as usize) * 4],
         ))
     }
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         Arrangement {
             kind: NodeKind::Video,
             label: String::new(),
@@ -1126,9 +1182,9 @@ fn sequence_rebases_second_child_local_clock() {
 #[derive(Clone)]
 struct RecordingLeaf {
     // Excluded from eq/hash (interior, per-frame state — like `#[clock]`).
-    log: Arc<Mutex<Vec<f32>>>,
+    log: Arc<Mutex<Vec<f64>>>,
     // An intrinsic length so it is a TIMED leaf (a window over it stretches).
-    duration: f32,
+    duration: f64,
 }
 
 impl PartialEq for RecordingLeaf {
@@ -1143,7 +1199,7 @@ impl std::hash::Hash for RecordingLeaf {
 }
 
 impl TimelineComponent for RecordingLeaf {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         Some(self.duration)
     }
 
@@ -1165,7 +1221,7 @@ impl TimelineComponent for RecordingLeaf {
         ))
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         Arrangement {
             kind: NodeKind::Video,
             label: String::new(),
@@ -1222,6 +1278,52 @@ fn placement_window_stretch_reaches_the_leaf() {
     );
 }
 
+#[test]
+fn timed_fill_stretches_clock_trigger_and_arrangement_to_timeline_length() {
+    use crate::timeline_component::{Event, TriggerMark, Triggers};
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let event = Event::new();
+    let fill = RecordingLeaf {
+        log: Arc::clone(&log),
+        duration: 2.0,
+    }
+    .trigger_at_end(event)
+    .fill();
+    let timeline = Timeline::builder()
+        .child(TimeBox::builder().duration(4.0))
+        .child(fill)
+        .build();
+    let resolved = resolve_root(timeline).expect("the non-fill child sets a 4s length");
+
+    // A two-second timed child filling four seconds runs at half speed.
+    let mut ctx = crate::render_context::PassThrough;
+    resolved.frame(
+        TimelineTime::new(3.0),
+        Resolution::new(1, 1),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
+    let recorded = *log.lock().unwrap().last().expect("fill child was sampled");
+    assert!(
+        (recorded - 1.5).abs() < 1e-9,
+        "recorded local time {recorded}"
+    );
+
+    // Resolve-time triggers and the live arrangement use the same remap.
+    assert_eq!(resolved.triggers().get(event.id()).seconds(), 4.0);
+    let arrangement = resolved.source().arrangement(0.0);
+    let fill = &arrangement.children[1];
+    assert_eq!((fill.start, fill.end), (0.0, 4.0));
+    assert_eq!(
+        fill.triggers,
+        vec![TriggerMark {
+            time: 4.0,
+            name: None,
+        }]
+    );
+}
+
 // The timeless-visual path: a bare `RasterComponent` reached through the
 // blanket renders via `ctx.render` (no clock dependence), and a
 // `#[component(timeline)]` body that builds a timeless visual returns that
@@ -1261,7 +1363,7 @@ fn timeless_visual_frame_routes_through_ctx_render() {
     assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
 }
 
-// ── Audio decode + eager mix-down (step 8) ───────────────────────────────
+// ── Audio decode + recursive block mix-down ──────────────────────────────
 //
 // These exercise the REAL `symphonia` decode path by synthesizing a tiny
 // mono s16le WAV fixture to a temp file, then driving `render_audio` over
@@ -1312,7 +1414,7 @@ fn const_wav(name: &str, rate: u32, frames: usize, level: i16) -> std::path::Pat
     write_wav_fixture(name, rate, &vec![level; frames])
 }
 
-fn write_ffmpeg_sine_audio(name: &str, ext: &str, codec: &str, seconds: f32) -> std::path::PathBuf {
+fn write_ffmpeg_sine_audio(name: &str, ext: &str, codec: &str, seconds: f64) -> std::path::PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "tellur_audio_{}_{}.{}",
@@ -1390,6 +1492,37 @@ fn audiofile_trim_crops_source_seconds() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[test]
+fn ordered_effect_builder_types_preserve_call_order() {
+    let _: Trim<GainEnvelope<AudioFile>> = AudioFile::builder()
+        .path("missing.wav")
+        .fade_in(1.0)
+        .trim(0.5..);
+    let _: GainEnvelope<Trim<AudioFile>> = AudioFile::builder()
+        .path("missing.wav")
+        .trim(0.5..)
+        .fade_in(1.0);
+    let _: GainEnvelope<GainEnvelope<AudioFile>> = AudioFile::builder()
+        .path("missing.wav")
+        .fade_in(0.2)
+        .fade_out(0.3);
+    let _: GainEnvelope<AudioFile> = AudioFile::builder()
+        .path("missing.wav")
+        .gain_envelope((-0.5, 1.0), (EnvelopePoint::End, 0.0));
+    let _: Trim<VideoFile> = VideoFile::builder().path("missing.mp4").trim(..-0.5);
+}
+
+#[test]
+fn negative_trim_bounds_are_relative_to_the_immediate_child_end() {
+    let source = AudioFile::builder()
+        .path("missing.wav")
+        .duration(10.0)
+        .build();
+    assert_eq!(source.clone().trim(-3.0..-0.5).duration(), Some(2.5));
+    assert_eq!(source.clone().trim(..-0.5).duration(), Some(9.5));
+    assert_eq!(source.trim(1.0..).duration(), Some(9.0));
+}
+
 // (mix) Two AudioFiles overlapping in a Timeline SUM where they overlap.
 #[test]
 fn timeline_overlapping_audio_sums() {
@@ -1426,11 +1559,10 @@ fn Voiced(#[builder(into)] path: String) -> impl crate::timeline_component::Time
 }
 
 // (mix) Regression: a fn-form `#[component(timeline)]` composing an
-// `AudioFile` must forward `mix_into` to its body. Before the macro emitted
-// a `mix_into` delegation it fell back to the silent trait default, so a
-// `Dialogue(voice: AudioFile)`-style wrapper mixed to ZERO.
+// `AudioFile` must forward `render_audio_block` to its body. Falling back to
+// the trait's silent default would mute a `Dialogue(voice: AudioFile)` wrapper.
 #[test]
-fn fn_form_component_forwards_audio_mix() {
+fn fn_form_component_forwards_audio_blocks() {
     let level = (0.6 * i16::MAX as f32) as i16;
     let frames = (TEST_RATE / 2) as usize; // 0.5s
     let src = const_wav("fnform", TEST_RATE, frames, level);
@@ -1594,6 +1726,65 @@ fn audiofile_applies_linear_fade_envelope() {
 }
 
 #[test]
+fn trim_and_fade_order_changes_the_clock_seen_by_the_envelope() {
+    let frames = (TEST_RATE * 2) as usize;
+    let level = (0.8 * i16::MAX as f32) as i16;
+    let path = const_wav("ordered_effects", TEST_RATE, frames, level);
+    let path_str = path.to_str().unwrap();
+
+    let fade_then_trim = AudioFile::builder().path(path_str).fade_in(1.0).trim(0.5..);
+    let trim_then_fade = AudioFile::builder().path(path_str).trim(0.5..).fade_in(1.0);
+
+    let first = resolve_audio(fade_then_trim)
+        .expect("ordered wrapper resolves")
+        .render_audio(TEST_RATE, 1);
+    let second = resolve_audio(trim_then_fade)
+        .expect("ordered wrapper resolves")
+        .render_audio(TEST_RATE, 1);
+
+    assert!(
+        (first.samples[0] - 0.4).abs() < 0.02,
+        "trimming an existing fade at 0.5s should begin near half gain, got {}",
+        first.samples[0]
+    );
+    assert!(
+        second.samples[0].abs() < 1e-6,
+        "adding the fade after trim should begin at silence, got {}",
+        second.samples[0]
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn gain_envelope_only_changes_its_own_timeline_contribution() {
+    let frames = TEST_RATE as usize;
+    let level = (0.4 * i16::MAX as f32) as i16;
+    let affected = const_wav("envelope_scope_a", TEST_RATE, frames, level);
+    let sibling = const_wav("envelope_scope_b", TEST_RATE, frames, level);
+
+    let timeline = Timeline::builder()
+        .child(
+            AudioFile::builder()
+                .path(affected.to_str().unwrap())
+                .gain_envelope((0.0, 0.5), (1.0, 0.5)),
+        )
+        .child(AudioFile::builder().path(sibling.to_str().unwrap()))
+        .build();
+    let mixed = resolve_audio(timeline)
+        .expect("media-backed")
+        .render_audio(TEST_RATE, 1);
+    let mid = mixed.samples[(TEST_RATE / 2) as usize];
+    assert!(
+        (mid - 0.6).abs() < 0.02,
+        "0.4 * 0.5 plus unaffected 0.4 sibling should be ~0.6, got {mid}"
+    );
+
+    let _ = std::fs::remove_file(&affected);
+    let _ = std::fs::remove_file(&sibling);
+}
+
+#[test]
 fn audiofile_fade_matches_full_mix_when_rendering_window() {
     let frames = TEST_RATE as usize;
     let level = (0.7 * i16::MAX as f32) as i16;
@@ -1653,11 +1844,83 @@ fn placement_speed_changes_sample_count() {
         mix_stretched.samples.len(),
     );
     // And the stretched buffer is ~0.5s.
-    let stretched_secs = mix_stretched.samples.len() as f32 / TEST_RATE as f32;
+    let stretched_secs = mix_stretched.samples.len() as f64 / TEST_RATE as f64;
     assert!(
         (stretched_secs - 0.5).abs() < 0.02,
         "stretched buffer ~0.5s, got {stretched_secs}",
     );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn enclosing_stretch_scales_sequence_audio_cursor_and_child_clock() {
+    let one_second = TEST_RATE as usize;
+    let low = (0.25 * i16::MAX as f32) as i16;
+    let high = (0.75 * i16::MAX as f32) as i16;
+    let mut samples = vec![low; one_second];
+    samples.extend(vec![high; one_second]);
+    let path = write_wav_fixture("nested_stretch", TEST_RATE, &samples);
+
+    let sequence = Sequence::builder()
+        .child(TimeBox::builder().duration(1.0))
+        .child(AudioFile::builder().path(path.to_str().unwrap()))
+        .build()
+        .at(0.0..1.5); // 3s of sequence content at 2x speed.
+    let mixed = resolve_audio(sequence)
+        .expect("stretched sequence")
+        .render_audio(TEST_RATE, 1);
+
+    let at = |seconds: f64| mixed.samples[(seconds * TEST_RATE as f64) as usize];
+    assert!(at(0.25).abs() < 1e-6, "the leading TimeBox stays silent");
+    assert!(
+        (at(0.75) - 0.25).abs() < 0.02,
+        "audio local 0.5s should still be in the low source half"
+    );
+    assert!(
+        (at(1.25) - 0.75).abs() < 0.02,
+        "audio local 1.5s should reach the high source half"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn timed_audio_fill_stretches_real_pcm_to_timeline_length() {
+    let half_second = (TEST_RATE / 2) as usize;
+    let low = (0.25 * i16::MAX as f32) as i16;
+    let high = (0.75 * i16::MAX as f32) as i16;
+    let mut samples = vec![low; half_second];
+    samples.extend(vec![high; half_second]);
+    let path = write_wav_fixture("timed_fill", TEST_RATE, &samples);
+
+    let timeline = Timeline::builder()
+        .child(TimeBox::builder().duration(2.0))
+        // Keep the effect inside the placement: `.fill()` is the outermost
+        // structural wrapper and the whole effected one-second clip fills 2s.
+        .child(
+            AudioFile::builder()
+                .path(path.to_str().unwrap())
+                .fade_in(0.1)
+                .fill(),
+        )
+        .build();
+    let mixed = resolve_audio(timeline)
+        .expect("the TimeBox sets the fill length")
+        .render_audio(TEST_RATE, 1);
+
+    assert_eq!(mixed.samples.len(), (TEST_RATE * 2) as usize);
+    let at = |seconds: f64| mixed.samples[(seconds * TEST_RATE as f64) as usize];
+    assert!(
+        (at(0.5) - 0.25).abs() < 0.02,
+        "parent 0.5s maps to source 0.25s, got {}",
+        at(0.5)
+    );
+    assert!(
+        (at(1.5) - 0.75).abs() < 0.02,
+        "parent 1.5s maps to source 0.75s, got {}",
+        at(1.5)
+    );
+
     let _ = std::fs::remove_file(&path);
 }
 
@@ -1726,7 +1989,7 @@ fn videofile_decodes_plausible_frames() {
     let resolved = resolve_root(tl).expect("media-backed");
     let mut ctx = crate::render_context::PassThrough;
 
-    for &t in &[0.0_f32, 0.1, 0.2, 1.0] {
+    for &t in &[0.0_f64, 0.1, 0.2, 1.0] {
         let frame = resolved
             .frame(TimelineTime::new(t), target, RasterResidency::Cpu, &mut ctx)
             .unwrap_or_else(|| panic!("decoded a frame at t={t}"));

@@ -62,7 +62,7 @@ fn format_vtt(cues: &[Cue]) -> String {
 
 /// Formats `seconds` as `HH:MM:SS<sep>mmm`, where `sep` is `,` for SubRip and
 /// `.` for WebVTT.
-fn fmt_ts(seconds: f32, sep: char) -> String {
+fn fmt_ts(seconds: f64, sep: char) -> String {
     let total_ms = (seconds.max(0.0) * 1000.0).round() as u64;
     let ms = total_ms % 1000;
     let total_s = total_ms / 1000;
@@ -76,7 +76,7 @@ fn fmt_ts(seconds: f32, sep: char) -> String {
 mod tests {
     use super::*;
 
-    fn cue(start: f32, end: f32, text: &str) -> Cue {
+    fn cue(start: f64, end: f64, text: &str) -> Cue {
         Cue {
             start,
             end,

@@ -96,7 +96,7 @@ impl TimelineComponent for ResidencyProbe {
         None
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         Arrangement {
             kind: NodeKind::Video,
             label: String::new(),
@@ -525,7 +525,7 @@ fn triggered_resolve_records_start_time() {
 // A timeline component WITHOUT `#[clock]`: builds a `Placed` and delegates
 // the full query set to it (audit M3). `start` becomes a builder field.
 #[crate::component(timeline)]
-fn Beat(start: f32) -> impl TimelineComponent {
+fn Beat(start: f64) -> impl TimelineComponent {
     Dot.at(start..(start + 2.0))
 }
 
@@ -533,7 +533,7 @@ fn Beat(start: f32) -> impl TimelineComponent {
 // cache-key term) and forwarded into the body. The structure (a placed
 // `Dot`) is clock-independent; only the read value would vary per frame.
 #[crate::component(timeline)]
-fn Pulse(#[clock] clock: Clock, start: f32) -> impl TimelineComponent {
+fn Pulse(#[clock] clock: Clock, start: f64) -> impl TimelineComponent {
     // Read both axes to prove the real clock threads through `frame`.
     let _ = clock.local().seconds() + clock.global().seconds();
     Dot.at(start..(start + 1.0))
@@ -543,7 +543,7 @@ fn Pulse(#[clock] clock: Clock, start: f32) -> impl TimelineComponent {
 // `{label}`/`{take}` placeholders interpolate the STORED builder fields at
 // arrangement-time, so two instances surface distinct display names.
 #[crate::component(timeline, name = "Shot {take}: {label}")]
-fn NamedBeat(#[builder(into)] label: String, take: u32, start: f32) -> impl TimelineComponent {
+fn NamedBeat(#[builder(into)] label: String, take: u32, start: f64) -> impl TimelineComponent {
     // The body destructures every stored field; `label`/`take` feed only the
     // name template, so silence the body-side "unused" lint for them.
     let _ = (&label, take);
@@ -649,7 +649,7 @@ fn clock_window_surfaces_the_local_interval() {
     // A 3s window surfaces as [0, 3) over the local axis; Window's own
     // vocabulary takes over from there (remaining / envelope / phase —
     // behaviour tested in window.rs).
-    let at = |t: f32| base.with_local_window(LocalTime::new(t), Some(3.0));
+    let at = |t: f64| base.with_local_window(LocalTime::new(t), Some(3.0));
     let w = at(1.0).window().expect("windowed");
     assert_eq!(w.start(), 0.0);
     assert_eq!(w.end(), 3.0);

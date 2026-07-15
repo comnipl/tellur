@@ -33,7 +33,7 @@ pub fn Resolve(time: LocalTime, palette: Palette) -> impl VectorComponent {
     // angular sweep (`elapsed()`) to one declared `[6.35, 7.0)` interval.
     let sats_in = time.phase(5.25, 6.35).eased(Easing::InOutExpo);
     let cluster = time.window(6.35, 7.0);
-    let cluster_spin = cluster.phase().ease_out_cubic(0.0, 1.0) * cluster.elapsed() * 0.18;
+    let cluster_spin = cluster.phase().ease_out_cubic(0.0, 1.0) * (cluster.elapsed() * 0.18) as f32;
 
     VectorLayer::builder()
         .size(SCENE_SIZE)
@@ -69,7 +69,7 @@ pub fn Resolve(time: LocalTime, palette: Palette) -> impl VectorComponent {
         // to be. Three after-images spawn as the ring sweeps inward, each
         // fading slowly. Subtle texture for the contraction.
         .child(
-            [(5.55_f32, 230.0_f32), (5.85, 160.0), (6.12, 95.0)]
+            [(5.55_f64, 230.0_f32), (5.85, 160.0), (6.12, 95.0)]
                 .into_iter()
                 .filter_map(move |(start, r)| {
                     let ghost_in = time.phase(start, start + 0.08).ease_out_cubic(0.0, 1.0);
@@ -304,7 +304,8 @@ fn CentralMark(
                 // (e) a single small "scan dot" orbiting the field ring.
                 .maybe_child((orbit_in > 0.0).then(|| {
                     let orbit_period = 3.6;
-                    let orbit_a = orbit.elapsed() * (TAU / orbit_period) - PI_HALF;
+                    let orbit_a = (orbit.elapsed() * (f64::from(TAU) / orbit_period)
+                        - f64::from(PI_HALF)) as f32;
                     let orbit_pos =
                         Vec2(CX + orbit_a.cos() * field_r, CY + orbit_a.sin() * field_r);
                     let trail_count = 4_i32;

@@ -95,7 +95,7 @@ impl Event {
     }
 
     /// Phase over `[trigger + a, trigger + b]`; clamps 0 before, 1 after.
-    pub fn phase(&self, clock: &Clock<'_>, a: f32, b: f32) -> Phase {
+    pub fn phase(&self, clock: &Clock<'_>, a: f64, b: f64) -> Phase {
         let trigger = clock.trigger_of(*self).seconds();
         // `.sketch/02 §11`: an unfired (+∞) trigger must short-circuit to 0,
         // otherwise the naive `(now - ∞)/(∞ - ∞)` is `NaN`.
@@ -111,7 +111,7 @@ impl Event {
     /// `0.0`. Unlike [`Event::phase`], this keeps counting after the event, so
     /// components can run at a natural speed without choosing an end time up
     /// front.
-    pub fn elapsed(&self, clock: &Clock<'_>) -> f32 {
+    pub fn elapsed(&self, clock: &Clock<'_>) -> f64 {
         let trigger = clock.trigger_of(*self).seconds();
         if trigger.is_infinite() {
             return 0.0;
@@ -141,7 +141,7 @@ impl Event {
     /// snapshot does not depend on the current time, so it stays stable
     /// across every frame the event remains unfired, exactly like the
     /// post-close snapshot stays stable across every frame after firing.
-    pub fn window(&self, clock: &Clock<'_>, range: Range<f32>) -> Window {
+    pub fn window(&self, clock: &Clock<'_>, range: Range<f64>) -> Window {
         assert!(
             range.start.is_finite() && range.end.is_finite() && range.end > range.start,
             "Event::window requires a finite range with end > start"
@@ -198,7 +198,7 @@ enum TriggerKind {
     /// At the child's resolved end (`abs_start + len`).
     End,
     /// At a local offset into the child (`abs_start + local`).
-    At(f32),
+    At(f64),
 }
 
 impl<T> Triggered<T> {
@@ -214,15 +214,15 @@ impl<T> Triggered<T> {
 }
 
 impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Triggered<T> {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         self.child.duration()
     }
 
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         self.child.measure()
     }
 
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         let len = self.child.resolve(abs_start, out);
         // `Start` is already the absolute parent-clock start. `End` / `At` are in
         // the child's LOCAL seconds, which run faster than the global clock by any
@@ -249,21 +249,15 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
         self.child.frame(clock, canvas, target, residency, ctx)
     }
 
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        self.child.samples(clock, window)
+    fn render_audio_block(&self, block: AudioBlockMut<'_>, ctx: &mut AudioRenderContext) {
+        self.child.render_audio_block(block, ctx);
     }
 
-    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
-        // A trigger wrapper is transparent to the mix-down: contribute the
-        // child unchanged at the same offset / speed.
-        self.child.mix_into(mix, start_secs, speed);
-    }
-
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         self.child.cues(offset)
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // Transparent to the structure: build the child's node, then push this
         // trigger's resolved time onto it (mirrors `resolve`'s trigger table).
         // The child's resolved interval is `[offset, node.end]`, so its length
@@ -372,15 +366,15 @@ impl Hash for Sourced {
 }
 
 impl TimelineComponent for Sourced {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         self.inner.duration()
     }
 
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         self.inner.measure()
     }
 
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         self.inner.resolve(abs_start, out)
     }
 
@@ -395,19 +389,15 @@ impl TimelineComponent for Sourced {
         self.inner.frame(clock, canvas, target, residency, ctx)
     }
 
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        self.inner.samples(clock, window)
+    fn render_audio_block(&self, block: AudioBlockMut<'_>, ctx: &mut AudioRenderContext) {
+        self.inner.render_audio_block(block, ctx);
     }
 
-    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
-        self.inner.mix_into(mix, start_secs, speed);
-    }
-
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         self.inner.cues(offset)
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         let mut node = self.inner.arrangement(offset);
         // Only the innermost (most specific) call site stamps the node; an outer
         // wrapper leaves an already-set `source` untouched.
@@ -480,7 +470,7 @@ pub trait Triggers: TimelineComponent + Sized {
     }
 
     /// At a local offset into the clip (an interior beat).
-    fn trigger_at(self, local: f32, e: Event) -> Triggered<Self> {
+    fn trigger_at(self, local: f64, e: Event) -> Triggered<Self> {
         Triggered {
             child: self,
             event: e,
@@ -501,7 +491,7 @@ pub trait TriggersBuilder: TimelineBuilder {
         self.build_component().trigger_at_end(e)
     }
 
-    fn trigger_at(self, local: f32, e: Event) -> Triggered<Self::Output> {
+    fn trigger_at(self, local: f64, e: Event) -> Triggered<Self::Output> {
         self.build_component().trigger_at(local, e)
     }
 }
