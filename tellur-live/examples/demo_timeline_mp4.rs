@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use tellur_core::raster::{RasterImage, Resolution};
+use tellur_core::raster::{RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
@@ -46,11 +46,14 @@ impl Timeline for ResolvedAdapter {
         &self,
         t: TimelineTime,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> RasterImage {
-        self.resolved
-            .frame(t, target, ctx)
-            .unwrap_or_else(|| transparent(target))
+        let image = self
+            .resolved
+            .frame(t, target, residency, ctx)
+            .unwrap_or_else(|| transparent(target));
+        ctx.ensure_residency(image, residency)
     }
 }
 

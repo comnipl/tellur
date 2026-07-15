@@ -6,7 +6,7 @@ use std::hash::Hash;
 use crate::dyn_compare::{DynEq, DynHash};
 use crate::geometry::{Rect, Vec2};
 use crate::layer::composite_children;
-use crate::raster::{RasterComponent, RasterImage, Resolution};
+use crate::raster::{RasterComponent, RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 
 use super::*;
@@ -91,19 +91,20 @@ pub trait TimelineComponent: DynEq + DynHash {
         self.duration().unwrap_or(0.0)
     }
 
-    /// Visual channel for this frame. `clock` carries both time axes (see
-    /// [`Clock`]); `canvas` is the composition's fixed LOGICAL layout space
-    /// (resolution-independent), which the pixel `target` scales. `None` ⇒
-    /// contributes nothing visually.
+    /// Visual channel for this frame with the representation requested by its
+    /// consumer. `clock` carries both time axes (see [`Clock`]); `canvas` is
+    /// the composition's fixed LOGICAL layout space (resolution-independent),
+    /// which the pixel `target` scales. `None` ⇒ contributes nothing visually.
     fn frame(
         &self,
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // TODO(task 4): leaves/containers produce real frames.
-        let _ = (clock, canvas, target, ctx);
+        let _ = (clock, canvas, target, residency, ctx);
         None
     }
 
@@ -215,6 +216,7 @@ where
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // Route through `ctx.render` so the visual memoizes one level down
@@ -236,7 +238,7 @@ where
             size: canvas,
         };
         if self.paint_bounds(canvas) == canvas_rect {
-            return Some(ctx.render(self, canvas, target));
+            return Some(ctx.render(self, canvas, target, residency));
         }
         // A visual painting outside its layout box (a drop shadow, an
         // outline) expects its pixel `target` to span `paint_bounds`, not the
@@ -249,6 +251,7 @@ where
             canvas_rect,
             target,
             &[(Vec2::ZERO, canvas, self as &dyn RasterComponent)],
+            residency,
             ctx,
         ))
     }

@@ -3,7 +3,7 @@
 use crate::audio::AudioMix;
 use crate::composite::composite_frames_over;
 use crate::geometry::Vec2;
-use crate::raster::{RasterImage, Resolution};
+use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time};
 use crate::timeline_component::{
@@ -69,6 +69,30 @@ enum ChildView<'a> {
     PlacedAt(&'a Placed, Option<SourceLoc>),
     /// A non-placement child (a bare visual etc.) — start 0.0, its own measure.
     Bare(&'a (dyn TimelineComponent + Send)),
+}
+
+impl ChildView<'_> {
+    /// Whether this child can contribute at `t` according to the placement
+    /// gate. This is intentionally conservative for fill, bare, and custom
+    /// components: only a placement window can prove that a child is inactive
+    /// without rendering it.
+    fn may_contribute_at(&self, t: f32) -> bool {
+        match self {
+            Self::Fill(..) | Self::Bare(..) => true,
+            Self::PlacedAt(placed, _) => {
+                let placement = placed.placement();
+                match placement.end() {
+                    Some(end) => t >= placement.start() && t < end,
+                    None => match placed.child().duration() {
+                        Some(duration) => {
+                            t >= placement.start() && t < placement.start() + duration
+                        }
+                        None => true,
+                    },
+                }
+            }
+        }
+    }
 }
 
 impl TimelineComponent for Timeline {
@@ -170,6 +194,7 @@ impl TimelineComponent for Timeline {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // Overlay: every child shares the container's base, so each sees the
@@ -199,13 +224,29 @@ impl TimelineComponent for Timeline {
                 return None;
             }
         }
+        // An overlay with only one child that can contribute at this instant
+        // needs no composite operation, so preserve the consumer's requested
+        // representation and avoid a pointless upload/readback round trip.
+        // Multiple possible contributors use GPU-resident inputs when the GPU
+        // composite path is available, independently of final residency.
+        let possible_frames = self
+            .classify()
+            .filter(|view| view.may_contribute_at(local_t))
+            .take(2)
+            .count();
+        let gpu_path = possible_frames > 1 && ctx.prefers_gpu() && ctx.gpu_backend().is_some();
+        let child_residency = if gpu_path {
+            RasterResidency::Gpu
+        } else {
+            residency
+        };
         let mut frames = Vec::new();
         for child in &self.children {
-            if let Some(img) = child.frame(clock, canvas, target, ctx) {
+            if let Some(img) = child.frame(clock, canvas, target, child_residency, ctx) {
                 frames.push(img);
             }
         }
-        composite_frames_over(frames, target, ctx)
+        composite_frames_over(frames, target, residency, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -303,6 +344,40 @@ impl Sequence {
             .downcast_ref::<Placed>()
             .is_some_and(Placed::is_fill)
     }
+
+    /// Counts up to two children whose sequence slots can contribute at
+    /// `local_t`, mirroring the cursor walk in [`TimelineComponent::frame`].
+    /// Timeless children have no finite slot and remain possible contributors.
+    fn possible_contributors_at(&self, local_t: f32) -> usize {
+        let mut cursor = 0.0_f32;
+        let mut placed_any = false;
+        let mut count = 0usize;
+        for child in &self.children {
+            if Self::is_fill(child.as_ref()) {
+                continue;
+            }
+            if placed_any {
+                cursor += self.spacing;
+            }
+            let slot = child.measure();
+            if slot.is_some() && local_t < cursor {
+                break;
+            }
+            let active = match slot {
+                Some(len) => local_t >= cursor && local_t < cursor + len,
+                None => true,
+            };
+            if active {
+                count += 1;
+                if count == 2 {
+                    return count;
+                }
+            }
+            cursor += slot.unwrap_or(0.0);
+            placed_any = true;
+        }
+        count
+    }
 }
 
 impl TimelineComponent for Sequence {
@@ -382,6 +457,7 @@ impl TimelineComponent for Sequence {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // Re-flow the cursor exactly as `resolve` / `cues` do, then hand the
@@ -394,6 +470,14 @@ impl TimelineComponent for Sequence {
         let mut placed_any = false;
         let mut frames = Vec::new();
         let local_t = clock.local().seconds();
+        let gpu_path = self.possible_contributors_at(local_t) > 1
+            && ctx.prefers_gpu()
+            && ctx.gpu_backend().is_some();
+        let child_residency = if gpu_path {
+            RasterResidency::Gpu
+        } else {
+            residency
+        };
         for child in &self.children {
             if Self::is_fill(child.as_ref()) {
                 // `.fill()` inside a Sequence is a resolve error; a valid sampled
@@ -416,14 +500,14 @@ impl TimelineComponent for Sequence {
             };
             if active {
                 let child_clock = clock.with_local_window(LocalTime::new(local_t - cursor), slot);
-                if let Some(img) = child.frame(child_clock, canvas, target, ctx) {
+                if let Some(img) = child.frame(child_clock, canvas, target, child_residency, ctx) {
                     frames.push(img);
                 }
             }
             cursor += slot.unwrap_or(0.0);
             placed_any = true;
         }
-        composite_frames_over(frames, target, ctx)
+        composite_frames_over(frames, target, residency, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {

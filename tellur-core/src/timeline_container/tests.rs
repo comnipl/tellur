@@ -1,14 +1,19 @@
 use super::leaves::STUB_PROBE_SECONDS;
 use super::*;
+use crate::color::Color;
 use crate::geometry::{Constraints, Vec2};
 use crate::raster::{
-    CpuRasterImage, GpuSurface, PixelFormat, RasterComponent, RasterImage, Resolution,
+    CpuRasterImage, GpuSurface, PixelFormat, RasterComponent, RasterImage, RasterResidency,
+    Resolution,
 };
-use crate::render_context::RenderContext;
+use crate::render_context::{
+    CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput, RenderContext,
+};
 use crate::timeline_component::{
     resolve, Arrangement, NodeKind, ResolveCtx, ResolveError, Timed, TimedBuilder,
     TimelineComponent,
 };
+use crate::vector::VectorGraphic;
 
 // A trivial timeless visual (a stand-in "Caption") reaching the timeline
 // world through the one-way `RasterComponent` blanket.
@@ -19,7 +24,13 @@ impl RasterComponent for Caption {
     fn layout(&self, _c: Constraints) -> Vec2 {
         Vec2(1.0, 1.0)
     }
-    fn render(&self, _s: Vec2, _t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        _s: Vec2,
+        _t: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0u8; 4])
     }
 }
@@ -409,7 +420,13 @@ impl RasterComponent for SolidColor {
     fn layout(&self, _c: Constraints) -> Vec2 {
         Vec2(1.0, 1.0)
     }
-    fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        _s: Vec2,
+        t: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let count = (t.width as usize) * (t.height as usize);
         let mut pixels = Vec::with_capacity(count * 4);
         for _ in 0..count {
@@ -455,7 +472,12 @@ fn timeline_overlays_two_solids_source_over() {
 
     let mut ctx = crate::render_context::PassThrough;
     let frame = resolved
-        .frame(TimelineTime::new(0.5), Resolution::new(4, 4), &mut ctx)
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(4, 4),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("two visible solids contribute a frame");
 
     // Source-over of green(a=128) over opaque red:
@@ -490,14 +512,24 @@ fn placed_at_rebases_local_clock_to_zero_at_its_start() {
     let mut ctx = crate::render_context::PassThrough;
     // At global 2.0, the placed child's local is 0 → red channel 0.
     let f0 = resolved
-        .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("contributes");
     assert_eq!(first_pixel(&f0)[0], 0, "local ≈ 0 at its start");
 
     // `.at(2.0..5.0)` over a timeless child has speed 1.0, so at an INTERIOR
     // global 4.0 the child's local is ≈ 2.0 → red channel 2.
     let f2 = resolved
-        .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(4.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("contributes");
     assert_eq!(first_pixel(&f2)[0], 2, "local advances 1:1 with global");
 
@@ -505,7 +537,12 @@ fn placed_at_rebases_local_clock_to_zero_at_its_start() {
     // gated OFF and contributes no frame.
     assert!(
         resolved
-            .frame(TimelineTime::new(5.0), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(5.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "the exclusive window end contributes nothing",
     );
@@ -522,25 +559,45 @@ fn placed_frame_gates_outside_its_window() {
 
     assert!(
         resolved
-            .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(0.5),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "before the window: nothing",
     );
     assert!(
         resolved
-            .frame(TimelineTime::new(1.5), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(1.5),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_some(),
         "inside the window: contributes",
     );
     assert!(
         resolved
-            .frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(3.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "exclusive end (half-open): nothing",
     );
     assert!(
         resolved
-            .frame(TimelineTime::new(3.5), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(3.5),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "past the window: nothing",
     );
@@ -572,19 +629,34 @@ fn timeline_caps_fill_child_at_container_length() {
 
     assert!(
         resolved
-            .frame(TimelineTime::new(1.0), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(1.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_some(),
         "inside [0,2): the fill renders",
     );
     assert!(
         resolved
-            .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(2.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "exclusive container end: hard cut (even for a fill)",
     );
     assert!(
         resolved
-            .frame(TimelineTime::new(2.5), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(2.5),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "past the container length: nothing",
     );
@@ -603,18 +675,33 @@ fn sequence_gates_each_child_to_its_slot() {
 
     assert!(
         resolved
-            .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(0.5),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_some(),
         "slot 1 active at 0.5",
     );
     // Slot 2 active at global 3.0 → local rebased to 1.0 → red round(1.0)=1.
     let f = resolved
-        .frame(TimelineTime::new(3.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(3.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("slot 2 active");
     assert_eq!(first_pixel(&f)[0], 1, "slot 2 local = 3.0 - 2.0 = 1.0");
     assert!(
         resolved
-            .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
+            .frame(
+                TimelineTime::new(4.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .is_none(),
         "past both slots: nothing",
     );
@@ -633,6 +720,7 @@ impl TimelineComponent for GpuFrame {
         _clock: Clock<'_>,
         _canvas: Vec2,
         target: Resolution,
+        _residency: RasterResidency,
         _ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         Some(RasterImage::Gpu(GpuSurface::new(
@@ -674,8 +762,10 @@ impl RenderContext for CountingReadbackContext {
         component: &dyn RasterComponent,
         size: Vec2,
         target: Resolution,
+        residency: RasterResidency,
     ) -> RasterImage {
-        component.render(size, target, self)
+        let image = component.render(size, target, residency, self);
+        self.ensure_residency(image, residency)
     }
 
     fn readback(&mut self, image: RasterImage) -> CpuRasterImage {
@@ -708,7 +798,12 @@ fn sequence_single_active_frame_preserves_gpu_image() {
     let mut ctx = CountingReadbackContext::default();
 
     let frame = resolved
-        .frame(TimelineTime::new(0.5), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Gpu,
+            &mut ctx,
+        )
         .expect("active slot contributes");
 
     assert_eq!(ctx.readbacks, 0, "single active slot should not read back");
@@ -716,6 +811,192 @@ fn sequence_single_active_frame_preserves_gpu_image() {
         matches!(frame, RasterImage::Gpu(_)),
         "sequence should preserve a target-sized GPU frame"
     );
+}
+
+#[test]
+fn resolved_frame_honors_cpu_residency() {
+    let seq = Sequence::builder()
+        .child(Box::new(GpuFrame) as Box<dyn TimelineComponent + Send>)
+        .build();
+    let resolved = resolve_root(seq).expect("windowed, not timeless");
+    let mut ctx = CountingReadbackContext::default();
+
+    let frame = resolved
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("active slot contributes");
+
+    assert_eq!(ctx.readbacks, 1);
+    assert!(matches!(frame, RasterImage::Cpu(_)));
+}
+
+#[derive(Default)]
+struct NoopGpu;
+
+impl GpuRasterBackend for NoopGpu {
+    fn composite(
+        &mut self,
+        _target: Resolution,
+        _inputs: &[CompositeInput<'_>],
+    ) -> Option<RasterImage> {
+        None
+    }
+
+    fn drop_shadow(&mut self, _input: DropShadowInput<'_>) -> Option<RasterImage> {
+        None
+    }
+
+    fn outline(&mut self, _input: OutlineInput<'_>) -> Option<RasterImage> {
+        None
+    }
+
+    fn rasterize(&mut self, _graphic: &VectorGraphic, _target: Resolution) -> Option<RasterImage> {
+        None
+    }
+
+    fn solid_fill(&mut self, _target: Resolution, _color: Color) -> Option<RasterImage> {
+        None
+    }
+
+    fn temporal_average(
+        &mut self,
+        _target: Resolution,
+        _frames: &[&RasterImage],
+        _total: u32,
+    ) -> Option<RasterImage> {
+        None
+    }
+
+    fn readback(&mut self, _image: RasterImage) -> Option<CpuRasterImage> {
+        None
+    }
+}
+
+#[derive(Default)]
+struct ResidencyRecordingContext {
+    gpu: NoopGpu,
+    requests: Vec<RasterResidency>,
+}
+
+impl RenderContext for ResidencyRecordingContext {
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn gpu_preference(&self) -> GpuPreference {
+        GpuPreference::PreferGpu
+    }
+
+    fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
+        Some(&mut self.gpu)
+    }
+
+    fn render(
+        &mut self,
+        component: &dyn RasterComponent,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+    ) -> RasterImage {
+        self.requests.push(residency);
+        let image = component.render(size, target, residency, self);
+        self.ensure_residency(image, residency)
+    }
+}
+
+#[test]
+fn timeline_gpu_execution_requests_gpu_raster_variant_for_cpu_output() {
+    let timeline = Timeline::builder()
+        .child(Caption.at(0.0..1.0))
+        .child(Caption.at(0.0..1.0))
+        .build();
+    let resolved = resolve_root(timeline).expect("windowed, not timeless");
+    let mut ctx = ResidencyRecordingContext::default();
+
+    let frame = resolved
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("active child contributes");
+
+    assert_eq!(
+        ctx.requests,
+        vec![RasterResidency::Gpu, RasterResidency::Gpu]
+    );
+    assert!(matches!(frame, RasterImage::Cpu(_)));
+}
+
+#[test]
+fn single_child_timeline_forwards_final_residency_without_gpu_round_trip() {
+    let timeline = Timeline::builder().child(Caption.at(0.0..1.0)).build();
+    let resolved = resolve_root(timeline).expect("windowed, not timeless");
+    let mut ctx = ResidencyRecordingContext::default();
+
+    let frame = resolved
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("active child contributes");
+
+    assert_eq!(ctx.requests, vec![RasterResidency::Cpu]);
+    assert!(matches!(frame, RasterImage::Cpu(_)));
+}
+
+#[test]
+fn disjoint_timeline_forwards_final_residency_for_sole_active_child() {
+    let timeline = Timeline::builder()
+        .child(Caption.at(0.0..1.0))
+        .child(Caption.at(1.0..2.0))
+        .build();
+    let resolved = resolve_root(timeline).expect("windowed, not timeless");
+    let mut ctx = ResidencyRecordingContext::default();
+
+    let frame = resolved
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("sole active child contributes");
+
+    assert_eq!(ctx.requests, vec![RasterResidency::Cpu]);
+    assert!(matches!(frame, RasterImage::Cpu(_)));
+}
+
+#[test]
+fn sequence_requests_gpu_variants_when_multiple_children_can_contribute() {
+    let sequence = Sequence::builder()
+        .child(Box::new(Caption) as Box<dyn TimelineComponent + Send>)
+        .child(Caption.at(0.0..1.0))
+        .build();
+    let resolved = resolve_root(sequence).expect("finite child determines the sequence length");
+    let mut ctx = ResidencyRecordingContext::default();
+
+    let frame = resolved
+        .frame(
+            TimelineTime::new(0.5),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("timeless and finite children contribute");
+
+    assert_eq!(
+        ctx.requests,
+        vec![RasterResidency::Gpu, RasterResidency::Gpu]
+    );
+    assert!(matches!(frame, RasterImage::Cpu(_)));
 }
 
 // Records the clock window it is sampled with (post-stretch local seconds),
@@ -744,6 +1025,7 @@ impl TimelineComponent for WindowProbe {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        _residency: RasterResidency,
         _ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let _ = canvas;
@@ -784,7 +1066,12 @@ fn placed_surfaces_post_stretch_window_to_the_clock() {
     };
     let resolved = resolve_root(leaf.at(0.0..1.0)).expect("windowed, not timeless");
     let mut ctx = crate::render_context::PassThrough;
-    resolved.frame(TimelineTime::new(0.5), Resolution::new(1, 1), &mut ctx);
+    resolved.frame(
+        TimelineTime::new(0.5),
+        Resolution::new(1, 1),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
     assert_eq!(
         *log.lock().unwrap().last().expect("sampled"),
         Some(2.0),
@@ -807,7 +1094,12 @@ fn sequence_rebases_second_child_local_clock() {
     let mut ctx = crate::render_context::PassThrough;
     // At global 2.0 the second child's local is ≈ 0 → red 0.
     let f = resolved
-        .frame(TimelineTime::new(2.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("contributes");
     assert_eq!(
         first_pixel(&f)[0],
@@ -817,7 +1109,12 @@ fn sequence_rebases_second_child_local_clock() {
 
     // At global 4.0 the second child's local is ≈ 2.0 → red 2.
     let f2 = resolved
-        .frame(TimelineTime::new(4.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(4.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("contributes");
     assert_eq!(first_pixel(&f2)[0], 2, "local tracks the cursor offset");
 }
@@ -855,6 +1152,7 @@ impl TimelineComponent for RecordingLeaf {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        _residency: RasterResidency,
         _ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let _ = canvas;
@@ -898,7 +1196,12 @@ fn placement_window_stretch_reaches_the_leaf() {
 
     let mut ctx = crate::render_context::PassThrough;
     // At global 0.5 the leaf should be sampled at source-local ≈ 1.0.
-    resolved.frame(TimelineTime::new(0.5), Resolution::new(1, 1), &mut ctx);
+    resolved.frame(
+        TimelineTime::new(0.5),
+        Resolution::new(1, 1),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
     let recorded = *log.lock().unwrap().last().expect("leaf was sampled");
     assert!(
         (recorded - 1.0).abs() < 1e-5,
@@ -906,7 +1209,12 @@ fn placement_window_stretch_reaches_the_leaf() {
     );
 
     // And at global 0.25 → source-local ≈ 0.5.
-    resolved.frame(TimelineTime::new(0.25), Resolution::new(1, 1), &mut ctx);
+    resolved.frame(
+        TimelineTime::new(0.25),
+        Resolution::new(1, 1),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
     let recorded = *log.lock().unwrap().last().expect("leaf was sampled");
     assert!(
         (recorded - 0.5).abs() < 1e-5,
@@ -929,14 +1237,26 @@ fn timeless_visual_frame_routes_through_ctx_render() {
         rgba: [10, 20, 30, 255],
     };
     let f = solid
-        .frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            clock,
+            Vec2(2.0, 2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("renders");
     assert_eq!(first_pixel(&f), [10, 20, 30, 255]);
 
     // A timeline component whose body builds a timeless visual.
     let probe = LocalProbe::builder().build();
     let f = probe
-        .frame(clock, Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            clock,
+            Vec2(2.0, 2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("renders");
     assert_eq!(first_pixel(&f)[0], 0, "local 0 → red 0");
 }
@@ -1408,7 +1728,7 @@ fn videofile_decodes_plausible_frames() {
 
     for &t in &[0.0_f32, 0.1, 0.2, 1.0] {
         let frame = resolved
-            .frame(TimelineTime::new(t), target, &mut ctx)
+            .frame(TimelineTime::new(t), target, RasterResidency::Cpu, &mut ctx)
             .unwrap_or_else(|| panic!("decoded a frame at t={t}"));
         assert_eq!(frame.width(), 64, "scaled to target width");
         assert_eq!(frame.height(), 48, "scaled to target height");
@@ -1417,7 +1737,12 @@ fn videofile_decodes_plausible_frames() {
 
     // A backward scrub (t=0.0 after t=1.0) re-seeks and still decodes.
     let back = resolved
-        .frame(TimelineTime::new(0.0), target, &mut ctx)
+        .frame(
+            TimelineTime::new(0.0),
+            target,
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("backward scrub decodes");
     assert!(
         frame_has_color(&back),

@@ -18,7 +18,7 @@ use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::{PassThrough, RenderContext};
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time, TimelineTime};
@@ -62,7 +62,7 @@ fn bench(
         // Pull the image into a local so the optimizer can't elide the
         // render — `bytes::Bytes` clone is cheap so this doesn't skew
         // the comparison.
-        let _image = tl.build(t, resolution, ctx);
+        let _image = tl.build(t, resolution, RasterResidency::Cpu, ctx);
     }
     let elapsed = start.elapsed();
     let per_frame_ms = elapsed.as_secs_f64() * 1000.0 / total_frames as f64;
@@ -81,7 +81,7 @@ fn main() {
     let duration = 5.0f32;
     let total_frames = (duration * fps as f32).ceil() as u64;
 
-    let tl = timeline(duration, move |t, target, ctx| {
+    let tl = timeline(duration, move |t, target, residency, ctx| {
         DecoratedBox::builder()
             .background(Color::rgb_u8(20, 20, 30))
             .child(
@@ -97,7 +97,7 @@ fn main() {
                 ),
             )
             .build()
-            .render(scene_size, target, ctx)
+            .render(scene_size, target, residency, ctx)
     });
 
     println!(

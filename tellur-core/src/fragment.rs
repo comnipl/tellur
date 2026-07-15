@@ -75,7 +75,7 @@ impl VectorComponent for Fragment {
 pub mod raster {
     use crate::geometry::{Constraints, Rect, Vec2};
     use crate::layer::{composite_children, raster_children_bounds};
-    use crate::raster::{RasterComponent, RasterImage, Resolution};
+    use crate::raster::{RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::RenderContext;
 
     /// A transparent group of [`RasterComponent`] children. Empty = nothing.
@@ -121,6 +121,7 @@ pub mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let paint_rect = raster_children_bounds(&self.children);
@@ -133,7 +134,7 @@ pub mod raster {
                     (Vec2::ZERO, child_size, child.as_ref())
                 })
                 .collect();
-            composite_children(paint_rect, target, &placed, ctx)
+            composite_children(paint_rect, target, &placed, residency, ctx)
         }
     }
 }

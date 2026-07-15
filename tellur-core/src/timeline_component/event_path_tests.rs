@@ -10,7 +10,7 @@
 use super::*;
 use crate::geometry::{Constraints, Vec2};
 use crate::phase::Phase;
-use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
 use crate::render_context::{PassThrough, RenderContext};
 use crate::time::{LocalTime, Time, TimelineTime};
 use crate::timeline_container::{AudioFile, Sequence, Timeline};
@@ -39,7 +39,13 @@ impl RasterComponent for OpacityProbe {
     fn layout(&self, _c: Constraints) -> Vec2 {
         Vec2(1.0, 1.0)
     }
-    fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        _s: Vec2,
+        t: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let count = (t.width as usize) * (t.height as usize);
         // Opaque-white RGB so a source-over composite leaves the alpha
         // recoverable; the alpha channel carries the baked opacity.
@@ -105,7 +111,12 @@ fn build_piece(reveal: Event, line1: f32, line2: f32, line3: f32) -> impl Timeli
 fn alpha_at(resolved: &ResolvedTimeline, t: f32) -> u8 {
     let mut ctx = PassThrough;
     let frame = resolved
-        .frame(TimelineTime::new(t), Resolution::new(2, 2), &mut ctx)
+        .frame(
+            TimelineTime::new(t),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
         .expect("the reveal always contributes a frame");
     frame.as_cpu().expect("cpu image").pixels[3]
 }

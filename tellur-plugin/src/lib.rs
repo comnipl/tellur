@@ -14,7 +14,7 @@
 use std::hash::{Hash, Hasher};
 
 use tellur_core::geometry::Vec2;
-use tellur_core::raster::{RasterImage, Resolution};
+use tellur_core::raster::{RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
@@ -49,7 +49,14 @@ pub use tellur_core as __core;
 /// Bumped to `v4` for live-preview audio windows: `TimelineCollection` gained
 /// `render_audio_window`, so stale `v3` plugins must fail at `dlsym` instead of
 /// landing on the wrong vtable slot.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v4\0";
+///
+/// Bumped to `v5` for consumer-demanded raster residency:
+/// `RenderContext::render` gained a residency argument and the trait gained
+/// `ensure_residency`, `GpuRasterBackend` gained `upload`, and
+/// `TimelineComponent::frame` and `TimelineCollection::build` gained residency
+/// arguments. Stale `v4` plugins must fail before calling through any changed
+/// trait object.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v5\0";
 
 pub mod abi;
 pub use abi::{
@@ -89,11 +96,13 @@ pub struct TimelineInfo {
 pub trait TimelineCollection: Send {
     fn timelines(&self) -> Vec<TimelineInfo>;
 
+    /// Builds a frame with the representation requested by its consumer.
     fn build(
         &self,
         id: &str,
         t: TimelineTime,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage>;
 
@@ -139,8 +148,8 @@ pub trait TimelineCollection: Send {
 /// as a [`Result`]: resolving probes media and can fail, but the entry fn
 /// cannot return a `Result` across the dylib boundary and panicking there is
 /// UB-adjacent (audit M5). So the error is stored and surfaced per query —
-/// `build` yields `None`, `timelines` carries the error string, `arrangement`
-/// yields `None`.
+/// frame builds yield `None`, `timelines` carries the error string, and
+/// `arrangement` yields `None`.
 pub struct SingleTimeline {
     id: &'static str,
     title: &'static str,
@@ -202,12 +211,13 @@ impl TimelineCollection for SingleTimeline {
         id: &str,
         t: TimelineTime,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         if id != self.id {
             return None;
         }
-        self.resolved()?.frame(t, target, ctx)
+        self.resolved()?.frame(t, target, residency, ctx)
     }
 
     fn arrangement(&self, id: &str) -> Option<Arrangement> {
@@ -298,12 +308,13 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // The legacy closure handles its own SCENE_SIZE internally; the logical
         // `canvas` is not threaded into it.
         let _ = canvas;
-        Some(self.timeline.build(clock.global(), target, ctx))
+        Some(self.timeline.build(clock.global(), target, residency, ctx))
     }
 
     fn arrangement(&self, offset: f32) -> Arrangement {
@@ -334,7 +345,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v4(
+        pub extern "Rust" fn tellur_timeline_collection_v5(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
@@ -342,7 +353,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v4(
+        pub extern "Rust" fn tellur_timeline_collection_v5(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -367,7 +378,7 @@ macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v4(
+        pub extern "Rust" fn tellur_timeline_collection_v5(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -384,7 +395,7 @@ macro_rules! export_timeline_collection {
     ($builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v4(
+        pub extern "Rust" fn tellur_timeline_collection_v5(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
@@ -394,8 +405,11 @@ macro_rules! export_timeline_collection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
     use tellur_core::geometry::{Constraints, Vec2};
-    use tellur_core::raster::{PixelFormat, RasterComponent};
+    use tellur_core::raster::{PixelFormat, RasterComponent, RasterResidency};
+    use tellur_core::render_context::PassThrough;
     use tellur_core::timeline_component::Timed;
     use tellur_core::timeline_container::Timeline as TimelineContainer;
 
@@ -410,7 +424,13 @@ mod tests {
             Vec2(1.0, 1.0)
         }
 
-        fn render(&self, _s: Vec2, _t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            _s: Vec2,
+            _t: Resolution,
+            _residency: RasterResidency,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0u8, 0, 0, 0])
         }
     }
@@ -422,6 +442,69 @@ mod tests {
             .child(Dot.at(0.0..2.0))
             .child(Dot.at(0.0..3.0))
             .build()
+    }
+
+    static LAST_COLLECTION_RESIDENCY: AtomicU8 = AtomicU8::new(0);
+
+    #[derive(PartialEq, Hash)]
+    struct ResidencyTimeline;
+
+    impl TimelineComponent for ResidencyTimeline {
+        fn duration(&self) -> Option<f32> {
+            Some(1.0)
+        }
+
+        fn frame(
+            &self,
+            _clock: Clock<'_>,
+            _canvas: Vec2,
+            _target: Resolution,
+            residency: RasterResidency,
+            _ctx: &mut dyn RenderContext,
+        ) -> Option<RasterImage> {
+            let value = match residency {
+                RasterResidency::Cpu => 1,
+                RasterResidency::Gpu => 2,
+            };
+            LAST_COLLECTION_RESIDENCY.store(value, Ordering::Relaxed);
+            Some(RasterImage::cpu(
+                1,
+                1,
+                PixelFormat::Rgba8,
+                vec![0u8, 0, 0, 0],
+            ))
+        }
+
+        fn arrangement(&self, offset: f32) -> Arrangement {
+            Arrangement {
+                kind: NodeKind::Video,
+                label: String::new(),
+                name: None,
+                source: None,
+                start: offset,
+                end: offset + 1.0,
+                trim: None,
+                triggers: Vec::new(),
+                children: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn single_timeline_forwards_residency() {
+        let collection = single_timeline("main", "Main", ResidencyTimeline);
+        let mut ctx = PassThrough;
+        let target = Resolution::new(1, 1);
+
+        LAST_COLLECTION_RESIDENCY.store(0, Ordering::Relaxed);
+        let _ = collection.build(
+            "main",
+            TimelineTime::new(0.0),
+            target,
+            RasterResidency::Gpu,
+            &mut ctx,
+        );
+        assert_eq!(LAST_COLLECTION_RESIDENCY.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -468,7 +551,7 @@ mod tests {
         // Video-kind node spanning its whole duration.
         let legacy = LegacyTimeline::new(tellur_core::timeline::timeline(
             4.0,
-            |_t, target: Resolution, _ctx| {
+            |_t, target: Resolution, _residency, _ctx| {
                 RasterImage::cpu(
                     target.width,
                     target.height,

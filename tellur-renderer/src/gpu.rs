@@ -1,17 +1,10 @@
 use std::borrow::Cow;
-use std::hash::{BuildHasher, Hash};
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use lru::LruCache;
-use tellur_core::cache_budget::{
-    configured_vram_bytes, try_reserve_vram, vram_used_bytes, BudgetReservation,
-};
+use tellur_core::cache_budget::{try_reserve_vram, BudgetReservation};
 use tellur_core::color::Color;
 use tellur_core::geometry::{Transform, Vec2};
-use tellur_core::raster::{
-    CpuRasterImage, GpuSurface, PixelFormat, PixelStorageId, RasterImage, Resolution,
-};
+use tellur_core::raster::{CpuRasterImage, GpuSurface, PixelFormat, RasterImage, Resolution};
 use tellur_core::render_context::{
     CompositeInput, DropShadowInput, GpuRasterBackend, OutlineInput,
 };
@@ -24,14 +17,6 @@ use wgpu::util::DeviceExt;
 
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
 const WORKGROUP: u32 = 16;
-const CPU_UPLOAD_CACHE_ENTRIES: usize = 64;
-const CPU_UPLOAD_CACHE_INITIAL_FRACTION_DIVISOR: usize = 8;
-const CPU_UPLOAD_CACHE_MAX_FRACTION_DIVISOR: usize = 4;
-const GPU_CACHE_SHRINK_NUMERATOR: usize = 3;
-const GPU_CACHE_SHRINK_DENOMINATOR: usize = 4;
-const GPU_CACHE_GROW_SUCCESS_STREAK: u8 = 64;
-const GPU_CACHE_GROW_FRACTION_DIVISOR: usize = 64;
-const MIB: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuAdapterInfo {
@@ -91,11 +76,6 @@ pub struct GpuRenderer {
     // their size has to match (recreated when the resolution changes).
     vello_target: Option<(u32, u32, wgpu::Texture, BudgetReservation)>,
     readback_staging: Option<(wgpu::Buffer, BudgetReservation)>,
-    cpu_upload_cache: LruCache<CpuUploadCacheKey, Arc<GpuBufferImage>>,
-    cpu_upload_cache_bytes: usize,
-    cpu_upload_cache_cap_bytes: usize,
-    cpu_upload_cache_max_bytes: usize,
-    vram_spare_successes: u8,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -108,11 +88,6 @@ pub struct GpuRenderStats {
     pub temporal_averages: u64,
     pub readbacks: u64,
     pub vram_reserve_failures: u64,
-    pub vram_cache_evictions: u64,
-    pub upload_cache_entries: usize,
-    pub upload_cache_bytes: usize,
-    pub upload_cache_cap_bytes: usize,
-    pub upload_cache_max_bytes: usize,
 }
 
 impl GpuRenderStats {
@@ -135,65 +110,11 @@ struct GpuBufferImage {
     _reservation: BudgetReservation,
 }
 
-// Keyed on `PixelStorageId` rather than `pixels.as_ptr()`: the cached
-// `GpuBufferImage` doesn't hold the source `Bytes`, so once the source
-// drops, the allocator can hand its address to an unrelated same-sized
-// image. A raw-pointer key would then collide with the stale entry (ABA)
-// and `upload` would return the wrong GPU buffer; the storage id is never
-// reused, so that collision can't happen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CpuUploadCacheKey {
-    width: u32,
-    height: u32,
-    format: PixelFormat,
-    id: PixelStorageId,
-}
-
-impl CpuUploadCacheKey {
-    fn new(image: &CpuRasterImage) -> Self {
-        Self {
-            width: image.width,
-            height: image.height,
-            format: image.format,
-            id: image.storage_id(),
-        }
-    }
-}
-
-fn upload_cache_limits() -> (usize, usize) {
-    let limit = configured_vram_bytes();
-    let max = limit / CPU_UPLOAD_CACHE_MAX_FRACTION_DIVISOR;
-    let cap = (limit / CPU_UPLOAD_CACHE_INITIAL_FRACTION_DIVISOR).min(max);
-    (cap, max)
-}
-
 fn pixel_stride(format: PixelFormat) -> usize {
     match format {
         PixelFormat::Rgba8 => 4,
         PixelFormat::Rgba16Float => 8,
     }
-}
-
-fn push_lru_accounted<K, V, S, F>(
-    cache: &mut LruCache<K, V, S>,
-    current_bytes: &mut usize,
-    key: K,
-    value: V,
-    value_bytes: usize,
-    old_bytes: F,
-) -> bool
-where
-    K: Hash + Eq,
-    S: BuildHasher,
-    F: FnOnce(&V) -> usize,
-{
-    let evicted = cache.push(key, value);
-    let had_eviction = evicted.is_some();
-    if let Some((_, old)) = evicted {
-        *current_bytes = current_bytes.saturating_sub(old_bytes(&old));
-    }
-    *current_bytes = current_bytes.saturating_add(value_bytes);
-    had_eviction
 }
 
 #[repr(C)]
@@ -324,8 +245,6 @@ impl GpuRenderer {
             )
             .await
             .map_err(|e| format!("failed to create GPU device: {e}"))?;
-        let (cpu_upload_cache_cap_bytes, cpu_upload_cache_max_bytes) = upload_cache_limits();
-
         Ok(Self {
             composite_pipeline: compute_pipeline(
                 &device,
@@ -366,24 +285,11 @@ impl GpuRenderer {
             stats: GpuRenderStats::default(),
             vello_target: None,
             readback_staging: None,
-            cpu_upload_cache: LruCache::new(
-                NonZeroUsize::new(CPU_UPLOAD_CACHE_ENTRIES)
-                    .expect("CPU upload cache capacity must be non-zero"),
-            ),
-            cpu_upload_cache_bytes: 0,
-            cpu_upload_cache_cap_bytes,
-            cpu_upload_cache_max_bytes,
-            vram_spare_successes: 0,
         })
     }
 
     pub fn stats(&self) -> GpuRenderStats {
-        let mut stats = self.stats;
-        stats.upload_cache_entries = self.cpu_upload_cache.len();
-        stats.upload_cache_bytes = self.cpu_upload_cache_bytes;
-        stats.upload_cache_cap_bytes = self.cpu_upload_cache_cap_bytes;
-        stats.upload_cache_max_bytes = self.cpu_upload_cache_max_bytes;
-        stats
+        self.stats
     }
 
     /// Drops reusable GPU allocations so a later required allocation, usually
@@ -392,104 +298,16 @@ impl GpuRenderer {
     pub fn release_cached_resources(&mut self) {
         self.vello_target = None;
         self.readback_staging = None;
-        self.clear_upload_cache();
     }
 
     fn reserve_render_vram(&mut self, bytes: usize) -> Option<BudgetReservation> {
-        if let Some(reservation) = try_reserve_vram(bytes) {
-            self.note_vram_reserve_success();
-            return Some(reservation);
-        }
-
-        self.stats.vram_reserve_failures = self.stats.vram_reserve_failures.saturating_add(1);
-        self.shrink_upload_cache_budget();
-        if let Some(reservation) = try_reserve_vram(bytes) {
-            self.note_vram_reserve_success();
-            return Some(reservation);
-        }
-
-        self.cpu_upload_cache_cap_bytes = 0;
-        self.clear_upload_cache();
-        let reservation = try_reserve_vram(bytes)?;
-        self.note_vram_reserve_success();
-        Some(reservation)
-    }
-
-    fn note_vram_reserve_success(&mut self) {
-        let limit = configured_vram_bytes();
-        let used = vram_used_bytes();
-        if self.cpu_upload_cache_cap_bytes >= self.cpu_upload_cache_max_bytes
-            || used.saturating_mul(4) >= limit.saturating_mul(3)
-        {
-            self.vram_spare_successes = 0;
-            return;
-        }
-
-        self.vram_spare_successes = self.vram_spare_successes.saturating_add(1);
-        if self.vram_spare_successes >= GPU_CACHE_GROW_SUCCESS_STREAK {
-            let step = (limit / GPU_CACHE_GROW_FRACTION_DIVISOR).max(MIB);
-            self.cpu_upload_cache_cap_bytes = self
-                .cpu_upload_cache_cap_bytes
-                .saturating_add(step)
-                .min(self.cpu_upload_cache_max_bytes);
-            self.vram_spare_successes = 0;
-        }
-    }
-
-    fn shrink_upload_cache_budget(&mut self) {
-        self.vram_spare_successes = 0;
-        let old = self.cpu_upload_cache_cap_bytes;
-        self.cpu_upload_cache_cap_bytes =
-            old.saturating_mul(GPU_CACHE_SHRINK_NUMERATOR) / GPU_CACHE_SHRINK_DENOMINATOR;
-        if old > 0 && self.cpu_upload_cache_cap_bytes == old {
-            self.cpu_upload_cache_cap_bytes = old - 1;
-        }
-        self.evict_upload_cache_to_fit(0);
-    }
-
-    fn evict_upload_cache_to_fit(&mut self, needed: usize) {
-        while self.cpu_upload_cache_bytes.saturating_add(needed) > self.cpu_upload_cache_cap_bytes {
-            match self.cpu_upload_cache.pop_lru() {
-                Some((_, image)) => {
-                    self.cpu_upload_cache_bytes = self
-                        .cpu_upload_cache_bytes
-                        .saturating_sub(Self::buffer_image_bytes(&image));
-                    self.stats.vram_cache_evictions =
-                        self.stats.vram_cache_evictions.saturating_add(1);
-                }
-                None => {
-                    self.cpu_upload_cache_bytes = 0;
-                    break;
-                }
+        match try_reserve_vram(bytes) {
+            Some(reservation) => Some(reservation),
+            None => {
+                self.stats.vram_reserve_failures =
+                    self.stats.vram_reserve_failures.saturating_add(1);
+                None
             }
-        }
-    }
-
-    fn clear_upload_cache(&mut self) {
-        let evicted = self.cpu_upload_cache.len() as u64;
-        self.cpu_upload_cache.clear();
-        self.cpu_upload_cache_bytes = 0;
-        self.stats.vram_cache_evictions = self.stats.vram_cache_evictions.saturating_add(evicted);
-    }
-
-    fn insert_upload_cache(&mut self, key: CpuUploadCacheKey, image: Arc<GpuBufferImage>) {
-        let bytes = Self::buffer_image_bytes(&image);
-        if bytes > self.cpu_upload_cache_cap_bytes {
-            return;
-        }
-        self.evict_upload_cache_to_fit(bytes);
-        if self.cpu_upload_cache_bytes.saturating_add(bytes) > self.cpu_upload_cache_cap_bytes {
-            return;
-        }
-        if push_lru_accounted(
-            &mut self.cpu_upload_cache,
-            &mut self.cpu_upload_cache_bytes,
-            key,
-            image,
-            bytes,
-            |image| Self::buffer_image_bytes(image.as_ref()),
-        ) {
-            self.stats.vram_cache_evictions = self.stats.vram_cache_evictions.saturating_add(1);
         }
     }
 
@@ -499,13 +317,9 @@ impl GpuRenderer {
             .saturating_mul(pixel_stride(image.format))
     }
 
-    fn upload(&mut self, image: &CpuRasterImage) -> Option<Arc<GpuBufferImage>> {
+    fn upload_buffer(&mut self, image: &CpuRasterImage) -> Option<Arc<GpuBufferImage>> {
         if image.format != PixelFormat::Rgba8 {
             return None;
-        }
-        let key = CpuUploadCacheKey::new(image);
-        if let Some(cached) = self.cpu_upload_cache.get(&key) {
-            return Some(Arc::clone(cached));
         }
         let reservation = self.reserve_render_vram(image.pixels.len())?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -517,25 +331,22 @@ impl GpuRenderer {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, &image.pixels);
-        let uploaded = Arc::new(GpuBufferImage {
+        Some(Arc::new(GpuBufferImage {
             width: image.width,
             height: image.height,
             format: image.format,
             known_opaque: false,
             buffer,
             _reservation: reservation,
-        });
-        self.insert_upload_cache(key, Arc::clone(&uploaded));
-        Some(uploaded)
+        }))
     }
 
-    fn image_ref(&mut self, image: &RasterImage) -> Option<Arc<GpuBufferImage>> {
+    fn image_ref(&self, image: &RasterImage) -> Option<Arc<GpuBufferImage>> {
         match image {
-            RasterImage::Cpu(image) => self.upload(image),
             RasterImage::Gpu(surface) if surface.backend() == BACKEND => {
                 Arc::downcast::<GpuBufferImage>(surface.handle_arc()).ok()
             }
-            RasterImage::Gpu(_) => None,
+            RasterImage::Cpu(_) | RasterImage::Gpu(_) => None,
         }
     }
 
@@ -964,6 +775,11 @@ impl GpuRenderer {
 }
 
 impl GpuRasterBackend for GpuRenderer {
+    fn upload(&mut self, image: &CpuRasterImage) -> Option<RasterImage> {
+        let image = self.upload_buffer(image)?;
+        Some(self.raster_image(image))
+    }
+
     fn composite(
         &mut self,
         target: Resolution,
@@ -1272,7 +1088,7 @@ fn create_vello_renderer(device: &wgpu::Device) -> Option<vello::Renderer> {
             surface_format: None,
             use_cpu: false,
             antialiasing_support: vello::AaSupport::all(),
-            num_init_threads: NonZeroUsize::new(1),
+            num_init_threads: std::num::NonZeroUsize::new(1),
         },
     )
     .ok()
@@ -2010,8 +1826,12 @@ mod tests {
         }
     }
 
-    fn image(width: u32, height: u32, pixels: &[u8]) -> RasterImage {
-        RasterImage::cpu(width, height, PixelFormat::Rgba8, pixels.to_vec())
+    fn image(width: u32, height: u32, pixels: &[u8]) -> CpuRasterImage {
+        CpuRasterImage::new(width, height, PixelFormat::Rgba8, pixels.to_vec())
+    }
+
+    fn upload(gpu: &mut GpuRenderer, image: &CpuRasterImage) -> RasterImage {
+        GpuRasterBackend::upload(gpu, image).expect("CPU image should upload")
     }
 
     fn readback(gpu: &mut GpuRenderer, image: RasterImage) -> CpuRasterImage {
@@ -2019,64 +1839,23 @@ mod tests {
     }
 
     #[test]
-    fn upload_cache_key_does_not_collide_after_source_reuse() {
-        // Regression test for an ABA bug: the old key embedded
-        // `pixels.as_ptr()`, and the cached `GpuBufferImage` doesn't keep the
-        // source `Bytes` alive, so once `a` drops, the allocator is free to
-        // hand `b` (same width/height/format, so same allocation size) the
-        // exact address `a` used. A ptr-based key would then collide with
-        // the stale cache entry for `a` and `upload` would wrongly return
-        // `a`'s GPU buffer for `b`'s content.
-        let a = CpuRasterImage::new(4, 4, PixelFormat::Rgba8, vec![0xAA; 64]);
-        let key_a = CpuUploadCacheKey::new(&a);
-        drop(a);
+    #[ignore = "requires a GPU adapter"]
+    fn composite_rejects_cpu_input_without_implicit_upload() {
+        let Some(mut gpu) = gpu_or_skip() else {
+            return;
+        };
+        let cpu = RasterImage::Cpu(image(1, 1, &[1, 2, 3, 255]));
+        let input = CompositeInput {
+            image: &cpu,
+            offset_x: 0,
+            offset_y: 0,
+        };
 
-        // Same dimensions/format (and thus, previously, a plausible same-size
-        // reused allocation) but different content.
-        let b = CpuRasterImage::new(4, 4, PixelFormat::Rgba8, vec![0xBB; 64]);
-        let key_b = CpuUploadCacheKey::new(&b);
-
-        assert_ne!(
-            key_a, key_b,
-            "keys for unrelated allocations must never collide, regardless of address reuse"
+        assert!(
+            GpuRasterBackend::composite(&mut gpu, Resolution::new(1, 1), &[input]).is_none(),
+            "GPU primitives must not upload CPU inputs implicitly"
         );
-    }
-
-    #[test]
-    fn accounted_lru_subtracts_capacity_evictions() {
-        let mut cache = LruCache::new(NonZeroUsize::new(2).unwrap());
-        let mut bytes = 0usize;
-
-        assert!(!push_lru_accounted(
-            &mut cache,
-            &mut bytes,
-            1u8,
-            10usize,
-            10,
-            |v| *v
-        ));
-        assert!(!push_lru_accounted(
-            &mut cache,
-            &mut bytes,
-            2u8,
-            20usize,
-            20,
-            |v| *v
-        ));
-        assert_eq!(bytes, 30);
-
-        assert!(push_lru_accounted(
-            &mut cache,
-            &mut bytes,
-            3u8,
-            30usize,
-            30,
-            |v| *v
-        ));
-
-        assert_eq!(cache.len(), 2);
-        assert!(cache.get(&1).is_none());
-        assert_eq!(bytes, 50);
+        assert_eq!(gpu.stats().composites, 0);
     }
 
     #[test]
@@ -2108,15 +1887,14 @@ mod tests {
         );
         // total = 3 leaves one sample missing, exercising the fade divisor.
         let total = 3;
+        let gpu_a = upload(&mut gpu, &a);
+        let gpu_b = upload(&mut gpu, &b);
 
         let rendered =
-            GpuRasterBackend::temporal_average(&mut gpu, target, &[&a, &b], total).unwrap();
+            GpuRasterBackend::temporal_average(&mut gpu, target, &[&gpu_a, &gpu_b], total).unwrap();
         let rendered = readback(&mut gpu, rendered);
 
-        let cpu_frames: Vec<CpuRasterImage> = [&a, &b]
-            .iter()
-            .map(|img| img.as_cpu().expect("test inputs are CPU images").clone())
-            .collect();
+        let cpu_frames = vec![a, b];
         let expected = crate::motion_blur::average_frames_cpu(&cpu_frames, total, target);
         let expected = expected.as_cpu().expect("CPU average is a CPU image");
         assert_eq!(rendered.pixels.as_ref(), expected.pixels.as_ref());
@@ -2136,9 +1914,10 @@ mod tests {
                 0, 255, 0, 255,
             ],
         );
+        let gpu_src = upload(&mut gpu, &src);
         let target = Resolution::new(3, 2);
         let input = CompositeInput {
-            image: &src,
+            image: &gpu_src,
             offset_x: 1,
             offset_y: 1,
         };
@@ -2147,10 +1926,6 @@ mod tests {
         let rendered = readback(&mut gpu, rendered);
 
         let mut expected = vec![0u8; 3 * 2 * 4];
-        let src = match src {
-            RasterImage::Cpu(src) => src,
-            RasterImage::Gpu(_) => unreachable!(),
-        };
         composite_at(&mut expected, target, &src, 1, 1);
         assert_eq!(rendered.pixels.as_ref(), expected.as_slice());
     }
@@ -2172,6 +1947,7 @@ mod tests {
                 0, 255, 0, 255,
             ],
         );
+        let gpu_src = upload(&mut gpu, &src);
         let inputs = [
             CompositeInput {
                 image: &base,
@@ -2179,7 +1955,7 @@ mod tests {
                 offset_y: 0,
             },
             CompositeInput {
-                image: &src,
+                image: &gpu_src,
                 offset_x: 1,
                 offset_y: 1,
             },
@@ -2192,10 +1968,6 @@ mod tests {
         for _ in 0..(target.width as usize * target.height as usize) {
             expected.extend_from_slice(&[10, 20, 30, 255]);
         }
-        let src = match src {
-            RasterImage::Cpu(src) => src,
-            RasterImage::Gpu(_) => unreachable!(),
-        };
         composite_at(&mut expected, target, &src, 1, 1);
         assert_eq!(rendered.pixels.as_ref(), expected.as_slice());
     }
@@ -2207,6 +1979,7 @@ mod tests {
             return;
         };
         let child = image(1, 1, &[200, 10, 20, 255]);
+        let child = upload(&mut gpu, &child);
         let input = DropShadowInput {
             child: &child,
             target: Resolution::new(3, 1),
@@ -2238,6 +2011,7 @@ mod tests {
             return;
         };
         let child = image(1, 1, &[9, 8, 7, 255]);
+        let child = upload(&mut gpu, &child);
         let input = OutlineInput {
             child: &child,
             target: Resolution::new(3, 3),

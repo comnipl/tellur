@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::geometry::Vec2;
 use crate::phase::Phase;
-use crate::raster::{RasterImage, Resolution};
+use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::Time;
 use crate::window::Window;
@@ -243,9 +243,10 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        self.child.frame(clock, canvas, target, ctx)
+        self.child.frame(clock, canvas, target, residency, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -388,9 +389,10 @@ impl TimelineComponent for Sourced {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
-        self.inner.frame(clock, canvas, target, ctx)
+        self.inner.frame(clock, canvas, target, residency, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {

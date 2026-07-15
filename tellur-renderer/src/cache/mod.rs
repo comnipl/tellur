@@ -145,6 +145,29 @@ where
         }
     }
 
+    /// Returns an existing resident without recording a miss when absent.
+    ///
+    /// Representation-aware adapters use this to reuse the opposite CPU/GPU
+    /// representation as a conversion source. An existing value is a real
+    /// cache hit and updates its policy history; an absent alternative must not
+    /// create ghost history because nobody requested that representation.
+    pub(crate) fn get_if_resident<T>(&mut self, key: &K, map: impl FnOnce(&V) -> T) -> Option<T> {
+        if !self.policy.contains_key(key) {
+            debug_assert!(
+                !self.store.contains_key(key),
+                "cache value must have resident policy metadata"
+            );
+            return None;
+        }
+
+        let hit = self
+            .store
+            .map(key, map)
+            .expect("cache policy/store residency mismatch");
+        self.policy.record_hit(key);
+        Some(hit)
+    }
+
     /// Records the candidate's render cost and chooses victims without
     /// removing them. The adapter may drop the returned plan under memory
     /// pressure without sacrificing current residents.

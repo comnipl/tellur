@@ -145,7 +145,7 @@ impl<C: VectorComponent + 'static> AnchoredVectorComponent<C> {
 /// time (`position + paint_bounds.origin - paint_rect.origin`).
 pub mod raster {
     use crate::geometry::{Anchor, Constraints, Rect, Vec2};
-    use crate::raster::{RasterComponent, RasterImage, Resolution};
+    use crate::raster::{RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::{CachePolicy, RenderContext};
     use crate::Keyable;
 
@@ -194,13 +194,14 @@ pub mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             // The offset rides in `paint_bounds`; the parent composites it.
             // Route the child through the context (rather than a direct
             // `child.render`) so the child owns the cache entry and its render
             // time is attributed to the child, not folded into this wrapper.
-            ctx.render(self.child.as_ref(), size, target)
+            ctx.render(self.child.as_ref(), size, target, residency)
         }
     }
 
@@ -256,7 +257,7 @@ mod tests {
     use super::raster::RasterPlacement;
     use super::*;
     use crate::color::Color;
-    use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+    use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::RenderContext;
     use crate::shapes::Circle;
     use crate::vector::Paint;
@@ -299,7 +300,13 @@ mod tests {
             constraints.constrain(Vec2(2000.0, 2000.0))
         }
 
-        fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            _s: Vec2,
+            t: Resolution,
+            _residency: RasterResidency,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             let bytes = (t.width as usize) * (t.height as usize) * 4;
             RasterImage::cpu(t.width, t.height, PixelFormat::Rgba8, vec![0; bytes])
         }

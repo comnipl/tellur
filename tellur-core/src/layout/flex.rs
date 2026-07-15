@@ -363,7 +363,7 @@ pub(super) mod raster {
     use super::{compute_flex_pass, CrossAlign, MainAlign};
     use crate::geometry::{Axis, Constraints, Rect, Vec2};
     use crate::layer::{composite_children, translate_rect, union_rect};
-    use crate::raster::{RasterComponent, RasterImage, Resolution};
+    use crate::raster::{RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::{CachePolicy, RenderContext};
     use crate::Keyable;
 
@@ -439,6 +439,7 @@ pub(super) mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let pass = compute_flex_pass(
@@ -457,7 +458,7 @@ pub(super) mod raster {
                 .map(|(child, &(pos, child_size))| (pos, child_size, child.as_ref()))
                 .collect();
             let paint_rect = self.paint_bounds(size);
-            composite_children(paint_rect, target, &placed, ctx)
+            composite_children(paint_rect, target, &placed, residency, ctx)
         }
     }
 
@@ -507,9 +508,10 @@ pub(super) mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
-            ctx.render(self.child.as_ref(), size, target)
+            ctx.render(self.child.as_ref(), size, target, residency)
         }
     }
 

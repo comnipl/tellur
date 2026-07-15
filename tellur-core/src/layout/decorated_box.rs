@@ -61,7 +61,7 @@ pub(super) mod raster {
     use crate::color::Color;
     use crate::geometry::{Constraints, Rect, Vec2};
     use crate::layer::composite_children;
-    use crate::raster::{Background, RasterComponent, RasterImage, Resolution};
+    use crate::raster::{Background, RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::RenderContext;
     use crate::Keyable;
 
@@ -91,6 +91,7 @@ pub(super) mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let paint_rect = Rect {
@@ -104,12 +105,13 @@ pub(super) mod raster {
                         (Vec2::ZERO, size, &bg as &dyn RasterComponent),
                         (Vec2::ZERO, size, self.child.as_ref()),
                     ];
-                    composite_children(paint_rect, target, &placed, ctx)
+                    composite_children(paint_rect, target, &placed, residency, ctx)
                 }
                 None => composite_children(
                     paint_rect,
                     target,
                     &[(Vec2::ZERO, size, self.child.as_ref())],
+                    residency,
                     ctx,
                 ),
             }

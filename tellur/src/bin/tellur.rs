@@ -674,7 +674,9 @@ fn starter_scene(title: &str) -> String {
 //! `tellur live` in this directory to preview it.
 
 use tellur::core::geometry::{{Constraints, Vec2}};
-use tellur::core::raster::{{PixelFormat, RasterComponent, RasterImage, Resolution}};
+use tellur::core::raster::{{
+    PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution,
+}};
 use tellur::core::render_context::RenderContext;
 use tellur::core::timeline_component::Timed;
 use tellur::core::timeline_container::Timeline;
@@ -694,7 +696,13 @@ impl RasterComponent for Block {{
         constraints.constrain(Vec2(self.size, self.size))
     }}
 
-    fn render(&self, size: Vec2, _target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {{
+    fn render(
+        &self,
+        size: Vec2,
+        _target: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {{
         let w = (size.0 as u32).max(1);
         let h = (size.1 as u32).max(1);
         // Opaque white pixels (RGBA).

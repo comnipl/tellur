@@ -7,8 +7,9 @@
 //! so any container/codec `ffmpeg` knows about is reachable (mp4, mov +
 //! ProRes, webm, image sequences, ...).
 //!
-//! Frames are produced by repeatedly calling `Timeline::build(t, resolution)`
-//! with `t = frame_idx / fps` for `frame_idx` in `0..ceil(duration * fps)`.
+//! Frames are produced by repeatedly calling
+//! `Timeline::build(t, resolution, RasterResidency::Cpu, ctx)` with
+//! `t = frame_idx / fps` for `frame_idx` in `0..ceil(duration * fps)`.
 //!
 //! Progress: a three-row display, driven by [`indicatif`]:
 //!
@@ -35,7 +36,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
-use tellur_core::raster::{PixelFormat, Resolution};
+use tellur_core::raster::{PixelFormat, RasterResidency, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
 use tellur_core::timeline::Timeline;
@@ -223,7 +224,7 @@ impl FfmpegEncoder {
         let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         self.drive_ffmpeg(&[], total_frames, out, |frame_idx| {
             let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
-            let image = tl.build(t, self.resolution, &mut ctx);
+            let image = tl.build(t, self.resolution, RasterResidency::Cpu, &mut ctx);
             Ok(ctx.readback(image))
         })
         .map(|_| {
@@ -242,7 +243,8 @@ impl FfmpegEncoder {
     /// `-i <tmp.wav>` plus the `-c:a aac` / `-map` flags are injected through the
     /// SAME `.args()` path that lands between the input and the output, so the
     /// `FfmpegEncoder` struct is unchanged. Video frames stream from
-    /// [`ResolvedTimeline::frame`]; a `None` frame is emitted as transparent.
+    /// [`ResolvedTimeline::frame`]; a `None` frame is emitted as
+    /// transparent.
     ///
     /// The WAV is sized to `ceil(duration * fps) / fps` seconds (the video's
     /// frame-quantized length), NOT `duration`, so a `-shortest` in the caller's
@@ -296,7 +298,7 @@ impl FfmpegEncoder {
         let result = self.drive_ffmpeg(&audio_args, total_frames, out, |frame_idx| {
             let t = TimelineTime::new(frame_idx as f32 / self.fps as f32);
             let image = resolved
-                .frame(t, self.resolution, &mut ctx)
+                .frame(t, self.resolution, RasterResidency::Cpu, &mut ctx)
                 .unwrap_or_else(|| transparent_frame(self.resolution));
             Ok(ctx.readback(image))
         });
@@ -831,7 +833,9 @@ mod av_mux_tests {
     use super::*;
     use std::path::PathBuf;
     use tellur_core::geometry::{Constraints, Vec2};
-    use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+    use tellur_core::raster::{
+        PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution,
+    };
     use tellur_core::render_context::RenderContext;
     use tellur_core::timeline_component::{resolve, Timed, TimedBuilder};
     use tellur_core::timeline_container::{AudioFile, Timeline};
@@ -845,7 +849,13 @@ mod av_mux_tests {
         fn layout(&self, _c: Constraints) -> Vec2 {
             Vec2(1.0, 1.0)
         }
-        fn render(&self, _s: Vec2, t: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+        fn render(
+            &self,
+            _s: Vec2,
+            t: Resolution,
+            _residency: RasterResidency,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
             let count = (t.width as usize) * (t.height as usize);
             let mut px = Vec::with_capacity(count * 4);
             for _ in 0..count {

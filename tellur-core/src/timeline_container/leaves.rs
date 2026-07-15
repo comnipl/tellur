@@ -2,7 +2,7 @@
 
 use crate::audio::{self, AudioMix};
 use crate::geometry::Vec2;
-use crate::raster::{RasterImage, Resolution};
+use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::Time;
 use crate::timeline_component::{
@@ -88,18 +88,24 @@ impl TimelineComponent for VideoFile {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         // The `Placed` wrapper has already rebased + speed-scaled `local` to this
         // clip's source-local axis; the leaf only adds its `.trim` start to reach
         // the absolute source time, then decodes scaled to `target` via the
-        // per-source ffmpeg child (`video_decode`). `ctx` is unused: decode
-        // spawns its own child and does not touch the render context. `canvas`
-        // is ignored: a video decodes scaled to the pixel `target` directly,
-        // independent of the logical layout space.
-        let _ = ctx;
+        // per-source ffmpeg child (`video_decode`). `canvas` is ignored: a
+        // video decodes scaled to the pixel `target` directly, independent of
+        // the logical layout space. The context then materializes the
+        // consumer-requested representation.
         let _ = canvas;
-        crate::video_decode::decode_frame(&self.path, clock.local().seconds(), self.trim, target)
+        let image = crate::video_decode::decode_frame(
+            &self.path,
+            clock.local().seconds(),
+            self.trim,
+            target,
+        )?;
+        Some(ctx.ensure_residency(image, residency))
     }
 
     fn arrangement(&self, offset: f32) -> Arrangement {

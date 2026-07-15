@@ -24,6 +24,17 @@ pub enum RasterImage {
     Gpu(GpuSurface),
 }
 
+/// Where a rendered raster image should reside after rendering.
+///
+/// This is a request from the consumer of a component, not a description of
+/// how the component performs its rendering. Backends may fall back to CPU
+/// residency when GPU allocation or upload is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RasterResidency {
+    Cpu,
+    Gpu,
+}
+
 /// Identifies one pixel-storage allocation, assigned once when it's created
 /// (in [`CpuRasterImage::new`]) from a global monotonic counter.
 ///
@@ -145,6 +156,14 @@ impl RasterImage {
         match self {
             Self::Cpu(image) => image.format,
             Self::Gpu(surface) => surface.format,
+        }
+    }
+
+    /// The memory domain holding this image's pixels.
+    pub const fn residency(&self) -> RasterResidency {
+        match self {
+            Self::Cpu(_) => RasterResidency::Cpu,
+            Self::Gpu(_) => RasterResidency::Gpu,
         }
     }
 
@@ -316,16 +335,23 @@ pub trait RasterComponent: DynEq + DynHash {
         }
     }
 
-    /// Render the component at `size` (logical) into a `target`-sized
-    /// pixel buffer. The pixel buffer covers exactly the `paint_bounds`
-    /// rectangle for `size` — for default `paint_bounds`, that's the
-    /// `(0, 0)..size` region.
+    /// Render the component at `size` (logical) into a `target`-sized image
+    /// with the consumer-requested `residency`. The image covers exactly the
+    /// `paint_bounds` rectangle for `size` — for default `paint_bounds`, that's
+    /// the `(0, 0)..size` region. GPU residency is best-effort: a component or
+    /// context may return a CPU image when the GPU path is unavailable.
     ///
     /// The `ctx` argument lets the component delegate child renders back
     /// through the driver (typically via `ctx.render(&*child, size,
-    /// target)`) so cross-cutting policies such as memoization can be
+    /// target, residency)`) so cross-cutting policies such as memoization can be
     /// applied uniformly across the tree.
-    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage;
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage;
 
     /// Whether this component should occupy its own cache slot. Pure
     /// pass-through wrappers (e.g. [`Positioned`](crate::placement::raster::Positioned))
@@ -387,11 +413,17 @@ impl RasterComponent for Background {
         constraints.constrain(size)
     }
 
-    fn render(&self, _size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        _size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         if ctx.prefers_gpu() {
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.solid_fill(target, self.color) {
-                    return image;
+                    return ctx.ensure_residency(image, residency);
                 }
             }
         }
@@ -405,7 +437,8 @@ impl RasterComponent for Background {
             buf.push(b);
             buf.push(a);
         }
-        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf)
+        let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buf);
+        ctx.ensure_residency(image, residency)
     }
 }
 
@@ -466,9 +499,31 @@ impl RasterComponent for Opacity {
         self.child.paint_bounds(size)
     }
 
-    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
-        let rendered = ctx.render(self.child.as_ref(), size, target);
+    fn cache_policy(&self) -> CachePolicy {
+        if clamp_unit(self.opacity) >= 1.0 {
+            // Full opacity returns the child's image unchanged. Let the child
+            // own that cache entry so one shared CPU/GPU allocation is not
+            // counted once for the child and again for this wrapper.
+            CachePolicy::Transparent
+        } else {
+            CachePolicy::Memoize
+        }
+    }
+
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let alpha = clamp_unit(self.opacity);
+        let child_residency = if alpha >= 1.0 {
+            residency
+        } else {
+            RasterResidency::Cpu
+        };
+        let rendered = ctx.render(self.child.as_ref(), size, target, child_residency);
         if alpha >= 1.0 {
             // Full opacity is a no-op: skip the readback entirely so a
             // GPU-resident child image stays on the GPU untouched.
@@ -488,7 +543,7 @@ impl RasterComponent for Opacity {
             pixel[3] = ((pixel[3] as u16 * alpha_u16 + 127) / 255) as u8;
         }
         image.pixels = pixels.into();
-        RasterImage::Cpu(image)
+        ctx.ensure_residency(RasterImage::Cpu(image), residency)
     }
 }
 
@@ -529,7 +584,12 @@ mod tests {
     fn background_fills_every_target_pixel() {
         let bg = Background::new(Color::rgba_u8(10, 20, 30, 128));
         let mut ctx = PassThrough;
-        let image = bg.render(Vec2(3.0, 2.0), Resolution::new(3, 2), &mut ctx);
+        let image = bg.render(
+            Vec2(3.0, 2.0),
+            Resolution::new(3, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        );
         let cpu = image.as_cpu().expect("background renders CPU image");
 
         assert_eq!(cpu.width, 3);
@@ -560,6 +620,7 @@ mod tests {
             &self,
             _size: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
             _ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let pixels = (target.width as usize) * (target.height as usize);
@@ -579,7 +640,12 @@ mod tests {
         let faded = solid.opacity(0.5);
         let mut ctx = PassThrough;
         let image = faded
-            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx)
+            .render(
+                Vec2(2.0, 2.0),
+                Resolution::new(2, 2),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .into_cpu()
             .expect("opacity renders on CPU");
 
@@ -603,9 +669,12 @@ mod tests {
         };
         let mut ctx = PassThrough;
 
-        let over = solid
-            .opacity(2.0)
-            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
+        let over = solid.opacity(2.0).render(
+            Vec2(2.0, 2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        );
         assert_eq!(
             over.as_cpu().unwrap().pixels[3],
             200,
@@ -615,9 +684,12 @@ mod tests {
         let solid = SolidAlpha {
             rgba: [1, 2, 3, 200],
         };
-        let nan = solid
-            .opacity(f32::NAN)
-            .render(Vec2(2.0, 2.0), Resolution::new(2, 2), &mut ctx);
+        let nan = solid.opacity(f32::NAN).render(
+            Vec2(2.0, 2.0),
+            Resolution::new(2, 2),
+            RasterResidency::Cpu,
+            &mut ctx,
+        );
         assert_eq!(
             nan.as_cpu().unwrap().pixels[3],
             0,
@@ -643,6 +715,7 @@ mod tests {
             _component: &dyn RasterComponent,
             _size: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
         ) -> RasterImage {
             RasterImage::Gpu(GpuSurface::new(
                 target.width,
@@ -667,7 +740,12 @@ mod tests {
         let mut ctx = GpuOnlyContext { readback_calls: 0 };
         let faded = SolidAlpha { rgba: [0, 0, 0, 0] }.opacity(1.0);
 
-        let image = faded.render(Vec2(1.0, 1.0), Resolution::new(1, 1), &mut ctx);
+        let image = faded.render(
+            Vec2(1.0, 1.0),
+            Resolution::new(1, 1),
+            RasterResidency::Gpu,
+            &mut ctx,
+        );
 
         assert!(matches!(image, RasterImage::Gpu(_)));
         assert_eq!(ctx.readback_calls, 0);
@@ -792,7 +870,12 @@ mod tests {
         let component = StillImage::new(sample_image());
         assert_eq!(component.layout(Constraints::UNBOUNDED), Vec2(2.0, 1.0));
 
-        let rendered = component.render(Vec2(2.0, 1.0), Resolution::new(2, 1), &mut PassThrough);
+        let rendered = component.render(
+            Vec2(2.0, 1.0),
+            Resolution::new(2, 1),
+            RasterResidency::Cpu,
+            &mut PassThrough,
+        );
         let cpu = rendered.into_cpu().expect("still image renders to CPU");
         assert_eq!(cpu.pixels.as_ref(), sample_image().pixels.as_ref());
     }
@@ -1015,8 +1098,15 @@ impl RasterComponent for StillImage {
         constraints.constrain(Vec2(self.image.width as f32, self.image.height as f32))
     }
 
-    fn render(&self, _size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
-        RasterImage::Cpu(resample_rgba8(&self.image, target))
+    fn render(
+        &self,
+        _size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
+        let image = RasterImage::Cpu(resample_rgba8(&self.image, target));
+        ctx.ensure_residency(image, residency)
     }
 }
 
