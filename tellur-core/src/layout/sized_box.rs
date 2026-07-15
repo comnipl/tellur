@@ -36,7 +36,7 @@ impl VectorComponent for SizedBox {
 pub(super) mod raster {
     use crate::color::Color;
     use crate::geometry::{Constraints, Vec2};
-    use crate::raster::{Background, RasterComponent, RasterImage, Resolution};
+    use crate::raster::{Background, RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::RenderContext;
 
     /// Raster mirror of the vector [`SizedBox`](super::SizedBox).
@@ -55,9 +55,10 @@ pub(super) mod raster {
             &self,
             size: Vec2,
             target: Resolution,
+            residency: RasterResidency,
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
-            Background::new(Color::rgba_u8(0, 0, 0, 0)).render(size, target, ctx)
+            Background::new(Color::rgba_u8(0, 0, 0, 0)).render(size, target, residency, ctx)
         }
     }
 }

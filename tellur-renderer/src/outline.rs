@@ -12,7 +12,9 @@
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
-use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::raster::{
+    CpuRasterImage, PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution,
+};
 use tellur_core::render_context::{OutlineInput, RenderContext};
 use tellur_core::Keyable;
 
@@ -42,11 +44,17 @@ impl RasterComponent for Outline {
         }
     }
 
-    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let paint = self.paint_bounds(size);
         let child_paint = self.child.paint_bounds(size);
         if paint.size.0 <= 0.0 || paint.size.1 <= 0.0 {
-            return blank_image(target);
+            return ctx.ensure_residency(blank_image(target), residency);
         }
         let sx = target.width as f32 / paint.size.0;
         let sy = target.height as f32 / paint.size.1;
@@ -69,6 +77,11 @@ impl RasterComponent for Outline {
             self.child.as_ref(),
             size,
             Resolution::new(child_px_w, child_px_h),
+            if gpu_available {
+                RasterResidency::Gpu
+            } else {
+                RasterResidency::Cpu
+            },
         );
 
         let child_local_x = child_paint.origin.0 - paint.origin.0;
@@ -88,7 +101,7 @@ impl RasterComponent for Outline {
             };
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.outline(input) {
-                    return image;
+                    return ctx.ensure_residency(image, residency);
                 }
             }
         }
@@ -110,7 +123,8 @@ impl RasterComponent for Outline {
 
         composite_at(&mut accum, target, &child_image, child_px_x, child_px_y);
 
-        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
+        let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum);
+        ctx.ensure_residency(image, residency)
     }
 }
 
@@ -303,6 +317,7 @@ mod tests {
             &self,
             _size: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
             _ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             RasterImage::cpu(
@@ -352,7 +367,12 @@ mod tests {
         };
         let mut ctx = PassThrough;
         let rendered = outline
-            .render(Vec2(1.0, 1.0), Resolution::new(10, 10), &mut ctx)
+            .render(
+                Vec2(1.0, 1.0),
+                Resolution::new(10, 10),
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .into_cpu()
             .expect("CPU outline render");
 

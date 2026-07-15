@@ -69,7 +69,7 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
-    let tl = timeline(5.0, move |t, target, ctx| {
+    let tl = timeline(5.0, move |t, target, residency, ctx| {
         DecoratedBox::builder()
             .background(Color::rgb_u8(20, 20, 30))
             .child(
@@ -86,7 +86,7 @@ fn main() {
                 ),
             )
             .build()
-            .render(scene_size, target, ctx)
+            .render(scene_size, target, residency, ctx)
     });
 
     let out = Path::new("/tmp/timeline.mp4");

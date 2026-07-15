@@ -16,12 +16,14 @@ use std::any::Any;
 
 use crate::color::Color;
 use crate::geometry::Vec2;
-use crate::raster::{CpuRasterImage, RasterComponent, RasterImage, Resolution};
+use crate::raster::{CpuRasterImage, RasterComponent, RasterImage, RasterResidency, Resolution};
 use crate::vector::VectorGraphic;
 
 /// How aggressively a render context should try to keep work on the GPU.
 ///
-/// This is a policy signal, not a guarantee. Components should ask the context
+/// This controls where work is performed and is orthogonal to
+/// [`RasterResidency`], which says where a consumer needs the resulting image.
+/// It is a policy signal, not a guarantee. Components should ask the context
 /// for GPU hooks only when this prefers GPU work, and every hook is optional so
 /// CPU fallback remains the default behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -57,7 +59,7 @@ pub enum CachePolicy {
 ///
 /// Components forward child `render` calls through
 /// [`RenderContext::render`] (or call it as a free function via
-/// `ctx.render(&*child, size, target)`) so the context can intercept and
+/// `ctx.render(&*child, size, target, residency)`) so the context can intercept and
 /// reuse previously-produced results.
 pub trait RenderContext {
     /// Exposes the concrete context for backend-specific rendering paths.
@@ -97,15 +99,42 @@ pub trait RenderContext {
         true
     }
 
-    /// Renders `component` at the given logical `size` into a
-    /// `target`-sized pixel buffer, possibly returning a cached result
-    /// from a previous identical request.
+    /// Renders `component` at the given logical `size` into a `target`-sized
+    /// image with the requested residency, possibly returning a cached result
+    /// from a previous identical request. GPU residency is best-effort.
     fn render(
         &mut self,
         component: &dyn RasterComponent,
         size: Vec2,
         target: Resolution,
+        residency: RasterResidency,
     ) -> RasterImage;
+
+    /// Converts `image` to the requested residency when the context can do so.
+    ///
+    /// CPU residency is guaranteed for a context capable of returning GPU
+    /// images, because such a context must provide readback. GPU residency is
+    /// best-effort: an unavailable or failed upload leaves the CPU image in
+    /// place so callers can take their CPU fallback path.
+    fn ensure_residency(&mut self, image: RasterImage, residency: RasterResidency) -> RasterImage {
+        if image.residency() == residency {
+            return image;
+        }
+
+        match residency {
+            RasterResidency::Cpu => RasterImage::Cpu(self.readback(image)),
+            RasterResidency::Gpu => match image {
+                RasterImage::Cpu(image) => {
+                    let uploaded = self.gpu_backend().and_then(|gpu| gpu.upload(&image));
+                    match uploaded {
+                        Some(uploaded) if uploaded.residency() == RasterResidency::Gpu => uploaded,
+                        _ => RasterImage::Cpu(image),
+                    }
+                }
+                RasterImage::Gpu(_) => image,
+            },
+        }
+    }
 
     /// Reads a rendered image back into CPU memory.
     ///
@@ -161,6 +190,15 @@ pub struct OutlineInput<'a> {
 }
 
 pub trait GpuRasterBackend {
+    /// Uploads a CPU image into backend-owned GPU storage.
+    ///
+    /// This is a conversion primitive; representation lifetime and reuse are
+    /// owned by the render context's component cache. The default keeps GPU
+    /// support opt-in for lightweight and test backends.
+    fn upload(&mut self, _image: &CpuRasterImage) -> Option<RasterImage> {
+        None
+    }
+
     fn composite(
         &mut self,
         target: Resolution,
@@ -211,7 +249,9 @@ impl RenderContext for PassThrough {
         component: &dyn RasterComponent,
         size: Vec2,
         target: Resolution,
+        residency: RasterResidency,
     ) -> RasterImage {
-        component.render(size, target, self)
+        let image = component.render(size, target, residency, self);
+        self.ensure_residency(image, residency)
     }
 }

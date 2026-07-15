@@ -29,7 +29,7 @@
 
 use tellur_core::audio::AudioMix;
 use tellur_core::geometry::Vec2;
-use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterImage, Resolution};
+use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::timeline_component::{
     Arrangement, AudioBuffer, Clock, Cue, ResolveCtx, TimelineComponent,
@@ -73,12 +73,20 @@ impl TimelineComponent for MotionBlur {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let total = self.samples.clamp(1, MAX_SAMPLES);
         if total == 1 || self.shutter <= 0.0 || !ctx.motion_blur_enabled() {
-            return self.child.frame(clock, canvas, target, ctx);
+            return self.child.frame(clock, canvas, target, residency, ctx);
         }
+
+        let gpu_available = ctx.prefers_gpu() && ctx.gpu_backend().is_some();
+        let execution_residency = if gpu_available {
+            RasterResidency::Gpu
+        } else {
+            RasterResidency::Cpu
+        };
 
         // Trailing shutter: sample 0 is the current frame, sample `total-1`
         // reaches back the full shutter. Offsets are derived from the two
@@ -86,7 +94,8 @@ impl TimelineComponent for MotionBlur {
         let frames: Vec<Option<RasterImage>> = (0..total)
             .map(|i| {
                 let dt = -self.shutter * (i as f32 / (total - 1) as f32);
-                self.child.frame(clock.shifted(dt), canvas, target, ctx)
+                self.child
+                    .frame(clock.shifted(dt), canvas, target, execution_residency, ctx)
             })
             .collect();
 
@@ -104,7 +113,8 @@ impl TimelineComponent for MotionBlur {
         if present.len() == frames.len()
             && present.iter().all(|frame| frame.shares_storage(present[0]))
         {
-            return frames.into_iter().next().unwrap();
+            let image = frames.into_iter().next().unwrap()?;
+            return Some(ctx.ensure_residency(image, residency));
         }
 
         // Every present frame must be a target-sized RGBA8 image (the frame
@@ -115,13 +125,18 @@ impl TimelineComponent for MotionBlur {
                 || frame.height() != target.height
                 || frame.format() != PixelFormat::Rgba8
         }) {
-            return frames.into_iter().next().unwrap();
+            let image = frames.into_iter().next().unwrap()?;
+            return Some(ctx.ensure_residency(image, residency));
         }
 
-        if ctx.prefers_gpu() {
+        if gpu_available
+            && present
+                .iter()
+                .all(|frame| frame.residency() == RasterResidency::Gpu)
+        {
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.temporal_average(target, &present, total) {
-                    return Some(image);
+                    return Some(ctx.ensure_residency(image, residency));
                 }
             }
         }
@@ -132,7 +147,8 @@ impl TimelineComponent for MotionBlur {
             .flatten()
             .map(|frame| ctx.readback(frame))
             .collect();
-        Some(average_frames_cpu(&cpu_frames, total, target))
+        let image = average_frames_cpu(&cpu_frames, total, target);
+        Some(ctx.ensure_residency(image, residency))
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
@@ -197,7 +213,7 @@ pub(crate) fn average_frames_cpu(
 mod tests {
     use super::*;
     use tellur_core::geometry::Constraints;
-    use tellur_core::raster::RasterComponent;
+    use tellur_core::raster::{RasterComponent, RasterResidency};
     use tellur_core::render_context::{GpuPreference, PassThrough};
     use tellur_core::time::{LocalTime, Time, TimelineTime};
     use tellur_core::timeline_component::{NodeKind, TriggerTable};
@@ -223,6 +239,7 @@ mod tests {
             clock: Clock<'_>,
             _canvas: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
             _ctx: &mut dyn RenderContext,
         ) -> Option<RasterImage> {
             let t = clock.local().seconds();
@@ -282,6 +299,7 @@ mod tests {
                 clock_at(&table, 1.0),
                 Vec2(3.0, 1.0),
                 Resolution::new(3, 1),
+                RasterResidency::Cpu,
                 &mut ctx,
             )
             .expect("dot is visible");
@@ -303,6 +321,7 @@ mod tests {
                 clock_at(&table, 1.0),
                 Vec2(3.0, 1.0),
                 Resolution::new(3, 1),
+                RasterResidency::Cpu,
                 &mut ctx,
             )
             .expect("dot is visible at the current sample");
@@ -322,6 +341,7 @@ mod tests {
                 clock_at(&table, 1.0),
                 Vec2(3.0, 1.0),
                 Resolution::new(3, 1),
+                RasterResidency::Cpu,
                 &mut ctx
             )
             .is_none());
@@ -337,6 +357,7 @@ mod tests {
                 clock_at(&table, 1.0),
                 Vec2(3.0, 1.0),
                 Resolution::new(3, 1),
+                RasterResidency::Cpu,
                 &mut ctx,
             )
             .expect("dot is visible");
@@ -363,6 +384,7 @@ mod tests {
             &self,
             _size: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
             _ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let pixels = vec![200u8; (target.width * target.height * 4) as usize];
@@ -382,13 +404,31 @@ mod tests {
         let size = Vec2(2.0, 2.0);
         let target = Resolution::new(2, 2);
         let first = blurred
-            .frame(clock_at(&table, 1.0), size, target, &mut ctx)
+            .frame(
+                clock_at(&table, 1.0),
+                size,
+                target,
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .expect("visible");
         let second = blurred
-            .frame(clock_at(&table, 5.0), size, target, &mut ctx)
+            .frame(
+                clock_at(&table, 5.0),
+                size,
+                target,
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .expect("visible");
         let third = blurred
-            .frame(clock_at(&table, 9.0), size, target, &mut ctx)
+            .frame(
+                clock_at(&table, 9.0),
+                size,
+                target,
+                RasterResidency::Cpu,
+                &mut ctx,
+            )
             .expect("visible");
         // The first frame warms the second-use admission history. Once warm,
         // both frames are the SAME cache entry: the average short-circuited

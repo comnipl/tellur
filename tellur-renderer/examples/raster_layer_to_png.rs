@@ -11,7 +11,7 @@ use tellur_core::component;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::Layer;
 use tellur_core::placement::RasterPlacement;
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::PassThrough;
 use tellur_core::shapes::{Circle, Rectangle};
 use tellur_core::vector::Paint;
@@ -64,7 +64,12 @@ fn main() {
         )
         .build();
 
-    let image = scene.render(scene_size, Resolution::new(1280, 720), &mut PassThrough);
+    let image = scene.render(
+        scene_size,
+        Resolution::new(1280, 720),
+        RasterResidency::Cpu,
+        &mut PassThrough,
+    );
 
     let path = "/tmp/raster-scene.png";
     let file = File::create(path).expect("create output file");

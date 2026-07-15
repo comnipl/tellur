@@ -8,7 +8,7 @@ use tellur_core::builder::VectorBuilderPlacement;
 use tellur_core::color::Color;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::PassThrough;
 use tellur_core::shapes::Rectangle;
 use tellur_core::text::{Text, TextSpan, SANS_SERIF};
@@ -42,9 +42,12 @@ fn main() {
         )
         .build();
 
-    let image = scene
-        .rasterize()
-        .render(scene_size, Resolution::new(1920, 1080), &mut PassThrough);
+    let image = scene.rasterize().render(
+        scene_size,
+        Resolution::new(1920, 1080),
+        RasterResidency::Cpu,
+        &mut PassThrough,
+    );
 
     let out = "/tmp/text.png";
     let file = File::create(out).expect("create output file");

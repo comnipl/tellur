@@ -13,7 +13,7 @@ use tellur_core::color::Color;
 use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::math::MathSpan;
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::PassThrough;
 use tellur_core::shapes::Rectangle;
 use tellur_core::text::{Text, SERIF};
@@ -47,6 +47,7 @@ fn main() {
     let image = scene.rasterize().render(
         scene_size,
         Resolution::new(scene_size.0 as u32, scene_size.1 as u32),
+        RasterResidency::Cpu,
         &mut PassThrough,
     );
 

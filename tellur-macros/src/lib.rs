@@ -177,9 +177,10 @@ impl Kind {
                 quote!(
                     size: #core::geometry::Vec2,
                     target: #core::raster::Resolution,
+                    residency: #core::raster::RasterResidency,
                     ctx: &mut dyn #core::render_context::RenderContext
                 ),
-                quote!(size, target, ctx),
+                quote!(size, target, residency, ctx),
             ),
             // Unused for the timeline arm; it builds its own method set.
             Kind::Timeline => (quote!(), quote!()),
@@ -533,6 +534,23 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
         let graphic_path = kind.graphic();
         let (build_fn, build_call_layout, build_call_render, build_call_paint_bounds) =
             if let (Some(av_ident), Some(av_type)) = (available_ident, available_type) {
+                let build_call_render = if kind == Kind::Raster {
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #core::render_context::RenderContext::render(
+                            ctx,
+                            &__child,
+                            size,
+                            target,
+                            residency,
+                        )
+                    }
+                } else {
+                    quote! {
+                        let __child = self.#build_method(size);
+                        #trait_path::render(&__child, #render_args)
+                    }
+                };
                 (
                     quote! {
                         #[doc(hidden)]
@@ -549,10 +567,7 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
                         let __child = self.#build_method(__available);
                         #trait_path::layout(&__child, constraints)
                     },
-                    quote! {
-                        let __child = self.#build_method(size);
-                        #trait_path::render(&__child, #render_args)
-                    },
+                    build_call_render,
                     quote! {
                         let __child = self.#build_method(size);
                         #trait_path::paint_bounds(&__child, size)
@@ -581,6 +596,24 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
                     },
                 )
             };
+        let cache_policy_impl = if kind == Kind::Raster {
+            if available_ident.is_some() {
+                quote! {
+                    fn cache_policy(&self) -> #core::render_context::CachePolicy {
+                        #core::render_context::CachePolicy::Transparent
+                    }
+                }
+            } else {
+                quote! {
+                    fn cache_policy(&self) -> #core::render_context::CachePolicy {
+                        let __child = self.#build_method();
+                        #trait_path::cache_policy(&__child)
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
         let trait_impl = quote! {
             impl #trait_path for #struct_ident {
                 fn layout(
@@ -600,6 +633,8 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
                 fn render(&self, #render_sig) -> #graphic_path {
                     #build_call_render
                 }
+
+                #cache_policy_impl
 
                 // Surfaces this component's display name to the timeline
                 // arrangement tree. For a raster component this flows through the
@@ -851,10 +886,18 @@ fn timeline_codegen<'a>(
                 clock: #core::timeline_component::Clock<'_>,
                 canvas: #core::geometry::Vec2,
                 target: #core::raster::Resolution,
+                residency: #core::raster::RasterResidency,
                 ctx: &mut dyn #core::render_context::RenderContext,
             ) -> ::core::option::Option<#core::raster::RasterImage> {
                 let __child = #build_with_clock;
-                #trait_path::frame(&__child, clock, canvas, target, ctx)
+                #trait_path::frame(
+                    &__child,
+                    clock,
+                    canvas,
+                    target,
+                    residency,
+                    ctx,
+                )
             }
 
             fn samples(

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::geometry::Vec2;
-use crate::raster::{RasterImage, Resolution};
+use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time, TimelineTime};
 
@@ -262,11 +262,13 @@ impl ResolvedTimeline {
         &self,
         t: TimelineTime,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let clock = Clock::new(t, LocalTime::new(t.seconds()), self.triggers())
             .with_local_window(LocalTime::new(t.seconds()), Some(self.duration));
-        self.source().frame(clock, self.canvas, target, ctx)
+        self.source()
+            .frame(clock, self.canvas, target, residency, ctx)
     }
 
     /// Samples the audio channel for `[t, t + window)`.

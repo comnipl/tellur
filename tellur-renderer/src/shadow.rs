@@ -9,7 +9,9 @@
 use tellur_core::color::Color;
 use tellur_core::composite::composite_at;
 use tellur_core::geometry::{Constraints, Rect, Vec2};
-use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::raster::{
+    CpuRasterImage, PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution,
+};
 use tellur_core::render_context::{DropShadowInput, RenderContext};
 use tellur_core::Keyable;
 
@@ -62,11 +64,17 @@ impl RasterComponent for DropShadow {
         }
     }
 
-    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let paint = self.paint_bounds(size);
         let child_paint = self.child.paint_bounds(size);
         if paint.size.0 <= 0.0 || paint.size.1 <= 0.0 {
-            return blank_image(target);
+            return ctx.ensure_residency(blank_image(target), residency);
         }
         let sx = target.width as f32 / paint.size.0;
         let sy = target.height as f32 / paint.size.1;
@@ -81,6 +89,11 @@ impl RasterComponent for DropShadow {
             self.child.as_ref(),
             size,
             Resolution::new(child_px_w, child_px_h),
+            if gpu_available {
+                RasterResidency::Gpu
+            } else {
+                RasterResidency::Cpu
+            },
         );
 
         let blur_px = (self.blur * sx.max(sy)).round().max(0.0) as u32;
@@ -109,7 +122,7 @@ impl RasterComponent for DropShadow {
             };
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.drop_shadow(input) {
-                    return image;
+                    return ctx.ensure_residency(image, residency);
                 }
             }
         }
@@ -130,7 +143,8 @@ impl RasterComponent for DropShadow {
         // Position the child relative to the paint-bounds origin.
         composite_at(&mut accum, target, &child_image, child_px_x, child_px_y);
 
-        RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum)
+        let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, accum);
+        ctx.ensure_residency(image, residency)
     }
 }
 
@@ -273,6 +287,7 @@ mod tests {
             &self,
             _size: Vec2,
             target: Resolution,
+            _residency: RasterResidency,
             _ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             blank_image(target)

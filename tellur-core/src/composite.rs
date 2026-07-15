@@ -16,7 +16,7 @@
 //! source pixels skip the write entirely and fully-opaque ones go
 //! through a 4-byte copy.
 
-use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, Resolution};
+use crate::raster::{CpuRasterImage, PixelFormat, RasterImage, RasterResidency, Resolution};
 use crate::render_context::{CompositeInput, RenderContext};
 
 /// Source-over composites `src` onto `dst` at pixel offset
@@ -78,10 +78,12 @@ pub fn composite_at(
 /// Timeline containers recurse into child timelines before they can composite,
 /// so they operate on `RasterImage`s instead of `RasterComponent`s. Prefer the
 /// same GPU composite primitive the raster `Layer` path uses, then fall back to
-/// the CPU kernel when no compatible GPU backend is available.
+/// the CPU kernel when no compatible GPU backend is available, then normalize
+/// the result to the consumer-requested `residency`.
 pub(crate) fn composite_frames_over(
     mut frames: Vec<RasterImage>,
     target: Resolution,
+    residency: RasterResidency,
     ctx: &mut dyn RenderContext,
 ) -> Option<RasterImage> {
     match frames.len() {
@@ -89,7 +91,7 @@ pub(crate) fn composite_frames_over(
         1 => {
             let frame = frames.pop().expect("len checked");
             if frame.width() == target.width && frame.height() == target.height {
-                return Some(frame);
+                return Some(ctx.ensure_residency(frame, residency));
             }
             frames.push(frame);
         }
@@ -97,6 +99,10 @@ pub(crate) fn composite_frames_over(
     }
 
     if ctx.prefers_gpu() {
+        frames = frames
+            .into_iter()
+            .map(|frame| ctx.ensure_residency(frame, RasterResidency::Gpu))
+            .collect();
         let inputs: Vec<CompositeInput<'_>> = frames
             .iter()
             .map(|image| CompositeInput {
@@ -105,9 +111,14 @@ pub(crate) fn composite_frames_over(
                 offset_y: 0,
             })
             .collect();
-        if let Some(gpu) = ctx.gpu_backend() {
-            if let Some(image) = gpu.composite(target, &inputs) {
-                return Some(image);
+        if frames
+            .iter()
+            .all(|frame| frame.residency() == RasterResidency::Gpu)
+        {
+            if let Some(gpu) = ctx.gpu_backend() {
+                if let Some(image) = gpu.composite(target, &inputs) {
+                    return Some(ctx.ensure_residency(image, residency));
+                }
             }
         }
     }
@@ -117,12 +128,8 @@ pub(crate) fn composite_frames_over(
         let frame = ctx.readback(frame);
         composite_at(&mut buffer, target, &frame, 0, 0);
     }
-    Some(RasterImage::cpu(
-        target.width,
-        target.height,
-        PixelFormat::Rgba8,
-        buffer,
-    ))
+    let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, buffer);
+    Some(ctx.ensure_residency(image, residency))
 }
 
 /// Source-over blends `span_w` consecutive RGBA pixels of `src` onto
@@ -197,6 +204,16 @@ mod tests {
     }
 
     impl GpuRasterBackend for FakeGpu {
+        fn upload(&mut self, image: &CpuRasterImage) -> Option<RasterImage> {
+            Some(RasterImage::Gpu(crate::raster::GpuSurface::new(
+                image.width,
+                image.height,
+                image.format,
+                "test",
+                std::sync::Arc::new(image.clone()),
+            )))
+        }
+
         fn composite(
             &mut self,
             target: Resolution,
@@ -286,6 +303,7 @@ mod tests {
             _component: &dyn RasterComponent,
             _size: Vec2,
             _target: Resolution,
+            _residency: RasterResidency,
         ) -> RasterImage {
             panic!("composite tests do not render components")
         }
@@ -294,7 +312,10 @@ mod tests {
             self.readbacks += 1;
             match image {
                 RasterImage::Cpu(image) => image,
-                RasterImage::Gpu(_) => panic!("fake context cannot read back GPU surfaces"),
+                RasterImage::Gpu(surface) => surface
+                    .downcast_handle::<CpuRasterImage>()
+                    .expect("fake GPU surface contains a CPU image")
+                    .clone(),
             }
         }
     }
@@ -411,8 +432,13 @@ mod tests {
         ];
         let mut ctx = FakeContext::new(true);
 
-        let image = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("frames produce an output");
+        let image = composite_frames_over(
+            frames,
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("frames produce an output");
         let image = image.into_cpu().expect("fake GPU returns CPU image");
 
         assert_eq!(image.pixels.as_ref(), &[42, 42, 42, 42]);
@@ -429,10 +455,20 @@ mod tests {
         ];
         let mut ctx = FakeContext::new(true);
 
-        let _ = composite_frames_over(frames.clone(), Resolution::new(1, 1), &mut ctx)
-            .expect("first composite produces an output");
-        let recomposited = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("second composite produces an output");
+        let _ = composite_frames_over(
+            frames.clone(),
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("first composite produces an output");
+        let recomposited = composite_frames_over(
+            frames,
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("second composite produces an output");
         let recomposited = recomposited.into_cpu().expect("fake GPU returns CPU image");
 
         assert_eq!(recomposited.pixels.as_ref(), &[42, 42, 42, 42]);
@@ -449,10 +485,20 @@ mod tests {
         ];
         let mut ctx = FakeContext::new(false);
 
-        let first = composite_frames_over(frames.clone(), Resolution::new(1, 1), &mut ctx)
-            .expect("first composite produces an output");
-        let second = composite_frames_over(frames, Resolution::new(1, 1), &mut ctx)
-            .expect("second composite produces an output");
+        let first = composite_frames_over(
+            frames.clone(),
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("first composite produces an output");
+        let second = composite_frames_over(
+            frames,
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        )
+        .expect("second composite produces an output");
 
         for image in [first, second] {
             let image = image.into_cpu().expect("CPU fallback returns CPU image");

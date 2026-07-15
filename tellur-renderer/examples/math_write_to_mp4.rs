@@ -14,7 +14,7 @@ use tellur_core::geometry::{Anchor, Vec2};
 use tellur_core::layer::VectorLayer;
 use tellur_core::math::MathSpan;
 use tellur_core::placement::VectorPlacement;
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::shapes::Rectangle;
 use tellur_core::text::{Text, SERIF};
@@ -24,7 +24,9 @@ use tellur_renderer::{FfmpegEncoder, Rasterizable};
 
 fn main() {
     let scene_size = Vec2(1280.0, 720.0);
-    let tl = timeline(2.0, move |t, target, ctx| frame(t, scene_size, target, ctx));
+    let tl = timeline(2.0, move |t, target, residency, ctx| {
+        frame(t, scene_size, target, residency, ctx)
+    });
 
     let out = Path::new("/tmp/math-write.mp4");
     FfmpegEncoder::new(Resolution::new(1280, 720), 60)
@@ -39,6 +41,7 @@ fn frame(
     time: tellur_core::time::TimelineTime,
     scene_size: Vec2,
     target: Resolution,
+    residency: RasterResidency,
     ctx: &mut dyn RenderContext,
 ) -> tellur_core::raster::RasterImage {
     VectorLayer::builder()
@@ -61,5 +64,5 @@ fn frame(
         )
         .build()
         .rasterize()
-        .render(scene_size, target, ctx)
+        .render(scene_size, target, residency, ctx)
 }

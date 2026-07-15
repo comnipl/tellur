@@ -1,9 +1,11 @@
 use super::*;
 use crate::geometry::{Constraints, Rect, Vec2};
 use crate::phase::Phase;
-use crate::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
-use crate::render_context::{PassThrough, RenderContext};
+use crate::placement::RasterPlacement;
+use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
+use crate::render_context::{CachePolicy, PassThrough, RenderContext};
 use crate::time::{LocalTime, Time, TimelineTime};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // A trivial RasterComponent so we can exercise the blanket impl.
 #[derive(PartialEq, Hash)]
@@ -18,6 +20,7 @@ impl RasterComponent for Dot {
         &self,
         _size: Vec2,
         _target: Resolution,
+        _residency: RasterResidency,
         _ctx: &mut dyn RenderContext,
     ) -> RasterImage {
         RasterImage::cpu(1, 1, PixelFormat::Rgba8, vec![0u8, 0, 0, 0])
@@ -32,6 +35,16 @@ fn Badge(#[builder(into)] tag: String) -> impl RasterComponent {
     Dot
 }
 
+#[crate::component(raster)]
+fn PositionedBadge() -> impl RasterComponent {
+    Dot.place_at(Vec2::ZERO)
+}
+
+#[crate::component(raster)]
+fn AvailablePositionedBadge(#[available] _available: Vec2) -> impl RasterComponent {
+    Dot.place_at(Vec2::ZERO)
+}
+
 #[test]
 fn raster_component_macro_name_flows_through_the_blanket() {
     let badge = Badge::builder().tag("hello").build();
@@ -40,6 +53,86 @@ fn raster_component_macro_name_flows_through_the_blanket() {
     // And it lands on the arrangement node through the blanket impl.
     let boxed: Box<dyn TimelineComponent + Send> = Box::new(badge);
     assert_eq!(boxed.arrangement(0.0).name.as_deref(), Some("Badge"));
+}
+
+#[test]
+fn raster_component_macro_routes_cache_policy_by_build_mode() {
+    assert_eq!(
+        PositionedBadge::builder().build().cache_policy(),
+        CachePolicy::Transparent,
+    );
+    assert_eq!(
+        Badge::builder().tag("memoized").build().cache_policy(),
+        CachePolicy::Memoize,
+    );
+
+    // An `#[available]` component builds its root at render time and routes that
+    // root back through the context, so the generated outer remains transparent.
+    assert_eq!(
+        AvailablePositionedBadge::builder().build().cache_policy(),
+        CachePolicy::Transparent,
+    );
+}
+
+static LAST_TIMELINE_RESIDENCY: AtomicU8 = AtomicU8::new(0);
+
+#[derive(PartialEq, Hash)]
+struct ResidencyProbe;
+
+impl TimelineComponent for ResidencyProbe {
+    fn frame(
+        &self,
+        _clock: Clock<'_>,
+        _canvas: Vec2,
+        _target: Resolution,
+        residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> Option<RasterImage> {
+        let value = match residency {
+            RasterResidency::Cpu => 1,
+            RasterResidency::Gpu => 2,
+        };
+        LAST_TIMELINE_RESIDENCY.store(value, Ordering::Relaxed);
+        None
+    }
+
+    fn arrangement(&self, offset: f32) -> Arrangement {
+        Arrangement {
+            kind: NodeKind::Video,
+            label: String::new(),
+            name: None,
+            source: None,
+            start: offset,
+            end: offset,
+            trim: None,
+            triggers: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+}
+
+#[crate::component(timeline)]
+fn ResidencyForwarder() -> impl TimelineComponent {
+    ResidencyProbe
+}
+
+#[test]
+fn timeline_component_macro_forwards_requested_residency() {
+    LAST_TIMELINE_RESIDENCY.store(0, Ordering::Relaxed);
+    let component = ResidencyForwarder::builder().build();
+    let table = TriggerTable::new();
+    let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
+    let mut ctx = PassThrough;
+
+    let _ = component.frame(
+        clock,
+        Vec2(1.0, 1.0),
+        Resolution::new(1, 1),
+        RasterResidency::Gpu,
+        &mut ctx,
+    );
+
+    assert_eq!(LAST_TIMELINE_RESIDENCY.load(Ordering::Relaxed), 2);
 }
 
 #[test]
@@ -63,7 +156,13 @@ fn blanket_frame_routes_through_ctx_render() {
     let table = TriggerTable::new();
     let clock = Clock::new(TimelineTime::new(0.0), LocalTime::new(0.0), &table);
     let mut ctx = PassThrough;
-    let frame = dot.frame(clock, Vec2(4.0, 4.0), Resolution::new(4, 4), &mut ctx);
+    let frame = dot.frame(
+        clock,
+        Vec2(4.0, 4.0),
+        Resolution::new(4, 4),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
     assert!(frame.is_some());
 }
 
@@ -90,7 +189,13 @@ impl RasterComponent for Square {
         Self::BOX
     }
 
-    fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let scale_x = target.width as f32 / size.0;
         let scale_y = target.height as f32 / size.1;
         // A `SIDE`-by-`SIDE` logical square, centered in the logical box.
@@ -150,7 +255,7 @@ fn blanket_frame_lays_out_against_the_canvas_not_the_intrinsic_box() {
     let target = Resolution::new(1280, 720); // 16:9
     let canvas = Vec2(target.width as f32, target.height as f32);
     let frame = Square
-        .frame(clock, canvas, target, &mut ctx)
+        .frame(clock, canvas, target, RasterResidency::Cpu, &mut ctx)
         .expect("a visual contributes a frame");
     let cpu = frame.as_cpu().expect("cpu image");
     let (span_w, span_h) = opaque_span(cpu);
@@ -187,7 +292,13 @@ impl RasterComponent for Margined {
         }
     }
 
-    fn render(&self, size: Vec2, target: Resolution, _ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        _residency: RasterResidency,
+        _ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let bounds = self.paint_bounds(size);
         let sx = target.width as f32 / bounds.size.0;
         let sy = target.height as f32 / bounds.size.1;
@@ -216,7 +327,7 @@ fn blanket_frame_gives_paint_bounds_pixels_and_composites_at_the_painted_origin(
     let target = Resolution::new(8, 8);
     let canvas = Vec2(8.0, 8.0);
     let frame = Margined
-        .frame(clock, canvas, target, &mut ctx)
+        .frame(clock, canvas, target, RasterResidency::Cpu, &mut ctx)
         .expect("a visual contributes a frame");
     let cpu = frame.as_cpu().expect("cpu image");
     assert_eq!(
@@ -509,7 +620,13 @@ fn timeline_component_with_clock_forwards_the_real_clock() {
     // nothing; an interior local still proves the real clock threads through.
     let clock = Clock::new(TimelineTime::new(1.25), LocalTime::new(1.25), &table);
     let mut ctx = PassThrough;
-    let frame = pulse.frame(clock, Vec2(4.0, 4.0), Resolution::new(4, 4), &mut ctx);
+    let frame = pulse.frame(
+        clock,
+        Vec2(4.0, 4.0),
+        Resolution::new(4, 4),
+        RasterResidency::Cpu,
+        &mut ctx,
+    );
     assert!(frame.is_some());
 
     // Clock-less queries still resolve via the structural clock.

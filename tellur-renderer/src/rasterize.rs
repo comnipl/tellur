@@ -2,7 +2,7 @@ use std::hash::Hash;
 
 use tellur_core::color::Color;
 use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
-use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, Resolution};
+use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::vector::{
     DashPattern, Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic,
@@ -10,8 +10,8 @@ use tellur_core::vector::{
 
 /// A `RasterComponent` that rasterizes a `VectorComponent`. The layout
 /// protocol forwards to the wrapped vector: layout / paint_bounds /
-/// render(size) all delegate, and `render(size, target)` rasterizes the
-/// vector's `render(size)` output into a `target`-sized pixel buffer.
+/// render(size) all delegate, and `render(size, target, residency, ctx)`
+/// rasterizes the vector's `render(size)` output into a `target`-sized image.
 #[derive(PartialEq, Hash)]
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
@@ -26,16 +26,23 @@ impl<V: VectorComponent + PartialEq + Hash + 'static> RasterComponent for Raster
         self.vector.paint_bounds(size)
     }
 
-    fn render(&self, size: Vec2, target: Resolution, ctx: &mut dyn RenderContext) -> RasterImage {
+    fn render(
+        &self,
+        size: Vec2,
+        target: Resolution,
+        residency: RasterResidency,
+        ctx: &mut dyn RenderContext,
+    ) -> RasterImage {
         let graphic = self.vector.render(size);
         if ctx.prefers_gpu() {
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.rasterize(&graphic, target) {
-                    return image;
+                    return ctx.ensure_residency(image, residency);
                 }
             }
         }
-        rasterize(&graphic, target.width, target.height)
+        let image = rasterize(&graphic, target.width, target.height);
+        ctx.ensure_residency(image, residency)
     }
 }
 
@@ -287,7 +294,122 @@ fn to_skia_transform(t: &Transform) -> tiny_skia::Transform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::Any;
+    use std::sync::Arc;
+
     use tellur_core::geometry::Rect;
+    use tellur_core::raster::{CpuRasterImage, GpuSurface};
+    use tellur_core::render_context::{
+        CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput,
+    };
+    use tellur_core::shapes::Rectangle;
+
+    const TEST_GPU_BACKEND: &str = "tellur-rasterize-test";
+
+    #[derive(Default)]
+    struct TestGpu {
+        rasterizes: usize,
+    }
+
+    impl TestGpu {
+        fn image(target: Resolution) -> RasterImage {
+            let image = CpuRasterImage::new(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                vec![0; target.width as usize * target.height as usize * 4],
+            );
+            RasterImage::Gpu(GpuSurface::new(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                TEST_GPU_BACKEND,
+                Arc::new(image),
+            ))
+        }
+    }
+
+    impl GpuRasterBackend for TestGpu {
+        fn composite(
+            &mut self,
+            _target: Resolution,
+            _inputs: &[CompositeInput<'_>],
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn drop_shadow(&mut self, _input: DropShadowInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn outline(&mut self, _input: OutlineInput<'_>) -> Option<RasterImage> {
+            None
+        }
+
+        fn rasterize(
+            &mut self,
+            _graphic: &VectorGraphic,
+            target: Resolution,
+        ) -> Option<RasterImage> {
+            self.rasterizes += 1;
+            Some(Self::image(target))
+        }
+
+        fn solid_fill(&mut self, _target: Resolution, _color: Color) -> Option<RasterImage> {
+            None
+        }
+
+        fn temporal_average(
+            &mut self,
+            _target: Resolution,
+            _frames: &[&RasterImage],
+            _total: u32,
+        ) -> Option<RasterImage> {
+            None
+        }
+
+        fn readback(&mut self, image: RasterImage) -> Option<CpuRasterImage> {
+            match image {
+                RasterImage::Cpu(image) => Some(image),
+                RasterImage::Gpu(surface) if surface.backend() == TEST_GPU_BACKEND => {
+                    Arc::downcast::<CpuRasterImage>(surface.handle_arc())
+                        .ok()
+                        .map(|image| (*image).clone())
+                }
+                RasterImage::Gpu(_) => None,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct TestContext {
+        gpu: TestGpu,
+    }
+
+    impl RenderContext for TestContext {
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+
+        fn gpu_preference(&self) -> GpuPreference {
+            GpuPreference::PreferGpu
+        }
+
+        fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
+            Some(&mut self.gpu)
+        }
+
+        fn render(
+            &mut self,
+            component: &dyn RasterComponent,
+            size: Vec2,
+            target: Resolution,
+            residency: RasterResidency,
+        ) -> RasterImage {
+            let image = component.render(size, target, residency, self);
+            self.ensure_residency(image, residency)
+        }
+    }
 
     fn alpha_at(image: &RasterImage, x: u32, y: u32, width: u32) -> u8 {
         let cpu = image
@@ -299,6 +421,28 @@ mod tests {
     #[test]
     fn to_skia_dash_is_none_without_a_pattern() {
         assert!(to_skia_dash(None).is_none());
+    }
+
+    #[test]
+    fn cpu_result_can_use_gpu_execution() {
+        let component = Rasterize {
+            vector: Rectangle {
+                size: Vec2(1.0, 1.0),
+                fill: None,
+                stroke: None,
+            },
+        };
+        let mut ctx = TestContext::default();
+
+        let image = component.render(
+            Vec2(1.0, 1.0),
+            Resolution::new(1, 1),
+            RasterResidency::Cpu,
+            &mut ctx,
+        );
+
+        assert!(image.as_cpu().is_some());
+        assert_eq!(ctx.gpu.rasterizes, 1);
     }
 
     #[test]

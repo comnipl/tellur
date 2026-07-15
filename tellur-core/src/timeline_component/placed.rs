@@ -4,7 +4,7 @@
 use std::ops::Range;
 
 use crate::geometry::Vec2;
-use crate::raster::{RasterImage, Resolution};
+use crate::raster::{RasterImage, RasterResidency, Resolution};
 use crate::render_context::RenderContext;
 use crate::time::{LocalTime, Time};
 
@@ -198,6 +198,7 @@ impl TimelineComponent for Placed {
         clock: Clock<'_>,
         canvas: Vec2,
         target: Resolution,
+        residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> Option<RasterImage> {
         let t = clock.local().seconds();
@@ -240,7 +241,8 @@ impl TimelineComponent for Placed {
             }
         };
         let child_clock = clock.with_local_window(LocalTime::new(rebased), window);
-        self.child.frame(child_clock, canvas, target, ctx)
+        self.child
+            .frame(child_clock, canvas, target, residency, ctx)
     }
 
     fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
