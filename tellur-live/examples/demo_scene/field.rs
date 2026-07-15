@@ -37,7 +37,7 @@ pub fn Field(time: LocalTime, palette: Palette) -> impl VectorComponent {
             (0..COLS).map(move |c| {
                 let dx = (c as f32 - (COLS as f32 - 1.0) * 0.5) * SPACING_X;
                 let dy = (r as f32 - (ROWS as f32 - 1.0) * 0.5) * SPACING_Y;
-                let stagger = c as f32 * 0.05 + r as f32 * 0.025;
+                let stagger = c as f64 * 0.05 + r as f64 * 0.025;
                 let pop = time
                     .phase(1.95 + stagger, 2.45 + stagger)
                     .ease_out_cubic(0.0, 1.0);
@@ -93,7 +93,7 @@ pub fn Field(time: LocalTime, palette: Palette) -> impl VectorComponent {
         .children((0..ROWS).map(move |r| {
             let dy = (r as f32 - (ROWS as f32 - 1.0) * 0.5) * SPACING_Y;
             let label_in = time
-                .phase(2.1 + r as f32 * 0.04, 2.55 + r as f32 * 0.04)
+                .phase(2.1 + r as f64 * 0.04, 2.55 + r as f64 * 0.04)
                 .ease_out_cubic(0.0, 1.0);
             let label_out = time.phase(3.1, 3.5).ease_in_back(0.0, 1.0);
             let row_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;
@@ -115,7 +115,7 @@ pub fn Field(time: LocalTime, palette: Palette) -> impl VectorComponent {
         .children((0..COLS).map(move |c| {
             let dx = (c as f32 - (COLS as f32 - 1.0) * 0.5) * SPACING_X;
             let label_in = time
-                .phase(2.05 + c as f32 * 0.04, 2.5 + c as f32 * 0.04)
+                .phase(2.05 + c as f64 * 0.04, 2.5 + c as f64 * 0.04)
                 .ease_out_cubic(0.0, 1.0);
             let label_out = time.phase(3.1, 3.5).ease_in_back(0.0, 1.0);
             let col_alpha = (label_in * (1.0 - label_out)).clamp(0.0, 1.0) * life * 0.55;

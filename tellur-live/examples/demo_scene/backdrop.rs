@@ -18,8 +18,8 @@ use super::common::*;
 // event end (last tick). `reveal` is `time.window(START, END).clamped()`, so the
 // snapshot freezes once every sub-reveal has finished — which is what lets this
 // component hash-equal across the steady-state span and be reused from the cache.
-pub const BACKDROP_REVEAL_START: f32 = 0.05;
-pub const BACKDROP_REVEAL_END: f32 = 1.332;
+pub const BACKDROP_REVEAL_START: f64 = 0.05;
+pub const BACKDROP_REVEAL_END: f64 = 1.332;
 
 #[tellur_core::component(vector)]
 pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
@@ -39,7 +39,8 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
         // Faint horizon lines sliding in from the left.
         .children((0..18).map(move |i| {
             let y = 64.0 + i as f32 * 56.0;
-            let line = reveal.sub_secs((i as f32 * 0.008)..(0.4 + i as f32 * 0.008));
+            let stagger = i as f64 * 0.008;
+            let line = reveal.sub_secs(stagger..(0.4 + stagger));
             Rectangle::builder()
                 .size(Vec2(1920.0, 1.0))
                 .fill(p.paper.with_alpha(line.ease_in_out_expo(0.0, 0.022)))
@@ -68,8 +69,9 @@ pub fn Backdrop(reveal: Window, palette: Palette) -> impl VectorComponent {
         // subliminal "graduated horizon" detail.
         .children((0..12).map(move |i| {
             let a = i as f32 / 12.0 * TAU - PI * 0.5;
+            let stagger = i as f64 * 0.012;
             let tick_in = reveal
-                .sub_secs((0.7 + i as f32 * 0.012)..(1.15 + i as f32 * 0.012))
+                .sub_secs((0.7 + stagger)..(1.15 + stagger))
                 .ease_in_out_expo(0.0, 1.0);
             let major = i % 3 == 0;
             let r_base = 720.0;

@@ -41,7 +41,7 @@ export interface FrameRequestParams {
 export function frameUrl(params: FrameRequestParams): string {
   const query = new URLSearchParams({
     timeline: params.timelineId,
-    time: params.time.toFixed(4),
+    time: String(params.time),
     width: String(params.width),
     height: String(params.height),
     fps: String(params.fps),
@@ -65,7 +65,7 @@ export interface VideoRequestParams extends FrameRequestParams {
 export function videoUrl(params: VideoRequestParams): string {
   const query = new URLSearchParams({
     timeline: params.timelineId,
-    time: params.time.toFixed(4),
+    time: String(params.time),
     width: String(params.width),
     height: String(params.height),
     fps: String(params.fps),
@@ -75,7 +75,7 @@ export function videoUrl(params: VideoRequestParams): string {
     v: params.cacheKey,
   });
   if (params.duration != null) {
-    query.set("duration", params.duration.toFixed(4));
+    query.set("duration", String(params.duration));
   }
   if (params.session) {
     query.set("session", params.session);

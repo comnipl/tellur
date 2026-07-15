@@ -27,12 +27,11 @@
 //! downcasting their direct child to `Placed`, and an opaque wrapper around
 //! the `Placed` would hide it.
 
-use tellur_core::audio::AudioMix;
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{CpuRasterImage, PixelFormat, RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::timeline_component::{
-    Arrangement, AudioBuffer, Clock, Cue, ResolveCtx, TimelineComponent,
+    Arrangement, AudioBlockMut, AudioRenderContext, Clock, Cue, ResolveCtx, TimelineComponent,
 };
 use tellur_core::Keyable;
 
@@ -46,7 +45,7 @@ const MAX_SAMPLES: u32 = 64;
 pub struct MotionBlur {
     /// How long the virtual shutter stays open, in the child's local
     /// seconds. Samples cover the trailing window `[t - shutter, t]`.
-    pub shutter: f32,
+    pub shutter: f64,
     /// How many sub-clocks to sample across the shutter (clamped to
     /// `1..=64`). The current frame is always one of them.
     #[builder(default = 8)]
@@ -56,15 +55,15 @@ pub struct MotionBlur {
 }
 
 impl TimelineComponent for MotionBlur {
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         self.child.duration()
     }
 
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         self.child.measure()
     }
 
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         self.child.resolve(abs_start, out)
     }
 
@@ -93,7 +92,7 @@ impl TimelineComponent for MotionBlur {
         // baked params only, so sampling is deterministic.
         let frames: Vec<Option<RasterImage>> = (0..total)
             .map(|i| {
-                let dt = -self.shutter * (i as f32 / (total - 1) as f32);
+                let dt = -self.shutter * (i as f64 / (total - 1) as f64);
                 self.child
                     .frame(clock.shifted(dt), canvas, target, execution_residency, ctx)
             })
@@ -151,20 +150,16 @@ impl TimelineComponent for MotionBlur {
         Some(ctx.ensure_residency(image, residency))
     }
 
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // Audio is never temporally averaged; forward both channels intact.
-        self.child.samples(clock, window)
+    fn render_audio_block(&self, block: AudioBlockMut<'_>, ctx: &mut AudioRenderContext) {
+        // Audio is never temporally averaged by a video motion-blur wrapper.
+        self.child.render_audio_block(block, ctx);
     }
 
-    fn mix_into(&self, mix: &mut AudioMix, start_secs: f32, speed: f32) {
-        self.child.mix_into(mix, start_secs, speed);
-    }
-
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         self.child.cues(offset)
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // Transparent in the live panel: the wrapper adds no tree level.
         self.child.arrangement(offset)
     }
@@ -230,7 +225,7 @@ mod tests {
     }
 
     impl TimelineComponent for MovingDot {
-        fn duration(&self) -> Option<f32> {
+        fn duration(&self) -> Option<f64> {
             Some(10.0)
         }
 
@@ -243,7 +238,7 @@ mod tests {
             _ctx: &mut dyn RenderContext,
         ) -> Option<RasterImage> {
             let t = clock.local().seconds();
-            if t < self.appear_at_ms as f32 / 1000.0 {
+            if t < self.appear_at_ms as f64 / 1000.0 {
                 return None;
             }
             let mut pixels = vec![0u8; (target.width * target.height * 4) as usize];
@@ -260,7 +255,7 @@ mod tests {
             ))
         }
 
-        fn arrangement(&self, offset: f32) -> Arrangement {
+        fn arrangement(&self, offset: f64) -> Arrangement {
             Arrangement {
                 kind: NodeKind::Video,
                 label: String::new(),
@@ -275,11 +270,11 @@ mod tests {
         }
     }
 
-    fn clock_at(table: &TriggerTable, t: f32) -> Clock<'_> {
+    fn clock_at(table: &TriggerTable, t: f64) -> Clock<'_> {
         Clock::new(TimelineTime::new(t), LocalTime::new(t), table)
     }
 
-    fn blur(shutter: f32, samples: u32, appear_at_ms: i64) -> MotionBlur {
+    fn blur(shutter: f64, samples: u32, appear_at_ms: i64) -> MotionBlur {
         MotionBlur {
             shutter,
             samples,

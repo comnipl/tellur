@@ -43,7 +43,7 @@ pub trait TimelineComponent: DynEq + DynHash {
     /// This is the place-pass view of length; [`measure`](Self::measure) is the
     /// bottom-up measure-pass twin. Leaves usually define one and let the other
     /// default to it.
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         // Default: a component with no intrinsic length is timeless.
         None
     }
@@ -63,7 +63,7 @@ pub trait TimelineComponent: DynEq + DynHash {
     /// determinate `0.0` (`max(∅)` / `Σ(∅)`); the all-fill case should also
     /// [`warn`](ResolveCtx::warn) at place time. `None` means *timeless*: the
     /// length is supplied later by the placement window.
-    fn measure(&self) -> Option<f32> {
+    fn measure(&self) -> Option<f64> {
         self.duration()
     }
 
@@ -84,7 +84,7 @@ pub trait TimelineComponent: DynEq + DynHash {
     /// The default is the leaf behaviour: record nothing and report own length
     /// (falling back to `0.0` for a timeless leaf, whose interval comes from the
     /// placement window instead).
-    fn resolve(&self, abs_start: f32, out: &mut ResolveCtx) -> f32 {
+    fn resolve(&self, abs_start: f64, out: &mut ResolveCtx) -> f64 {
         // Leaves record no triggers and report their own (possibly absent)
         // length; containers (step 4) override to recurse and place children.
         let _ = (abs_start, out);
@@ -108,37 +108,20 @@ pub trait TimelineComponent: DynEq + DynHash {
         None
     }
 
-    /// Audio channel for `[clock, clock + window)`. `None` ⇒ silent.
-    fn samples(&self, clock: Clock<'_>, window: f32) -> Option<AudioBuffer> {
-        // The eager mix-down (step 8) uses [`mix_into`](Self::mix_into) instead
-        // of this per-window pull; this stays the (unused) per-window seam.
-        let _ = (clock, window);
-        None
-    }
-
-    /// Eager mix-down hook (step 8, B4 v1 — `.sketch/01` ZONE C / `.sketch/02
-    /// §15`). Contributes this node's audio into `mix` (a fixed rate / channel
-    /// layout buffer for `[0, duration]`), placing it at the absolute
-    /// `start_secs` and accounting for the accumulated placement `speed`.
+    /// Renders one interleaved f32 audio block on this component's local clock.
     ///
-    /// CONTRACT: mirrors [`resolve`](Self::resolve) / [`frame`](Self::frame)
-    /// placement — a container recurses over its own children, advancing
-    /// `start_secs` exactly as it advances absolute starts (a
-    /// [`Sequence`](crate::timeline_container::Sequence)
-    /// cursor sums prior lengths; a
-    /// [`Timeline`](crate::timeline_container::Timeline) overlays at the same
-    /// base), and
-    /// a [`Placed`] shifts by its relative start and folds its window
-    /// `speed()` in. A leaf decodes / conforms / sums via
-    /// [`AudioMix::add`](crate::audio::AudioMix::add). The default is the
-    /// timeless / silent behaviour: contribute nothing.
-    fn mix_into(&self, mix: &mut crate::audio::AudioMix, start_secs: f32, speed: f32) {
-        let _ = (mix, start_secs, speed);
+    /// The root request is identified by an integer output-frame range. Temporal
+    /// wrappers recursively remap the request's affine local-time axis, so
+    /// placement, trimming, and effects preserve their tree order without a
+    /// separate resolved audio graph. Implementations must overwrite the whole
+    /// block; the default is silence.
+    fn render_audio_block(&self, mut block: AudioBlockMut<'_>, _ctx: &mut AudioRenderContext) {
+        block.clear();
     }
 
     /// Subtitle channel: cues made absolute by adding `offset` (this
     /// component's resolved start). Collected once at export.
-    fn cues(&self, offset: f32) -> Vec<Cue> {
+    fn cues(&self, offset: f64) -> Vec<Cue> {
         // TODO(task 5+): Subtitle leaves / containers contribute cues.
         let _ = offset;
         Vec::new()
@@ -155,7 +138,7 @@ pub trait TimelineComponent: DynEq + DynHash {
     ///
     /// Named `arrangement` (not `outline`) to avoid clashing with the existing
     /// `tellur_renderer::Outline` raster effect (audit hygiene note).
-    fn arrangement(&self, offset: f32) -> Arrangement;
+    fn arrangement(&self, offset: f64) -> Arrangement;
 
     /// The STRUCTURAL `&dyn Any` behind this component, peeling any transparent
     /// decorator. A container inspecting a child's concrete type (e.g.
@@ -207,7 +190,7 @@ where
     C: RasterComponent + 'static,
 {
     // A timeless visual has no intrinsic length; the placement window sets it.
-    fn duration(&self) -> Option<f32> {
+    fn duration(&self) -> Option<f64> {
         None
     }
 
@@ -256,15 +239,11 @@ where
         ))
     }
 
-    fn samples(&self, _clock: Clock<'_>, _window: f32) -> Option<AudioBuffer> {
-        None
-    }
-
-    fn cues(&self, _offset: f32) -> Vec<Cue> {
+    fn cues(&self, _offset: f64) -> Vec<Cue> {
         Vec::new()
     }
 
-    fn arrangement(&self, offset: f32) -> Arrangement {
+    fn arrangement(&self, offset: f64) -> Arrangement {
         // A timeless visual surfaces as a Video-kind node — every rasterized
         // visual (a backdrop, a caption telop, a reveal) lives on the video
         // (映像) track; there is no separate caption kind. Un-windowed it is

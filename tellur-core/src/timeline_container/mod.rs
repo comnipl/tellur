@@ -20,7 +20,7 @@
 //! The leaves ([`VideoFile`], [`AudioFile`], [`Subtitle`]) are buildless
 //! builders. Media DECODE is steps 8/9; here their length comes from a stubbed
 //! `VideoFile::probe` seam (a caller-injectable `duration`), and
-//! `frame` / `samples` stay `None` placeholders.
+//! `frame` stays `None` and audio block rendering stays silent.
 
 mod containers;
 mod leaves;

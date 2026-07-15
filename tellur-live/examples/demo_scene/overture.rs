@@ -25,7 +25,7 @@ pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
     let hero_in = time.phase(0.55, 1.2).eased(Easing::OutCubic);
     let hero_remain = time.phase(1.7, 2.15).ease_in_back(1.0, 0.0);
     let hero_life = (hero_in.get() * hero_remain).clamp(0.0, 1.0);
-    let spin = time.seconds() * 0.35 + PI * 0.25;
+    let spin = (time.seconds() * 0.35) as f32 + PI * 0.25;
     let scale = hero_in.linear(0.55, 1.0) * hero_remain;
     let s_clamped = scale.max(0.001);
 
@@ -64,7 +64,7 @@ pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
             bars.into_iter()
                 .enumerate()
                 .map(move |(i, (dy, side, color))| {
-                    let stagger = i as f32 * 0.06;
+                    let stagger = i as f64 * 0.06;
                     let enter = time
                         .phase(0.32 + stagger, 0.92 + stagger)
                         .eased(Easing::InOutExpo);
@@ -233,7 +233,7 @@ pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
             // Small index tag next to each outside dot. The tag follows the
             // dot's rotated position so it always reads on the outside.
             let label_in = time
-                .phase(1.0 + s as f32 * 0.04, 1.4 + s as f32 * 0.04)
+                .phase(1.0 + s as f64 * 0.04, 1.4 + s as f64 * 0.04)
                 .ease_out_cubic(0.0, 1.0);
             let label_alpha =
                 hero_life * label_in * time.phase(1.7, 2.05).ease_in_back(1.0, 0.0) * 0.6;

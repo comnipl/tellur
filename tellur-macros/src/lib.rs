@@ -862,21 +862,21 @@ fn timeline_codegen<'a>(
 
     let trait_impl = quote! {
         impl #trait_path for #struct_ident {
-            fn duration(&self) -> ::core::option::Option<f32> {
+            fn duration(&self) -> ::core::option::Option<f64> {
                 let __child = #build_structural;
                 #trait_path::duration(&__child)
             }
 
-            fn measure(&self) -> ::core::option::Option<f32> {
+            fn measure(&self) -> ::core::option::Option<f64> {
                 let __child = #build_structural;
                 #trait_path::measure(&__child)
             }
 
             fn resolve(
                 &self,
-                abs_start: f32,
+                abs_start: f64,
                 out: &mut #core::timeline_component::ResolveCtx,
-            ) -> f32 {
+            ) -> f64 {
                 let __child = #build_structural;
                 #trait_path::resolve(&__child, abs_start, out)
             }
@@ -900,35 +900,23 @@ fn timeline_codegen<'a>(
                 )
             }
 
-            fn samples(
+            fn render_audio_block(
                 &self,
-                clock: #core::timeline_component::Clock<'_>,
-                window: f32,
-            ) -> ::core::option::Option<#core::timeline_component::AudioBuffer> {
-                let __child = #build_with_clock;
-                #trait_path::samples(&__child, clock, window)
-            }
-
-            fn mix_into(
-                &self,
-                mix: &mut #core::audio::AudioMix,
-                start_secs: f32,
-                speed: f32,
+                block: #core::timeline_component::AudioBlockMut<'_>,
+                ctx: &mut #core::timeline_component::AudioRenderContext,
             ) {
-                // Delegate the eager audio mix-down to the body, exactly like
-                // `cues`/`arrangement`. Without this the generated impl falls back
-                // to the trait's silent default, muting any fn-form component that
-                // composes audio (e.g. a `Dialogue(voice: AudioFile)`).
+                // Audio follows the same structural body as resolve/cues. The
+                // request itself carries the recursively remapped local clock.
                 let __child = #build_structural;
-                #trait_path::mix_into(&__child, mix, start_secs, speed);
+                #trait_path::render_audio_block(&__child, block, ctx);
             }
 
-            fn cues(&self, offset: f32) -> ::std::vec::Vec<#core::timeline_component::Cue> {
+            fn cues(&self, offset: f64) -> ::std::vec::Vec<#core::timeline_component::Cue> {
                 let __child = #build_structural;
                 #trait_path::cues(&__child, offset)
             }
 
-            fn arrangement(&self, offset: f32) -> #core::timeline_component::Arrangement {
+            fn arrangement(&self, offset: f64) -> #core::timeline_component::Arrangement {
                 // Relabel the delegated node IN PLACE: build the child node, then
                 // stamp this component's display name onto it. No extra tree level
                 // is introduced — the inner kind/interval/children are preserved.

@@ -17,20 +17,20 @@ use super::common::*;
 /// dash's eased midpoint peaks around 14 000 logical px/s, so even this
 /// short shutter draws a ~240 px trail; 16 samples keep the dots
 /// overlapping into a continuous streak.
-pub const STREAK_SHUTTER: f32 = 1.0 / 60.0;
+pub const STREAK_SHUTTER: f64 = 1.0 / 60.0;
 
 /// Sample count matched to [`STREAK_SHUTTER`] (see above).
 pub const STREAK_SAMPLES: u32 = 16;
 
-const FADE_IN_START: f32 = 1.7;
-const FADE_IN_END: f32 = 2.0;
-const FADE_OUT_START: f32 = 6.9;
-const FADE_OUT_END: f32 = 7.3;
+const FADE_IN_START: f64 = 1.7;
+const FADE_IN_END: f64 = 2.0;
+const FADE_OUT_START: f64 = 6.9;
+const FADE_OUT_END: f64 = 7.3;
 
-const DASH_LTR_START: f32 = 2.3;
-const DASH_LTR_END: f32 = 2.8;
-const DASH_RTL_START: f32 = 4.7;
-const DASH_RTL_END: f32 = 5.2;
+const DASH_LTR_START: f64 = 2.3;
+const DASH_LTR_END: f64 = 2.8;
+const DASH_RTL_START: f64 = 4.7;
+const DASH_RTL_END: f64 = 5.2;
 
 const X_REST: f32 = 250.0;
 const X_SPAN: f32 = 1420.0;

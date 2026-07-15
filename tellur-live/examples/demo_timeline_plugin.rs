@@ -7,7 +7,7 @@
 mod scene;
 
 // The demo scene now builds a native `TimelineComponent` (`Scene`), so it is
-// exported directly through the v5 collection. The scene is authored against the
+// exported directly through the v6 collection. The scene is authored against the
 // 1920x1080 logical canvas (`SCENE_CANVAS`), passed here so the resolve pass
 // lays the tree out at SCENE_SIZE — matching the original `.render(SCENE_SIZE,…)`.
 tellur_live::export_timeline!(

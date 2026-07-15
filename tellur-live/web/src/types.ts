@@ -18,8 +18,9 @@ export type NodeKind =
   | "sequence";
 
 // Mirror of `tellur_core::timeline_component::Arrangement` (see server.rs
-// `arrangement_json`). `trim` is the source crop `[a, b]` or null; `triggers`
-// are absolute times where Events fire; `children` nests recursively.
+// `arrangement_json`). `trim` is the outermost generic trim operation's
+// immediate-child range `[a, b]` or null (not necessarily a media source crop);
+// `triggers` are absolute times where Events fire; `children` nests recursively.
 export interface Arrangement {
   kind: NodeKind;
   label: string;

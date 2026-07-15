@@ -129,7 +129,7 @@ fn TitleCard(#[builder(into)] source: String, alpha: f32) -> impl VectorComponen
 1. **その数値は別の数値から導出されていないか？** `const TITLE_X: f32 = CANVAS_W *
    0.5 - 120.0;` のような算術関係は、`Anchor` の相対指定や `Frame`/`Flex`/`Padding`
    で構造として表現する。導出式を const に閉じ込めるのは隠蔽であって解決ではない
-2. **時刻表になっていないか？** `const SCENE2_START: f32 = 12.3;` のような絶対時刻の
+2. **時刻表になっていないか？** `const SCENE2_START: f64 = 12.3;` のような絶対時刻の
    カスケードは、`Sequence` の並び・`TimeBox` の間・`Event` トリガで「配置から時刻が
    導かれる」形にする。台本を差し替えても壊れないのが正しい構造
 3. **2 箇所以上で同じ数値を使っているか？** 1 箇所でしか使わない演出リテラル
@@ -210,8 +210,14 @@ src/
    `let after = |cue: Event| cue.phase(&clock, 0.0, 0.45).ease_out_cubic(0.0, 1.0);`
 
 時間配置の語彙は 4 つだけ: `.at(secs)`（絶対配置）、`.at(a..b)`（窓 = timed clip
-にはストレッチ）、`.fill()`（コンテナ長に合わせる）、`.trim(a..b)`（ソース秒の
-切り出し）。「間」や「尺の確保」は `TimeBox`。
+にはストレッチ）、`.fill()`（コンテナ長に合わせる）、`.trim(a..b)`（任意の
+component を wrap して再基底化）。負の trim 端点は直接の child end から逆算し、open end は正確な終端を意味する。「間」や「尺の確保」は `TimeBox`。
+
+audio gain effect も順序を持つ wrapper: `.gain_envelope((time, gain), (time,
+gain))`、`.fade_in(seconds)`、`.fade_out(seconds)`。builder call はその場で wrap
+するため、`x.fade_in(1.0).trim(0.5..)` は内側fadeの0.5秒地点から始まり、
+`x.trim(0.5..).fade_in(1.0)` はtrim後のlocal zeroから新しいfadeを始める。
+source 設定 → effect → 配置の順を推奨する。`.fill()` は構造markerなので必ず最後・最外側に置き、`source.fade_out(0.25).fill()` と書く（逆順は禁止）。
 
 ## 8. footgun 一覧（チュートリアルより・要暗記）
 
@@ -233,6 +239,9 @@ src/
     `.transform()` / `.transform_around()` も vector 専用。`.opacity()` は両方にある
 12. 再エクスポート（`some_crate::tellur`）越しに `#[component]` を使う場合、
     マクロのパス解決のため動画クレート側にも同一版の `tellur` 直接依存を併記する
+13. temporal builder call は順序付きwrapper。`.trim()` と audio effect の順を入れ替えると、
+    effect が見るlocal clockも意図的に変わる
+14. `.fill()` は親 `Timeline` が尺計算から除外できるよう、必ず最外側のtemporal verbにする
 
 ## 9. 参照実装
 

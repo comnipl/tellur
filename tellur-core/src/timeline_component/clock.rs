@@ -25,7 +25,7 @@ pub struct Clock<'a> {
     /// Resolved LOCAL window length (this component's own post-stretch seconds),
     /// or `None` for an open-ended placement (`.fill()`, a bare timeless point,
     /// the root). Carried for FRAME only — structure is never window-aware.
-    window: Option<f32>,
+    window: Option<f64>,
 }
 
 impl<'a> Clock<'a> {
@@ -45,7 +45,7 @@ impl<'a> Clock<'a> {
     /// (`duration`/`measure`/`resolve`/`cues`/`arrangement`) to build the body
     /// when there is no per-frame clock to forward. This is sound because a
     /// component's STRUCTURE must be clock-independent by design (the audit
-    /// model: `frame`/`samples` bake per-frame values into a stable structure,
+    /// model: `frame`/`render_audio_block` bake sampled values into a stable structure,
     /// so the resolved shape never varies with the clock value). A body that
     /// branches its structure on `clock` violates that contract.
     pub fn structural() -> Clock<'static> {
@@ -80,7 +80,7 @@ impl<'a> Clock<'a> {
     /// soundness rule (`.sketch/02 §8`): the window is set ONLY by the node that
     /// owns it (a `Placed` / `Sequence` slot) at the same site it rebases, never
     /// carried-then-cleared. A pure-rebase node uses [`with_local`](Self::with_local) instead.
-    pub fn with_local_window(&self, local: LocalTime, window: Option<f32>) -> Clock<'a> {
+    pub fn with_local_window(&self, local: LocalTime, window: Option<f64>) -> Clock<'a> {
         Clock {
             global: self.global,
             local,
@@ -104,7 +104,7 @@ impl<'a> Clock<'a> {
     /// averages the frames. Shifting `global` together with `local` keeps
     /// [`Event`]-driven animation consistent with local-phase animation
     /// under the shifted clock.
-    pub fn shifted(&self, dt: f32) -> Clock<'a> {
+    pub fn shifted(&self, dt: f64) -> Clock<'a> {
         Clock {
             global: TimelineTime::new(self.global.seconds() + dt),
             local: LocalTime::new(self.local.seconds() + dt),

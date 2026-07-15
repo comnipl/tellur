@@ -13,7 +13,7 @@ use crate::time::TimelineTime;
 /// A scene defined over a finite time interval.
 pub trait Timeline {
     /// Total length of the timeline, in seconds.
-    fn duration(&self) -> f32;
+    fn duration(&self) -> f64;
 
     /// Produces the frame for `t` at the requested `target` resolution and
     /// consumer-requested representation. `ctx` is supplied by the renderer
@@ -30,7 +30,7 @@ pub trait Timeline {
 /// Builds a [`Timeline`] from a closure. The closure receives the current time,
 /// target resolution, consumer-requested residency, and render context, and
 /// returns the rasterized frame.
-pub fn timeline<F>(duration: f32, build: F) -> impl Timeline
+pub fn timeline<F>(duration: f64, build: F) -> impl Timeline
 where
     F: Fn(TimelineTime, Resolution, RasterResidency, &mut dyn RenderContext) -> RasterImage,
 {
@@ -38,7 +38,7 @@ where
 }
 
 struct FnTimeline<F> {
-    duration: f32,
+    duration: f64,
     build: F,
 }
 
@@ -46,7 +46,7 @@ impl<F> Timeline for FnTimeline<F>
 where
     F: Fn(TimelineTime, Resolution, RasterResidency, &mut dyn RenderContext) -> RasterImage,
 {
-    fn duration(&self) -> f32 {
+    fn duration(&self) -> f64 {
         self.duration
     }
 

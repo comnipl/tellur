@@ -103,8 +103,8 @@ impl Frame {
 /// A shared map so the resolve pass never re-probes the same file (`.sketch/02
 /// §12`); the duration is pure data, so unlike the decoder state it COULD live on
 /// the leaf, but keeping it here keeps [`VideoFile`] trivially `Keyable`.
-fn duration_cache() -> &'static Mutex<HashMap<String, f32>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, f32>>> = OnceLock::new();
+fn duration_cache() -> &'static Mutex<HashMap<String, f64>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -112,7 +112,7 @@ fn duration_cache() -> &'static Mutex<HashMap<String, f32>> {
 /// Returns `None` if `ffprobe` is unavailable, the file is missing, or the
 /// duration cannot be parsed — the caller falls back to a stub so resolve still
 /// has a determinate length (mirrors `AudioFile`'s graceful decode fallback).
-pub fn probe_duration(path: &str) -> Option<f32> {
+pub fn probe_duration(path: &str) -> Option<f64> {
     if let Some(d) = duration_cache().lock().unwrap().get(path).copied() {
         return Some(d);
     }
@@ -122,7 +122,7 @@ pub fn probe_duration(path: &str) -> Option<f32> {
 }
 
 /// Runs `ffprobe -show_entries format=duration` and parses the seconds value.
-fn run_ffprobe_duration(path: &str) -> Option<f32> {
+fn run_ffprobe_duration(path: &str) -> Option<f64> {
     let output = Command::new("ffprobe")
         .args(["-v", "error"])
         .args(["-show_entries", "format=duration"])
@@ -134,7 +134,7 @@ fn run_ffprobe_duration(path: &str) -> Option<f32> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let secs: f32 = text.trim().parse().ok()?;
+    let secs: f64 = text.trim().parse().ok()?;
     if secs.is_finite() && secs >= 0.0 {
         Some(secs)
     } else {
@@ -145,18 +145,18 @@ fn run_ffprobe_duration(path: &str) -> Option<f32> {
 // ── the source-time remap (pure, unit-tested without ffmpeg) ───────────────────
 
 /// Maps the leaf's `local` clock seconds to a SOURCE time (seconds into the
-/// file). The `Placed` wrapper has already shifted local to the clip start and
-/// folded the placement `speed` into it before the leaf sees it (`Placed::frame`
-/// in `timeline_component.rs`), so the leaf only adds its own `.trim` start:
-/// `source = trim_start + local`, clamped at 0. With no trim, `trim_start = 0`.
-pub fn source_time(local_secs: f32, trim: Option<(f32, f32)>) -> f32 {
+/// file). Temporal wrappers normally shift, stretch, and trim the local clock
+/// before `VideoFile` calls this helper with `None`. The optional range remains
+/// a low-level compatibility seam: when supplied, its start is added as
+/// `source = trim_start + local`, clamped at 0.
+pub fn source_time(local_secs: f64, trim: Option<(f64, f64)>) -> f64 {
     let trim_start = trim.map(|(a, _)| a).unwrap_or(0.0);
     (trim_start + local_secs).max(0.0)
 }
 
 /// Converts a source time (seconds) to a frame index on the fixed decode grid.
-fn frame_index_for(source_secs: f32) -> u64 {
-    (source_secs as f64 * DECODE_FPS).round().max(0.0) as u64
+fn frame_index_for(source_secs: f64) -> u64 {
+    (source_secs * DECODE_FPS).round().max(0.0) as u64
 }
 
 // ── the decode-position rule (pure, unit-tested with a mock seam) ──────────────
@@ -269,7 +269,7 @@ impl VideoDecoder {
     /// the SMALLEST forward advance (so the request rides an existing child); else
     /// a cold seek on a fresh cursor. Keying the decision per cursor — not against
     /// one shared position — is what stops concurrent consumers from thrashing.
-    fn frame_at(&mut self, source_secs: f32) -> Option<RasterImage> {
+    fn frame_at(&mut self, source_secs: f64) -> Option<RasterImage> {
         let target_index = frame_index_for(source_secs);
         self.tick = self.tick.wrapping_add(1);
 
@@ -332,7 +332,7 @@ impl VideoDecoder {
     /// its first emitted frame as `target_index`. Evicts the stalest cursor first
     /// when at [`MAX_CURSORS`]. The frame cache survives (it is keyed by absolute
     /// frame index, not child position).
-    fn seek(&mut self, target_index: u64, source_secs: f32) -> Option<RasterImage> {
+    fn seek(&mut self, target_index: u64, source_secs: f64) -> Option<RasterImage> {
         if self.cursors.len() >= MAX_CURSORS {
             if let Some((stalest, _)) = self
                 .cursors
@@ -405,8 +405,8 @@ fn read_exact_or_eof(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<bool>
 /// `-ss` BEFORE `-i` is the fast (keyframe) input seek; ffmpeg then realigns to
 /// the requested time. The `fps` + `scale` filters fix the output cadence and
 /// size so a frame index maps deterministically to bytes.
-fn spawn_decoder(path: &str, target: Resolution, start_secs: f32) -> Option<Running> {
-    let ss = format!("{:.6}", start_secs.max(0.0));
+fn spawn_decoder(path: &str, target: Resolution, start_secs: f64) -> Option<Running> {
+    let ss = start_secs.max(0.0).to_string();
     let vf = format!(
         "fps={},scale={}:{}:flags=bilinear",
         DECODE_FPS, target.width, target.height
@@ -453,8 +453,9 @@ fn decoder_pool() -> &'static Mutex<LruCache<DecoderKey, VideoDecoder>> {
     })
 }
 
-/// Decodes one frame of `path` at the leaf's `local` clock time, scaled to
-/// `target`, honoring the `.trim` start. The entry the
+/// Decodes one frame of `path` at the leaf's already-remapped local clock time,
+/// scaled to `target`. An optional low-level source offset is still accepted for
+/// compatibility and tests. This is the entry the
 /// [`VideoFile`](crate::timeline_container::VideoFile) leaf calls from its
 /// `frame`. Resolves (or lazily spawns) the process-global decoder for
 /// `(path, target)` and pulls the frame at the remapped source time.
@@ -463,8 +464,8 @@ fn decoder_pool() -> &'static Mutex<LruCache<DecoderKey, VideoDecoder>> {
 /// leaf then contributes nothing visually for this frame.
 pub fn decode_frame(
     path: &str,
-    local_secs: f32,
-    trim: Option<(f32, f32)>,
+    local_secs: f64,
+    trim: Option<(f64, f64)>,
     target: Resolution,
 ) -> Option<RasterImage> {
     let source = source_time(local_secs, trim);
@@ -506,7 +507,7 @@ mod tests {
         assert!(status.success(), "ffmpeg testsrc fixture write failed");
     }
 
-    fn frame_bytes_at(path: &str, t: f32, target: Resolution) -> Vec<u8> {
+    fn frame_bytes_at(path: &str, t: f64, target: Resolution) -> Vec<u8> {
         let img = decode_frame(path, t, None, target)
             .unwrap_or_else(|| panic!("decoded a frame at t={t}"));
         img.as_cpu().expect("cpu frame").pixels.to_vec()
@@ -528,7 +529,7 @@ mod tests {
         let target = Resolution::new(64, 48);
 
         // One source second on the 30 fps decode grid.
-        let times: Vec<f32> = (0..30).map(|i| i as f32 / DECODE_FPS as f32).collect();
+        let times: Vec<f64> = (0..30).map(|i| i as f64 / DECODE_FPS).collect();
 
         // Monotonic baseline on copy A: every request is a forward advance.
         let monotonic: Vec<Vec<u8>> = times

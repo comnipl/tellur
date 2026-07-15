@@ -50,14 +50,14 @@ const CANVAS_H: f32 = 1080.0;
 const CX: f32 = CANVAS_W * 0.5;
 
 // Five equal chapters laid end-to-end ⇒ the whole piece is `5 * SEGMENT`.
-const SEGMENT: f32 = 2.8;
-const TOTAL: f32 = SEGMENT * 5.0;
+const SEGMENT: f64 = 2.8;
+const TOTAL: f64 = SEGMENT * 5.0;
 
 // The "Event" chapter is the 4th of the five (3 chapters precede it), so it
 // starts at `3*SEGMENT`; `mark` fires `EVENT_LOCAL` into it. The ruler draws —
 // and pulses — its event marker at that same absolute position.
-const EVENT_LOCAL: f32 = 1.35;
-const EVENT_AT_GLOBAL: f32 = SEGMENT * 3.0 + EVENT_LOCAL;
+const EVENT_LOCAL: f64 = 1.35;
+const EVENT_AT_GLOBAL: f64 = SEGMENT * 3.0 + EVENT_LOCAL;
 
 // Shared persistent-ruler geometry — also read by the Clock chapter's lead line.
 const RULER_X0: f32 = 190.0;
@@ -105,8 +105,8 @@ fn ease_out(p: f32) -> f32 {
 fn transition(clock: &Clock<'_>) -> (f32, f32) {
     let l = clock.local().seconds();
     let w = clock.window().map(|w| w.width()).unwrap_or(SEGMENT);
-    let tin = ease((l / 0.32).clamp(0.0, 1.0));
-    let tout = ease(((w - l) / 0.24).clamp(0.0, 1.0));
+    let tin = ease((l / 0.32).clamp(0.0, 1.0) as f32);
+    let tout = ease(((w - l) / 0.24).clamp(0.0, 1.0) as f32);
     (tin * tout, (1.0 - tin) - (1.0 - tout))
 }
 
@@ -193,12 +193,12 @@ fn text_at(s: &str, cx: f32, cy: f32, size: f32, weight: Weight, c: Color) -> Ra
 }
 
 /// Maps an absolute timeline second onto its x position on the persistent ruler.
-fn ruler_x(secs: f32) -> f32 {
-    RULER_X0 + (RULER_X1 - RULER_X0) * (secs / TOTAL).clamp(0.0, 1.0)
+fn ruler_x(secs: f64) -> f32 {
+    RULER_X0 + (RULER_X1 - RULER_X0) * (secs / TOTAL).clamp(0.0, 1.0) as f32
 }
 
 /// Absolute second boundaries of the five chapters.
-fn section_bounds() -> [f32; 6] {
+fn section_bounds() -> [f64; 6] {
     [
         0.0,
         SEGMENT,
@@ -225,7 +225,8 @@ fn Backdrop(#[clock] clock: Clock) -> impl TimelineComponent {
         .map(|i| {
             let t = i as f32 / (BANDS - 1) as f32; // 0 at top, 1 at bottom
             let spot = (-((t - 0.30).powi(2)) / 0.11).exp(); // soft vertical spotlight
-            let drift = 0.008 * ((secs * 0.16 + t * 1.3) * TAU).sin();
+            let drift =
+                (0.008 * ((secs * 0.16 + f64::from(t) * 1.3) * f64::from(TAU)).sin()) as f32;
             let value = (0.042 + 0.095 * spot + drift).max(0.0);
             fill_rect(
                 CX,
@@ -486,7 +487,7 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
             s.push(fill_circle(hx, hy, base * 1.35, fade(c, a)));
         };
         // Timeline (global) hand: slow + short, one revolution per whole piece.
-        let ga = global * (TAU / TOTAL) - PI * 0.5;
+        let ga = (global * (f64::from(TAU) / TOTAL) - f64::from(PI) * 0.5) as f32;
         hand(
             cx + ga.cos() * r * 0.52,
             cy + ga.sin() * r * 0.52,
@@ -495,7 +496,7 @@ fn ClockDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
             AMBER,
         );
         // Local hand: fast + long, one revolution / 2s, drawn on top.
-        let la = local * (TAU / 2.0) - PI * 0.5;
+        let la = (local * (f64::from(TAU) / 2.0) - f64::from(PI) * 0.5) as f32;
         hand(
             cx + la.cos() * r * 0.80,
             cy + la.sin() * r * 0.80,
@@ -563,7 +564,7 @@ fn SequenceDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let mut shapes: Vec<Positioned> = Vec::new();
     let mut letters: Vec<RasterPositioned> = Vec::new();
     // Baseline grows in from the left as the blocks land on it.
-    let base_w = row_w * ease_out(l / 1.7);
+    let base_w = row_w * ease_out((l / 1.7) as f32);
     shapes.push(fill_rect(
         left + base_w * 0.5,
         cy + bh * 0.5 + 24.0,
@@ -573,11 +574,11 @@ fn SequenceDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     ));
     for i in 0..3 {
         let slot_x = left + bw * 0.5 + i as f32 * (bw + gap);
-        let local = l - i as f32 * 0.5; // staggered entry
-        let e = ease_out(local / 0.55);
+        let local = l - i as f64 * 0.5; // staggered entry
+        let e = ease_out((local / 0.55) as f32);
         let from_x = slot_x - 440.0; // slide in from the left
         let cx = from_x + (slot_x - from_x) * e;
-        let alpha = a * (local / 0.22).clamp(0.0, 1.0);
+        let alpha = a * (local / 0.22).clamp(0.0, 1.0) as f32;
         shapes.push(fill_rect(cx, cy, bw, bh, fade(colors[i], alpha)));
         shapes.push(stroke_rect(cx, cy, bw, bh, fade(INK, alpha * 0.7), 2.0));
         letters.push(text_at(
@@ -616,8 +617,8 @@ fn EventDiagram(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
     // The playhead sweeps the track linearly over [0.2, SEGMENT-0.2]; place the
     // marker at the fraction the playhead occupies at EVENT_LOCAL so they meet.
     let sweep = SEGMENT - 0.4;
-    let mx = x0 + span * ((EVENT_LOCAL - 0.2) / sweep).clamp(0.0, 1.0);
-    let px = x0 + span * ((l - 0.2) / sweep).clamp(0.0, 1.0);
+    let mx = x0 + span * ((EVENT_LOCAL - 0.2) / sweep).clamp(0.0, 1.0) as f32;
+    let px = x0 + span * ((l - 0.2) / sweep).clamp(0.0, 1.0) as f32;
 
     let ph = event.phase(&clock, 0.0, 0.55).get();
     let appear = event.phase(&clock, 0.0, 0.4).get(); // 0→1 once fired
@@ -699,7 +700,7 @@ fn TimelineDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
     let colors = [SLATE, TEAL, SAND];
 
     // The playhead sweeps at a constant rate; clips light up as it crosses them.
-    let px = lane_x + lane_w * ((l - 0.3) / (SEGMENT - 0.6)).clamp(0.0, 1.0);
+    let px = lane_x + lane_w * ((l - 0.3) / (SEGMENT - 0.6)).clamp(0.0, 1.0) as f32;
     let mut shapes: Vec<Positioned> = Vec::new();
     let mut labels: Vec<RasterPositioned> = Vec::new();
     for (li, clips) in lanes.iter().enumerate() {
@@ -719,7 +720,7 @@ fn TimelineDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
             Weight::BOLD,
             fade(MUTED, a),
         ));
-        let e = ease_out((l - li as f32 * 0.3) / 0.5); // wipe progress
+        let e = ease_out(((l - li as f64 * 0.3) / 0.5) as f32); // wipe progress
         for (sf, wf) in clips.iter() {
             let full = (lane_w * wf - 6.0).max(0.0);
             let w_now = full * e;

@@ -80,7 +80,7 @@ fn Dialogue(#[builder(into)] voice: AudioFile) -> impl TimelineComponent {
     Timeline::builder().child(voice).build()
 }
 
-fn voice(seconds: f32) -> AudioFile {
+fn voice(seconds: f64) -> AudioFile {
     AudioFile::builder()
         .path("media/vo.wav")
         .duration(seconds)
@@ -90,7 +90,7 @@ fn voice(seconds: f32) -> AudioFile {
 // The whole `.sketch/01` B.2 shape, parameterized on the line-1 voice length
 // (the upstream length that re-flows line-2's start), with the reveal event
 // threaded in so the test can read its resolved trigger time.
-fn build_piece(reveal: Event, line1: f32, line2: f32, line3: f32) -> impl TimelineComponent {
+fn build_piece(reveal: Event, line1: f64, line2: f64, line3: f64) -> impl TimelineComponent {
     Timeline::builder()
         .child(
             Sequence::builder()
@@ -108,7 +108,7 @@ fn build_piece(reveal: Event, line1: f32, line2: f32, line3: f32) -> impl Timeli
         .build()
 }
 
-fn alpha_at(resolved: &ResolvedTimeline, t: f32) -> u8 {
+fn alpha_at(resolved: &ResolvedTimeline, t: f64) -> u8 {
     let mut ctx = PassThrough;
     let frame = resolved
         .frame(
@@ -195,7 +195,7 @@ fn unfired_event_stays_zero_with_no_nan() {
     // The event has no recorded time ⇒ reads as +∞.
     assert!(resolved.triggers().get(never.id()).seconds().is_infinite());
 
-    for &t in &[0.0_f32, 1.0, 3.0, 5.9] {
+    for &t in &[0.0_f64, 1.0, 3.0, 5.9] {
         let a = alpha_at(&resolved, t);
         assert_eq!(a, 0, "unfired event ⇒ opacity 0 at t={t}");
     }

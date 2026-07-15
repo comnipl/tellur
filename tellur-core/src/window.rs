@@ -47,21 +47,21 @@ use crate::Keyable;
 /// [`Phase`] needs to talk about coordinates outside the window.
 ///
 /// Construct via [`crate::time::Time::window`]. All accessors are derived
-/// from `(start, end, current)`; the struct itself stores those three `f32`s
+/// from `(start, end, current)`; the struct itself stores those three `f64`s
 /// directly so it can be `Keyable`-hashed for cache keys (see
 /// [`Window::clamped`] for the frame-stable form).
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct Window {
-    start: f32,
-    end: f32,
-    current: f32,
+    start: f64,
+    end: f64,
+    current: f64,
 }
 
 impl Window {
     /// Constructs a `Window` directly. Most callers should reach for
     /// [`crate::time::Time::window`] instead; this is exposed for tests and
     /// the rare case of building a window without a `Time` in hand.
-    pub const fn new(start: f32, end: f32, current: f32) -> Self {
+    pub const fn new(start: f64, end: f64, current: f64) -> Self {
         Self {
             start,
             end,
@@ -70,31 +70,31 @@ impl Window {
     }
 
     /// The window's start time in absolute seconds.
-    pub const fn start(self) -> f32 {
+    pub const fn start(self) -> f64 {
         self.start
     }
 
     /// The window's end time in absolute seconds.
-    pub const fn end(self) -> f32 {
+    pub const fn end(self) -> f64 {
         self.end
     }
 
     /// The cursor's absolute time, copied from the `Time` that built this
     /// `Window`. Can be before [`Self::start`] or after [`Self::end`].
-    pub const fn current(self) -> f32 {
+    pub const fn current(self) -> f64 {
         self.current
     }
 
     /// `end - start`. Always reflects the declared window; does not collapse
     /// when the cursor is outside the window.
-    pub fn width(self) -> f32 {
+    pub fn width(self) -> f64 {
         self.span()
     }
 
     /// The saturating [`Phase`] view: `0.0` before `start`, `1.0` after
     /// `end`, linearly interpolated in between.
     pub fn phase(self) -> Phase {
-        Phase::saturating((self.current - self.start) / self.span())
+        Phase::saturating(((self.current - self.start) / self.span()) as f32)
     }
 
     /// Reinterprets `range` (in seconds from this window's start) as a new
@@ -104,7 +104,7 @@ impl Window {
     ///
     /// This is the "stagger sub-events in window-local seconds" primitive:
     /// `w.sub_secs(0.4..0.8).phase()` rises across `[start + 0.4, start + 0.8)`.
-    pub fn sub_secs(self, range: Range<f32>) -> Window {
+    pub fn sub_secs(self, range: Range<f64>) -> Window {
         assert!(
             range.start.is_finite() && range.end.is_finite() && range.end > range.start,
             "Window::sub_secs requires a finite range with end > start"
@@ -137,13 +137,13 @@ impl Window {
     /// window opens. **Not** clamped at the end — keeps counting once the
     /// window closes, which is exactly the "ongoing motion since this
     /// anchor" case [`Phase`] cannot express.
-    pub fn elapsed(self) -> f32 {
+    pub fn elapsed(self) -> f64 {
         (self.current - self.start).max(0.0)
     }
 
     /// Seconds remaining until the window closes, `0` once it has. The
     /// countdown twin of [`Self::elapsed`].
-    pub fn remaining(self) -> f32 {
+    pub fn remaining(self) -> f64 {
         (self.end - self.current).max(0.0)
     }
 
@@ -153,7 +153,7 @@ impl Window {
     /// window. A non-positive fade skips that edge (the envelope is already
     /// at 1 there). A self-contained appear/disappear for captions and
     /// other windowed content.
-    pub fn envelope(self, fade_in: f32, fade_out: f32) -> Phase {
+    pub fn envelope(self, fade_in: f64, fade_out: f64) -> Phase {
         let rise = if fade_in <= 0.0 {
             1.0
         } else {
@@ -164,18 +164,18 @@ impl Window {
         } else {
             (self.remaining() / fade_out).min(1.0)
         };
-        Phase::saturating(rise * fall)
+        Phase::saturating((rise * fall) as f32)
     }
 
     /// Seconds remaining until the window opens, `0` once it has.
-    pub fn before(self) -> f32 {
+    pub fn before(self) -> f64 {
         (self.start - self.current).max(0.0)
     }
 
     /// Seconds the cursor has lived past `end`, `0` before the window
     /// closes. The companion to [`Self::elapsed`] for post-saturation
     /// timing (e.g. "5 seconds after the intro finishes").
-    pub fn after(self) -> f32 {
+    pub fn after(self) -> f64 {
         (self.current - self.end).max(0.0)
     }
 
@@ -199,11 +199,11 @@ impl Window {
     /// the window opens, exceeds `1.0` after it closes. Useful when the
     /// downstream consumer wants the linear progress without the saturating
     /// clamp — most callers want [`Self::phase`] instead.
-    pub fn raw_progress(self) -> f32 {
+    pub fn raw_progress(self) -> f64 {
         (self.current - self.start) / self.span()
     }
 
-    fn span(self) -> f32 {
+    fn span(self) -> f64 {
         assert!(
             self.start.is_finite() && self.end.is_finite() && self.end > self.start,
             "Window requires finite start/end with end > start"
@@ -216,7 +216,7 @@ impl Window {
 mod tests {
     use super::*;
 
-    fn w(start: f32, end: f32, current: f32) -> Window {
+    fn w(start: f64, end: f64, current: f64) -> Window {
         Window::new(start, end, current)
     }
 
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn envelope_rises_holds_falls() {
-        let e = |c: f32| w(0.0, 3.0, c).envelope(0.5, 0.5);
+        let e = |c: f64| w(0.0, 3.0, c).envelope(0.5, 0.5);
         assert_eq!(e(-1.0).get(), 0.0);
         assert_eq!(e(0.0).get(), 0.0);
         assert!((e(0.25).get() - 0.5).abs() < 1e-6);
