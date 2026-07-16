@@ -65,7 +65,7 @@ impl From<Rect> for ClipRegion {
 /// child's own — so `Clip` only ever shrinks what is visible, never the
 /// space a parent reserves for it.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Clip {
     #[builder(into)]
     pub region: ClipRegion,

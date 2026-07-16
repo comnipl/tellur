@@ -64,7 +64,7 @@ pub enum WritePacing {
 /// the original child graphic is returned, so filled text and math settle into
 /// their normal final rendering.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Write {
     pub progress: Phase,
     #[builder(default = WritePacing::PerPath)]
@@ -269,7 +269,7 @@ impl VectorComponent for Write {
 /// [`TimedWrite::stroke_speed`] (or [`TimedWrite::by_length`]) to move the
 /// pen at a constant speed instead, making intricate glyphs take longer.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct TimedWrite {
     pub time: f64,
     pub start: f64,
@@ -1296,7 +1296,7 @@ mod tests {
         }
     }
 
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct TwoRects;
 
     impl VectorComponent for TwoRects {
@@ -1310,7 +1310,7 @@ mod tests {
     }
 
     /// Two filled rects with very different perimeters: 40 and 80 units.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct UnevenRects;
 
     impl VectorComponent for UnevenRects {

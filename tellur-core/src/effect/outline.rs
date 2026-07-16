@@ -72,7 +72,7 @@ pub enum OutlineJoin {
 
 /// A vector component that renders only an outline band around its child.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Outlined {
     /// Band width in logical units.
     pub width: f32,
@@ -708,6 +708,7 @@ mod tests {
         Paint::solid(Color::rgb_u8(0, 0, 255))
     }
 
+    #[derive(Clone)]
     struct CountingRect {
         renders: Arc<AtomicUsize>,
     }

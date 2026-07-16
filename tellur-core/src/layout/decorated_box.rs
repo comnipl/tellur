@@ -10,7 +10,7 @@ use crate::Keyable;
 /// child's layout size. Combine with [`Padding`](super::Padding) for the
 /// typical CSS-style "padded box with a background".
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct DecoratedBox {
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
@@ -69,7 +69,7 @@ pub(super) mod raster {
     /// now; stroking on raster is left to the vector path. For richer
     /// decoration, decorate on the vector side and rasterize after.
     #[crate::component(raster)]
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct DecoratedBox {
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,

@@ -19,7 +19,7 @@ use tellur_core::render_context::{OutlineInput, RenderContext};
 use tellur_core::Keyable;
 
 #[tellur_core::component(raster)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Outline {
     /// Stroke width on the outside of the child, in logical units.
     pub width: f32,
@@ -305,7 +305,7 @@ mod tests {
     use super::*;
     use tellur_core::render_context::PassThrough;
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Clone, PartialEq, Eq, Hash)]
     struct UnitPixel;
 
     impl RasterComponent for UnitPixel {

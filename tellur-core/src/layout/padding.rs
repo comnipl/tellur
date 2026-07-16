@@ -6,7 +6,7 @@ use crate::Keyable;
 
 /// Wraps a child with empty space on each side.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Padding {
     pub insets: EdgeInsets,
     #[builder(into)]
@@ -53,7 +53,7 @@ pub(super) mod raster {
 
     /// Raster mirror of the vector [`Padding`](super::Padding).
     #[crate::component(raster)]
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct Padding {
         pub insets: EdgeInsets,
         #[builder(into)]

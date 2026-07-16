@@ -1121,7 +1121,7 @@ mod tests {
         assert_eq!(a.pixels, third.pixels);
     }
 
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct SolidRaster {
         id: u8,
     }
@@ -1175,6 +1175,7 @@ mod tests {
         assert_eq!(metrics.bytes_cached, 4);
     }
 
+    #[derive(Clone)]
     struct CountingRaster {
         id: u8,
         renders: Arc<AtomicUsize>,

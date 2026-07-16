@@ -61,7 +61,12 @@ pub use tellur_core as __core;
 /// the timeline component/collection duration, placement, arrangement, and
 /// audio-window methods now carry `f64`. Stale `v5` plugins therefore have
 /// incompatible value layouts and vtable signatures and must fail at lookup.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v6\0";
+///
+/// Bumped to `v7` because `RasterComponent` gained clone support through a new
+/// supertrait, changing the vtable layout of raster trait objects passed to the
+/// host render context. Stale `v6` plugins must fail before crossing that
+/// boundary.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v7\0";
 
 pub mod abi;
 pub use abi::{
@@ -350,7 +355,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v6(
+        pub extern "Rust" fn tellur_timeline_collection_v7(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
@@ -358,7 +363,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v6(
+        pub extern "Rust" fn tellur_timeline_collection_v7(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -383,7 +388,7 @@ macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v6(
+        pub extern "Rust" fn tellur_timeline_collection_v7(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -400,7 +405,7 @@ macro_rules! export_timeline_collection {
     ($builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v6(
+        pub extern "Rust" fn tellur_timeline_collection_v7(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
@@ -421,7 +426,7 @@ mod tests {
     // A trivial timeless visual so a small NEW-API timeline can be built without
     // pulling in media decode. Reaches the timeline world via the one-way
     // blanket over `RasterComponent`.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct Dot;
 
     impl RasterComponent for Dot {
@@ -496,8 +501,8 @@ mod tests {
     }
 
     #[test]
-    fn entry_symbol_marks_the_f64_timeline_abi() {
-        assert_eq!(ENTRY_SYMBOL, b"tellur_timeline_collection_v6\0");
+    fn entry_symbol_marks_the_cloneable_component_abi() {
+        assert_eq!(ENTRY_SYMBOL, b"tellur_timeline_collection_v7\0");
     }
 
     #[test]

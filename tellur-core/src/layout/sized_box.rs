@@ -8,7 +8,7 @@ use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 /// a spacer that grows with the leftover space, use
 /// [`Flexible::spacer`](super::Flexible::spacer).
 #[crate::component(vector)]
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct SizedBox {
     pub size: Vec2,
 }
@@ -41,7 +41,7 @@ pub(super) mod raster {
 
     /// Raster mirror of the vector [`SizedBox`](super::SizedBox).
     #[crate::component(raster)]
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     pub struct SizedBox {
         pub size: Vec2,
     }

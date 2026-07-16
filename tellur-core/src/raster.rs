@@ -321,7 +321,11 @@ impl Resolution {
 /// 3. Optionally [`paint_bounds`](RasterComponent::paint_bounds) tells
 ///    the parent how far the component paints outside the layout box,
 ///    so `Layer` can grow the sub-resolution accordingly.
-pub trait RasterComponent: DynEq + DynHash {
+///
+/// Implementors must support cloning, normally by deriving [`Clone`]. This
+/// makes [`Box<dyn RasterComponent>`] cloneable for component trees and
+/// function-form `#[component]` fields.
+pub trait RasterComponent: RasterComponentClone + DynEq + DynHash {
     /// Decide the layout size given the parent's constraints.
     fn layout(&self, constraints: Constraints) -> Vec2;
 
@@ -386,6 +390,25 @@ pub trait RasterComponent: DynEq + DynHash {
 // Compile-time guarantee that `RasterComponent` is dyn-safe.
 const _: Option<&dyn RasterComponent> = None;
 
+/// Clone support for [`Box<dyn RasterComponent>`]. Blanket-implemented for
+/// every [`RasterComponent`] that is [`Clone`]; callers never implement it by
+/// hand.
+pub trait RasterComponentClone {
+    fn clone_box(&self) -> Box<dyn RasterComponent>;
+}
+
+impl<T: RasterComponent + Clone + 'static> RasterComponentClone for T {
+    fn clone_box(&self) -> Box<dyn RasterComponent> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn RasterComponent> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 /// A solid-color raster component that fills its assigned layout area.
 ///
 /// `Background` has no intrinsic size of its own. Under finite loose
@@ -393,7 +416,7 @@ const _: Option<&dyn RasterComponent> = None;
 /// collapses to the minimum allowed size. During rendering it fills every pixel
 /// in the requested target resolution with `color`.
 #[crate::component(raster)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Background {
     pub color: Color,
 }
@@ -481,7 +504,7 @@ fn color_rgba8(color: Color) -> [u8; 4] {
 /// child stay on the GPU; add a `ctx.gpu_backend()` branch here, the same way
 /// [`Background::render`] does, once that hook exists.
 #[crate::component(raster)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Opacity {
     #[builder(default = 1.0)]
     pub opacity: f32,
@@ -606,7 +629,15 @@ mod tests {
             Background::builder().color(Color::rgb_u8(1, 2, 3)).into();
     }
 
-    #[derive(PartialEq, Hash)]
+    #[test]
+    fn boxed_raster_component_clone_is_dyn_equal() {
+        let original: Box<dyn RasterComponent> = Box::new(Background::new(Color::rgb_u8(1, 2, 3)));
+        let cloned = original.clone();
+
+        assert!(DynEq::dyn_eq(original.as_ref(), cloned.as_ref().as_any(),));
+    }
+
+    #[derive(Clone, PartialEq, Hash)]
     struct SolidAlpha {
         rgba: [u8; 4],
     }

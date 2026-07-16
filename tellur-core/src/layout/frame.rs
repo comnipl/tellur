@@ -61,7 +61,7 @@ fn finite_axis(v: f32) -> f32 {
 ///   .align(Anchor::CENTER).child(c)`
 /// - asymmetric anchors: `.align(Anchor::CENTER.to(Anchor::new(0.8, 0.5)))`
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Frame {
     #[builder(default = SizeMode::Hug)]
     pub width: SizeMode,
@@ -112,7 +112,7 @@ pub(super) mod raster {
     /// aligns the child inside it by an [`Alignment`] anchor pair. See the
     /// vector [`Frame`](super::Frame) for the knob defaults and examples.
     #[crate::component(raster)]
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct Frame {
         #[builder(default = SizeMode::Hug)]
         pub width: SizeMode,

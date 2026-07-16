@@ -367,7 +367,7 @@ mod tests {
     /// A timeless raster leaf: routed through `ctx.render` by the blanket
     /// `RasterComponent → TimelineComponent` impl, so identical samples
     /// resolve to one shared cache entry after second-use warm-up.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct StaticSquare;
 
     impl RasterComponent for StaticSquare {
