@@ -282,10 +282,10 @@ fn assert_valid_sides(sides: usize) {
 
 /// Draws an arbitrary set of [`PathCommand`]s over a fixed logical canvas.
 ///
-/// `size` is both the `layout` size and the graphic's `view_box` — unlike the
-/// other shapes here, it is not auto-outset for the stroke width, since a
-/// caller-supplied path has no shape-specific bounds to derive an outset
-/// from. Size the canvas to fit whatever the path (and its stroke) paints.
+/// `size` is the `layout` size and the logical canvas used to derive paint
+/// bounds. Like the other shapes here, a stroke outsets those bounds by half
+/// its width on every side. Commands outside the declared canvas are not
+/// included automatically, so size the canvas to fit all command geometry.
 ///
 /// This is the escape hatch for geometry the other shapes cannot express
 /// (freeform outlines, letter/glyph-style paths, etc.) without having to hand
@@ -306,18 +306,26 @@ impl VectorComponent for PathShape {
         constraints.constrain(self.size)
     }
 
+    fn paint_bounds(&self, size: Vec2) -> Rect {
+        stroked_bounds(size, &self.stroke)
+    }
+
     fn render(&self, size: Vec2) -> VectorGraphic {
+        let view_box = self.paint_bounds(size);
         let Some((fill, stroke)) = visible_paints(size, &self.fill, &self.stroke) else {
-            return empty_graphic(size);
+            return VectorGraphic {
+                view_box,
+                root: Node::empty(),
+            };
         };
         if self.commands.is_empty() {
-            return empty_graphic(size);
+            return VectorGraphic {
+                view_box,
+                root: Node::empty(),
+            };
         }
         VectorGraphic {
-            view_box: Rect {
-                origin: Vec2::ZERO,
-                size,
-            },
+            view_box,
             root: Node::Path(Path {
                 commands: self.commands.clone(),
                 fill,
@@ -337,6 +345,12 @@ fn stroked_bounds(size: Vec2, stroke: &Option<Stroke>) -> Rect {
         .as_ref()
         .map(|stroke| (stroke.width * 0.5).max(0.0))
         .unwrap_or(0.0);
+    if outset == 0.0 {
+        return Rect {
+            origin: Vec2::ZERO,
+            size,
+        };
+    }
     Rect {
         origin: Vec2(-outset, -outset),
         size: Vec2(size.0 + outset * 2.0, size.1 + outset * 2.0),
@@ -788,6 +802,26 @@ mod builder_tests {
         };
         assert_eq!(path.commands, commands);
         assert_eq!(path.fill, Some(Fill { paint: paint() }));
+    }
+
+    #[test]
+    fn path_shape_paint_bounds_include_stroke_outset_and_match_view_box() {
+        let shape = PathShape::builder()
+            .size(Vec2(40.0, 30.0))
+            .commands(vec![
+                PathCommand::MoveTo(Vec2(0.0, 0.0)),
+                PathCommand::LineTo(Vec2(40.0, 30.0)),
+            ])
+            .stroke(Stroke::new(paint(), 2.5))
+            .build();
+        let size = Vec2(40.0, 30.0);
+        let expected = Rect {
+            origin: Vec2(-1.25, -1.25),
+            size: Vec2(42.5, 32.5),
+        };
+
+        assert_eq!(shape.paint_bounds(size), expected);
+        assert_eq!(shape.render(size).view_box, expected);
     }
 
     #[test]

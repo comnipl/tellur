@@ -61,12 +61,8 @@ impl VectorComponent for Fragment {
     }
 
     fn render(&self, size: Vec2) -> VectorGraphic {
-        let origin = vector_children_bounds(&self.children).origin;
-        render_vector_children(
-            &self.children,
-            Rect { origin, size },
-            Constraints::loose(size),
-        )
+        let paint_bounds = self.paint_bounds(size);
+        render_vector_children(&self.children, paint_bounds, Constraints::loose(size))
     }
 }
 
@@ -191,5 +187,24 @@ mod tests {
     fn fragment_empty_is_zero() {
         let fragment = Fragment::empty();
         assert_eq!(fragment.layout(Constraints::UNBOUNDED), Vec2::ZERO);
+    }
+
+    #[test]
+    fn fragment_view_box_matches_paint_bounds_when_children_spill() {
+        let fragment = Fragment {
+            children: vec![
+                rect(100.0, 60.0).place_at(Vec2::ZERO).into(),
+                rect(100.0, 60.0).place_at(Vec2(13.0, 9.0)).into(),
+            ],
+        };
+        let size = fragment.layout(Constraints::tight(Vec2(100.0, 60.0)));
+        let paint_bounds = Rect {
+            origin: Vec2::ZERO,
+            size: Vec2(113.0, 69.0),
+        };
+
+        assert_eq!(size, Vec2(100.0, 60.0));
+        assert_eq!(fragment.paint_bounds(size), paint_bounds);
+        assert_eq!(fragment.render(size).view_box, paint_bounds);
     }
 }

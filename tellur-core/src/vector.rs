@@ -11,6 +11,9 @@ use crate::Keyable;
 ///
 /// `view_box` is the rectangle (in the graphic's local coordinate space)
 /// that should be rasterized to capture everything the graphic paints.
+/// A component must set it to the same rectangle returned by
+/// [`VectorComponent::paint_bounds`] for the rendered size; `Rasterize`
+/// defensively enforces that contract before dispatching to a raster backend.
 /// It may have a negative `origin` (e.g. an offset drop shadow that
 /// spills to the upper-left) or a `size` larger than the layout size.
 /// Place the graphic in a parent coordinate space by composing it
@@ -34,7 +37,10 @@ pub struct VectorGraphic {
 /// with the chosen size to know the layout box plus anything the component
 /// paints outside it (useful for `Layer::render` sub-resolution sizing and for
 /// rasterize buffer allocation). Implementations should include the layout
-/// rectangle `(0, 0)..size` in the returned bounds.
+/// rectangle `(0, 0)..size` in the returned bounds when they establish a fixed
+/// canvas. Transparent auto-fit groups such as
+/// [`Fragment`](crate::fragment::Fragment) may instead report only the union
+/// of what their children paint.
 ///
 /// Element components implement `layout` and `render` directly. Composite
 /// components (produced by `#[vector_component]`) usually do the same,
@@ -60,7 +66,8 @@ pub trait VectorComponent: DynEq + DynHash {
     /// Produce the flattened graphic at `size`. `size` is always the
     /// value previously returned by `layout` for the same constraints,
     /// so children may rely on it without re-checking against the
-    /// constraints.
+    /// constraints. The returned [`VectorGraphic::view_box`] must equal
+    /// [`paint_bounds`](Self::paint_bounds) for this `size`.
     fn render(&self, size: Vec2) -> VectorGraphic;
 
     /// Display name for this vector component, symmetric with
