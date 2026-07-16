@@ -12,6 +12,10 @@ use tellur_core::vector::{
 /// protocol forwards to the wrapped vector: layout / paint_bounds /
 /// render(size) all delegate, and `render(size, target, residency, ctx)`
 /// rasterizes the vector's `render(size)` output into a `target`-sized image.
+/// Before backend dispatch it normalizes the graphic's `view_box` to the
+/// vector's `paint_bounds(size)`, defensively enforcing the vector contract.
+/// Non-positive paint bounds produce a transparent target without dispatching
+/// an invalid transform to a raster backend.
 #[derive(PartialEq, Hash)]
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
@@ -33,7 +37,16 @@ impl<V: VectorComponent + PartialEq + Hash + 'static> RasterComponent for Raster
         residency: RasterResidency,
         ctx: &mut dyn RenderContext,
     ) -> RasterImage {
-        let graphic = self.vector.render(size);
+        let mut graphic = self.vector.render(size);
+        // A component's paint bounds are authoritative for the raster target.
+        // Enforce the VectorComponent contract here so a stale view box cannot
+        // distort or clip either the GPU path or the CPU fallback below.
+        graphic.view_box = self.vector.paint_bounds(size);
+        if graphic.view_box.size.0 <= 0.0 || graphic.view_box.size.1 <= 0.0 {
+            let pixels = vec![0; target.width as usize * target.height as usize * 4];
+            let image = RasterImage::cpu(target.width, target.height, PixelFormat::Rgba8, pixels);
+            return ctx.ensure_residency(image, residency);
+        }
         if ctx.prefers_gpu() {
             if let Some(gpu) = ctx.gpu_backend() {
                 if let Some(image) = gpu.rasterize(&graphic, target) {
@@ -106,6 +119,10 @@ fn rasterize(graphic: &VectorGraphic, width: u32, height: u32) -> RasterImage {
 /// like drop shadows whose paint bounds extend into negative
 /// coordinates.
 fn view_box_transform(view_box: Rect, width: u32, height: u32) -> tiny_skia::Transform {
+    debug_assert!(
+        view_box.size.0 > 0.0 && view_box.size.1 > 0.0,
+        "view box dimensions must be positive"
+    );
     let sx = width as f32 / view_box.size.0;
     let sy = height as f32 / view_box.size.1;
     let tx = -view_box.origin.0 * sx;
@@ -297,10 +314,11 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use tellur_core::fragment::Fragment;
     use tellur_core::geometry::Rect;
     use tellur_core::raster::{CpuRasterImage, GpuSurface};
     use tellur_core::render_context::{
-        CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput,
+        CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput, PassThrough,
     };
     use tellur_core::shapes::Rectangle;
 
@@ -309,6 +327,7 @@ mod tests {
     #[derive(Default)]
     struct TestGpu {
         rasterizes: usize,
+        last_view_box: Option<Rect>,
     }
 
     impl TestGpu {
@@ -330,6 +349,16 @@ mod tests {
     }
 
     impl GpuRasterBackend for TestGpu {
+        fn upload(&mut self, image: &CpuRasterImage) -> Option<RasterImage> {
+            Some(RasterImage::Gpu(GpuSurface::new(
+                image.width,
+                image.height,
+                image.format,
+                TEST_GPU_BACKEND,
+                Arc::new(image.clone()),
+            )))
+        }
+
         fn composite(
             &mut self,
             _target: Resolution,
@@ -348,10 +377,11 @@ mod tests {
 
         fn rasterize(
             &mut self,
-            _graphic: &VectorGraphic,
+            graphic: &VectorGraphic,
             target: Resolution,
         ) -> Option<RasterImage> {
             self.rasterizes += 1;
+            self.last_view_box = Some(graphic.view_box);
             Some(Self::image(target))
         }
 
@@ -381,9 +411,18 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
     struct TestContext {
         gpu: TestGpu,
+        preference: GpuPreference,
+    }
+
+    impl Default for TestContext {
+        fn default() -> Self {
+            Self {
+                gpu: TestGpu::default(),
+                preference: GpuPreference::PreferGpu,
+            }
+        }
     }
 
     impl RenderContext for TestContext {
@@ -392,7 +431,7 @@ mod tests {
         }
 
         fn gpu_preference(&self) -> GpuPreference {
-            GpuPreference::PreferGpu
+            self.preference
         }
 
         fn gpu_backend(&mut self) -> Option<&mut dyn GpuRasterBackend> {
@@ -416,6 +455,48 @@ mod tests {
             .as_cpu()
             .expect("rasterize() always returns a CPU image");
         cpu.pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    struct StaleViewBoxVector;
+
+    impl VectorComponent for StaleViewBoxVector {
+        fn layout(&self, _constraints: Constraints) -> Vec2 {
+            Vec2(10.0, 10.0)
+        }
+
+        fn paint_bounds(&self, _size: Vec2) -> Rect {
+            Rect {
+                origin: Vec2(-2.0, -3.0),
+                size: Vec2(15.0, 17.0),
+            }
+        }
+
+        fn render(&self, size: Vec2) -> VectorGraphic {
+            VectorGraphic {
+                // Deliberately violate the component contract. Rasterize must
+                // repair this before selecting the GPU or CPU path.
+                view_box: Rect {
+                    origin: Vec2::ZERO,
+                    size,
+                },
+                // This square lies outside the stale 0..10 view box but inside
+                // paint_bounds. The CPU regression test can therefore observe
+                // normalization in actual pixels.
+                root: Node::Path(Path {
+                    commands: vec![
+                        PathCommand::MoveTo(Vec2(10.0, 10.0)),
+                        PathCommand::LineTo(Vec2(12.0, 10.0)),
+                        PathCommand::LineTo(Vec2(12.0, 12.0)),
+                        PathCommand::LineTo(Vec2(10.0, 12.0)),
+                        PathCommand::Close,
+                    ],
+                    fill: Some(Paint::Solid(Color::rgb_u8(0, 0, 0)).into()),
+                    stroke: None,
+                    transform: Transform::IDENTITY,
+                }),
+            }
+        }
     }
 
     #[test]
@@ -443,6 +524,70 @@ mod tests {
 
         assert!(image.as_cpu().is_some());
         assert_eq!(ctx.gpu.rasterizes, 1);
+    }
+
+    #[test]
+    fn rasterize_enforces_paint_bounds_before_gpu_dispatch() {
+        let component = Rasterize {
+            vector: StaleViewBoxVector,
+        };
+        let mut ctx = TestContext::default();
+        let size = Vec2(10.0, 10.0);
+
+        component.render(
+            size,
+            Resolution::new(15, 17),
+            RasterResidency::Gpu,
+            &mut ctx,
+        );
+
+        assert_eq!(
+            ctx.gpu.last_view_box,
+            Some(component.vector.paint_bounds(size))
+        );
+    }
+
+    #[test]
+    fn rasterize_enforces_paint_bounds_in_cpu_output() {
+        let component = Rasterize {
+            vector: StaleViewBoxVector,
+        };
+        let mut ctx = PassThrough;
+        let size = Vec2(10.0, 10.0);
+        let target = Resolution::new(15, 17);
+
+        let stale = rasterize(&component.vector.render(size), target.width, target.height);
+        assert_eq!(
+            alpha_at(&stale, 13, 14, target.width),
+            0,
+            "the component's stale view box clips this geometry"
+        );
+
+        let image = component.render(size, target, RasterResidency::Cpu, &mut ctx);
+
+        assert!(
+            alpha_at(&image, 13, 14, target.width) > 0,
+            "geometry outside the stale view box remains visible"
+        );
+    }
+
+    #[test]
+    fn non_positive_paint_bounds_return_a_transparent_target() {
+        let component = Rasterize {
+            vector: Fragment::empty(),
+        };
+        let mut ctx = TestContext::default();
+        ctx.preference = GpuPreference::Disabled;
+        let size = component.layout(Constraints::tight(Vec2(10.0, 10.0)));
+
+        let image = component.render(size, Resolution::new(3, 2), RasterResidency::Gpu, &mut ctx);
+
+        assert_eq!(size, Vec2(10.0, 10.0));
+        assert_eq!(ctx.gpu.rasterizes, 0);
+        assert_eq!(image.residency(), RasterResidency::Gpu);
+        let cpu = ctx.readback(image);
+        assert_eq!((cpu.width, cpu.height), (3, 2));
+        assert!(cpu.pixels.iter().all(|&byte| byte == 0));
     }
 
     #[test]
