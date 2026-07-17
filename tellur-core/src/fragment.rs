@@ -21,7 +21,7 @@ use crate::vector::{VectorComponent, VectorGraphic};
 /// A transparent group of [`VectorComponent`] children. An empty `Fragment`
 /// renders nothing (the "null" form).
 #[crate::component(vector)]
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct Fragment {
     #[children(each = child)]
     pub children: Vec<Box<dyn VectorComponent>>,
@@ -76,7 +76,7 @@ pub mod raster {
 
     /// A transparent group of [`RasterComponent`] children. Empty = nothing.
     #[crate::component(raster)]
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     pub struct Fragment {
         #[children(each = child)]
         pub children: Vec<Box<dyn RasterComponent>>,

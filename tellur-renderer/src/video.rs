@@ -842,7 +842,7 @@ mod av_mux_tests {
 
     // A solid opaque-color visual that fills the target, so the timeline has a
     // real video stream alongside the audio.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct Solid;
 
     impl RasterComponent for Solid {

@@ -31,7 +31,7 @@ use crate::Keyable;
 /// `offset` is computed eagerly by the [`VectorPlacement`] fluent methods (and
 /// their builder-side mirror), so a `Positioned` is fully determined at
 /// construction — there is no re-anchoring at render time.
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Positioned {
     pub offset: Vec2,
     pub child: Box<dyn VectorComponent>,
@@ -151,7 +151,7 @@ pub mod raster {
 
     /// A [`RasterComponent`] shifted by `offset` in its parent's coordinate
     /// space. See the [module docs](self) for how the offset is applied.
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct Positioned {
         pub offset: Vec2,
         pub child: Box<dyn RasterComponent>,
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(size, Vec2(1440.0, 1440.0));
     }
 
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct FixedRaster;
 
     impl RasterComponent for FixedRaster {

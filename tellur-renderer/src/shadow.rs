@@ -16,7 +16,7 @@ use tellur_core::render_context::{DropShadowInput, RenderContext};
 use tellur_core::Keyable;
 
 #[tellur_core::component(raster)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct DropShadow {
     /// Offset of the shadow relative to the child, in logical units.
     #[builder(default = Vec2::ZERO)]
@@ -270,7 +270,7 @@ mod tests {
     use tellur_core::builder::RasterEffect;
 
     /// Minimal raster leaf used as the base in effect-stack tests.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct Stub;
 
     impl RasterComponent for Stub {

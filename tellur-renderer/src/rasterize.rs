@@ -16,12 +16,12 @@ use tellur_core::vector::{
 /// vector's `paint_bounds(size)`, defensively enforcing the vector contract.
 /// Non-positive paint bounds produce a transparent target without dispatching
 /// an invalid transform to a raster backend.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct Rasterize<V: VectorComponent> {
     pub vector: V,
 }
 
-impl<V: VectorComponent + PartialEq + Hash + 'static> RasterComponent for Rasterize<V> {
+impl<V: VectorComponent + Clone + PartialEq + Hash + 'static> RasterComponent for Rasterize<V> {
     fn layout(&self, constraints: Constraints) -> Vec2 {
         self.vector.layout(constraints)
     }
@@ -71,7 +71,7 @@ impl<T: VectorComponent> Rasterizable for T {}
 
 /// Lets a rasterized vector flow into a parent's
 /// `child(impl Into<Box<dyn RasterComponent>>)` slot.
-impl<V: VectorComponent + PartialEq + Hash + 'static> From<Rasterize<V>>
+impl<V: VectorComponent + Clone + PartialEq + Hash + 'static> From<Rasterize<V>>
     for Box<dyn RasterComponent>
 {
     fn from(r: Rasterize<V>) -> Self {
@@ -457,7 +457,7 @@ mod tests {
         cpu.pixels[((y * width + x) * 4 + 3) as usize]
     }
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Clone, PartialEq, Eq, Hash)]
     struct StaleViewBoxVector;
 
     impl VectorComponent for StaleViewBoxVector {

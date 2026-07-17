@@ -8,7 +8,7 @@ use crate::time::{LocalTime, Time, TimelineTime};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 // A trivial RasterComponent so we can exercise the blanket impl.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct Dot;
 
 impl RasterComponent for Dot {
@@ -174,7 +174,7 @@ fn blanket_frame_routes_through_ctx_render() {
 // run of opaque-alpha pixels; its pixel WIDTH vs HEIGHT reveals aspect
 // distortion. If `frame` lays this out against its intrinsic 4:1 box rather
 // than the canvas, the square is stretched 4:1 in the 16:9 frame.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct Square;
 
 impl Square {
@@ -273,7 +273,7 @@ fn blanket_frame_lays_out_against_the_canvas_not_the_intrinsic_box() {
 // `composite_children`'s contract, where `target` pixels span
 // `paint_bounds(size)` — paints one opaque marker pixel at the logical
 // canvas origin (0,0).
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct Margined;
 
 impl Margined {

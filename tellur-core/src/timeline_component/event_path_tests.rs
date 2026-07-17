@@ -20,7 +20,7 @@ use crate::timeline_container::{AudioFile, Sequence, Timeline};
 // read the opacity back out of any pixel after compositing. A timeless
 // `RasterComponent`, so it reaches the timeline world through the one-way
 // blanket and renders via `ctx.render`.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct OpacityProbe {
     // The opacity quantized to a byte, so it survives `PartialEq`/`Hash`
     // (an `f32` would need bit-twiddling; the byte is exact and recoverable).

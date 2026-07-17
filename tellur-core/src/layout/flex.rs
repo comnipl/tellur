@@ -43,7 +43,7 @@ pub enum CrossAlign {
 /// wrapped in [`Flexible`] split the leftover main-axis space by their grow
 /// weights.
 #[crate::component(vector)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Flex {
     // `#[builder(field)]` members (the streamed children) must precede the
     // setter members, per bon's member-ordering rule.
@@ -301,7 +301,7 @@ impl VectorComponent for Flex {
 /// else the wrapper is transparent and `grow` has no effect. Construct one
 /// with [`VectorFlex::grow`] (`circle.grow(1.0)`), its builder mirror, or
 /// [`Flexible::spacer`] for empty space.
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Flexible {
     pub grow: f32,
     pub child: Box<dyn VectorComponent>,
@@ -369,7 +369,7 @@ pub(super) mod raster {
 
     /// Raster mirror of the vector [`Flex`](super::Flex).
     #[crate::component(raster)]
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct Flex {
         // `#[builder(field)]` members must precede the setter members.
         #[children(each = child)]
@@ -465,7 +465,7 @@ pub(super) mod raster {
     /// Raster mirror of the vector [`Flexible`](super::Flexible). Same
     /// semantics: a grow weight a parent [`Flex`] reads off its direct
     /// children.
-    #[derive(Keyable)]
+    #[derive(Clone, Keyable)]
     pub struct Flexible {
         pub grow: f32,
         pub child: Box<dyn RasterComponent>,

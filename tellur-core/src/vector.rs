@@ -45,7 +45,11 @@ pub struct VectorGraphic {
 /// Element components implement `layout` and `render` directly. Composite
 /// components (produced by `#[vector_component]`) usually do the same,
 /// internally building a child component and forwarding the protocol.
-pub trait VectorComponent: DynEq + DynHash {
+///
+/// Implementors must support cloning, normally by deriving [`Clone`]. This
+/// makes [`Box<dyn VectorComponent>`] cloneable for component trees and
+/// function-form `#[component]` fields.
+pub trait VectorComponent: VectorComponentClone + DynEq + DynHash {
     /// Decide the layout size for this component given the parent's
     /// constraints. The returned `Vec2` must satisfy `min <= size <= max`
     /// on each axis.
@@ -94,6 +98,25 @@ pub trait VectorComponent: DynEq + DynHash {
 // Compile-time guarantee that `VectorComponent` is dyn-safe.
 const _: Option<&dyn VectorComponent> = None;
 
+/// Clone support for [`Box<dyn VectorComponent>`]. Blanket-implemented for
+/// every [`VectorComponent`] that is [`Clone`]; callers never implement it by
+/// hand.
+pub trait VectorComponentClone {
+    fn clone_box(&self) -> Box<dyn VectorComponent>;
+}
+
+impl<T: VectorComponent + Clone + 'static> VectorComponentClone for T {
+    fn clone_box(&self) -> Box<dyn VectorComponent> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn VectorComponent> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 impl PartialEq for dyn VectorComponent {
     fn eq(&self, other: &Self) -> bool {
         DynEq::dyn_eq(self, other.as_any())
@@ -121,7 +144,7 @@ impl Hash for dyn VectorComponent {
 /// needs no knowledge of the size at the call site (see
 /// [`VectorTransform::transform_around`]). The default pivot is the origin
 /// ([`Anchor::TOP_LEFT`]), which applies `transform` verbatim.
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct Transformed {
     pub transform: Transform,
     pub pivot: Anchor,
@@ -508,6 +531,18 @@ mod tests {
         let stroke = Stroke::from(color);
         assert_eq!(stroke.paint, Paint::Solid(color));
         assert_eq!(stroke.width, 1.0);
+    }
+
+    #[test]
+    fn boxed_vector_component_clone_is_dyn_equal() {
+        let original: Box<dyn VectorComponent> = Box::new(Rectangle {
+            size: Vec2(10.0, 20.0),
+            fill: Option::<Fill>::from(Color::rgb_u8(1, 2, 3)),
+            stroke: None,
+        });
+        let cloned = original.clone();
+
+        assert!(DynEq::dyn_eq(original.as_ref(), cloned.as_ref().as_any(),));
     }
 
     #[test]

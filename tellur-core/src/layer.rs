@@ -28,7 +28,7 @@ use crate::render_context::{CompositeInput, RenderContext};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 
 #[crate::component(vector)]
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct VectorLayer {
     // `#[builder(field)]` members must precede the setter members.
     #[children(each = child)]
@@ -118,7 +118,7 @@ pub(crate) fn render_vector_children(
 }
 
 #[crate::component(raster)]
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 pub struct Layer {
     // `#[builder(field)]` members must precede the setter members.
     #[children(each = child)]
@@ -357,7 +357,7 @@ mod tests {
         assert!(matches!(root.children[0], Node::Path(_)));
     }
 
-    #[derive(PartialEq, Eq, Hash)]
+    #[derive(Clone, PartialEq, Eq, Hash)]
     struct DummyRaster;
 
     impl RasterComponent for DummyRaster {

@@ -17,7 +17,7 @@ use crate::vector::VectorGraphic;
 
 // A trivial timeless visual (a stand-in "Caption") reaching the timeline
 // world through the one-way `RasterComponent` blanket.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct Caption;
 
 impl RasterComponent for Caption {
@@ -467,7 +467,7 @@ use std::sync::{Arc, Mutex};
 /// A synthetic solid-color visual that fills the whole `target` with one
 /// opaque RGBA color. A timeless `RasterComponent`, so it reaches the
 /// timeline world through the one-way blanket and renders via `ctx.render`.
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct SolidColor {
     rgba: [u8; 4],
 }
