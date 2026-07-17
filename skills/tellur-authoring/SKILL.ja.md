@@ -225,25 +225,27 @@ source 設定 → effect → 配置の順を推奨する。`.fill()` は構造ma
 
 1. `SizeMode::Fill` は親が `UNBOUNDED` だと 0 に潰れる（キャンバス世界は子を無限
    制約で測る）
-2. `Flexible` / `.grow()` は `Flex` の**直下の子**でだけ効く
-3. grow を持つ子がいると `MainAlign` の `Center`/`End`/`Space*` は `Start` に退化する
-4. main 軸が無限制約のとき grow は不活性
-5. `phase` / `window` は `end > start` を要求し、破ると panic
-6. `Window::elapsed()` / `after()` は窓が閉じても止まらない（それが存在理由）。
+2. `SnapTarget::Anchor` は親の max が `UNBOUNDED` の軸で 0 に縮退する
+   （`SizeMode::Fill` と同族）
+3. `Flexible` / `.grow()` は `Flex` の**直下の子**でだけ効く
+4. grow を持つ子がいると `MainAlign` の `Center`/`End`/`Space*` は `Start` に退化する
+5. main 軸が無限制約のとき grow は不活性
+6. `phase` / `window` は `end > start` を要求し、破ると panic
+7. `Window::elapsed()` / `after()` は窓が閉じても止まらない（それが存在理由）。
    止めたければ `remaining()` か `clamped()`。ただし `Event::window` 由来の
    `elapsed()` は窓の終端で凍結する
-7. 生の `Window` をフィールドに置くとキャッシュが全滅する（§5）
-8. `eased(Easing::X)` は overshoot カーブを clamp する（§6）
-9. `.trigger_*` は `.at(..)` の**外側**（前）に付ける:
+8. 生の `Window` をフィールドに置くとキャッシュが全滅する（§5）
+9. `eased(Easing::X)` は overshoot カーブを clamp する（§6）
+10. `.trigger_*` は `.at(..)` の**外側**（前）に付ける:
    `x.trigger_at_start(e).at(5.0)`
-10. `.at(a..b)` は半開区間 `[a, b)`。境界フレームの二重描画は起きない
-11. `Clip` は vector 専用（raster で欲しければ切ってから `.rasterize()`）。
+11. `.at(a..b)` は半開区間 `[a, b)`。境界フレームの二重描画は起きない
+12. `Clip` は vector 専用（raster で欲しければ切ってから `.rasterize()`）。
     `.transform()` / `.transform_around()` も vector 専用。`.opacity()` は両方にある
-12. 再エクスポート（`some_crate::tellur`）越しに `#[component]` を使う場合、
+13. 再エクスポート（`some_crate::tellur`）越しに `#[component]` を使う場合、
     マクロのパス解決のため動画クレート側にも同一版の `tellur` 直接依存を併記する
-13. temporal builder call は順序付きwrapper。`.trim()` と audio effect の順を入れ替えると、
+14. temporal builder call は順序付きwrapper。`.trim()` と audio effect の順を入れ替えると、
     effect が見るlocal clockも意図的に変わる
-14. `.fill()` は親 `Timeline` が尺計算から除外できるよう、必ず最外側のtemporal verbにする
+15. `.fill()` は親 `Timeline` が尺計算から除外できるよう、必ず最外側のtemporal verbにする
 
 ## 9. 参照実装
 

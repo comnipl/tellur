@@ -258,29 +258,31 @@ marker and must stay the final, outermost verb: write
 
 1. `SizeMode::Fill` collapses to 0 under an `UNBOUNDED` parent (the canvas
    world measures children under infinite constraints)
-2. `Flexible` / `.grow()` only work as **direct children** of `Flex`
-3. Once any child grows, `MainAlign`'s `Center`/`End`/`Space*` degenerate to
+2. `SnapTarget::Anchor` collapses to 0 on any axis whose parent maximum is
+   `UNBOUNDED`, just like `SizeMode::Fill`
+3. `Flexible` / `.grow()` only work as **direct children** of `Flex`
+4. Once any child grows, `MainAlign`'s `Center`/`End`/`Space*` degenerate to
    `Start`
-4. grow is inert under an infinite main-axis constraint
-5. `phase` / `window` require `end > start` and panic otherwise
-6. `Window::elapsed()` / `after()` don't stop when the window closes (that's
+5. grow is inert under an infinite main-axis constraint
+6. `phase` / `window` require `end > start` and panic otherwise
+7. `Window::elapsed()` / `after()` don't stop when the window closes (that's
    their purpose). To stop, use `remaining()` or `clamped()`. Exception: an
    `elapsed()` from `Event::window` freezes at the window's end
-7. A raw `Window` in a field annihilates the cache (§5)
-8. `eased(Easing::X)` clamps overshoot curves (§6)
-9. `.trigger_*` attaches on the **outside** (before) of `.at(..)`:
+8. A raw `Window` in a field annihilates the cache (§5)
+9. `eased(Easing::X)` clamps overshoot curves (§6)
+10. `.trigger_*` attaches on the **outside** (before) of `.at(..)`:
    `x.trigger_at_start(e).at(5.0)`
-10. `.at(a..b)` is the half-open interval `[a, b)`; boundary frames never
+11. `.at(a..b)` is the half-open interval `[a, b)`; boundary frames never
     double-draw
-11. `Clip` is vector-only (for raster: cut first, then `.rasterize()`).
+12. `Clip` is vector-only (for raster: cut first, then `.rasterize()`).
     `.transform()` / `.transform_around()` are also vector-only; `.opacity()`
     exists on both
-12. When using `#[component]` through a re-export (`some_crate::tellur`), the
+13. When using `#[component]` through a re-export (`some_crate::tellur`), the
     video crate must also declare a direct `tellur` dependency of the same
     version, for the macro's path resolution
-13. Temporal builder calls are ordered wrappers; swapping `.trim()` and an
+14. Temporal builder calls are ordered wrappers; swapping `.trim()` and an
     audio effect intentionally changes which local clock the effect sees
-14. `.fill()` must remain the outermost temporal verb so its parent `Timeline`
+15. `.fill()` must remain the outermost temporal verb so its parent `Timeline`
     can recognize and exclude it while resolving the container length
 
 ## 9. Reference implementations
