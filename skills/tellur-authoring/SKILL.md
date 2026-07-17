@@ -118,12 +118,13 @@ vocabulary.
 
 | Hand-written computation | The Tellur way |
 |---|---|
-| Centering via `Vec2(canvas.0 * 0.5 - w * 0.5, ...)` | `.anchored(Anchor::CENTER).snap_to(point)` / `Frame` with `.align(Anchor::CENTER)` |
+| Centering via `Vec2(canvas.0 * 0.5 - w * 0.5, ...)` | `.anchored(Anchor::CENTER).snap_to(point)` for absolute placement / `.snap_to(Anchor::CENTER)` inside a resolved box |
 | Sibling coordinates as an arithmetic progression | `Flex` + `.spacing(n)` |
+| Measuring a child manually to size decorations or overlays | `Stack::builder().under(...).base(child).over(...)` |
 | Back-computing right-/bottom-aligned coordinates | `Anchor::BOTTOM_RIGHT` family / `Flexible::spacer(1.0)` / `MainAlign::End` |
 | Adding margin offsets by hand | `Padding` + `EdgeInsets` |
 | Translate-rotate-translate sandwiches for center spin | `.transform_around(Anchor::CENTER, t)` |
-| Interpolating coordinates so a child "glides across a box" | drive the anchor itself with time: `.align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))` |
+| Interpolating coordinates so a child "glides across a box" | drive the target anchor with time: `.anchored(Anchor::CENTER).snap_to(Anchor::new(rx, 0.5))` |
 | Clamping coordinates to hide overflow | `Clip` / `DecoratedBox` (raster) |
 
 **Direction in coordinates, structure in flow.** In motion-graphics staging
@@ -131,7 +132,7 @@ vocabulary.
 coordinate literals *are* the artistic decision and are acceptable. The moment
 you start building "UI-like" structure — subtitle bars, HUDs, tables — out of
 canvas-world coordinate arithmetic, that is the flow world's job
-(`Frame`/`Flex`/`Padding`).
+(`Frame`/`Flex`/`Stack`/`Padding`).
 
 ## 4. Iron rule ③ — proliferating `const`s signal a design mistake
 
@@ -145,7 +146,8 @@ Checks to run before reaching for a `const`:
 
 1. **Is the value derived from another value?** An arithmetic relationship
    like `const TITLE_X: f32 = CANVAS_W * 0.5 - 120.0;` should be expressed
-   structurally with `Anchor`-relative placement or `Frame`/`Flex`/`Padding`.
+   structurally with `Anchor`-relative placement or
+   `Frame`/`Flex`/`Stack`/`Padding`.
    Locking a derivation formula inside a const hides it; it doesn't solve it
 2. **Is it a timetable?** A cascade of absolute times like
    `const SCENE2_START: f64 = 12.3;` should become `Sequence` ordering,
@@ -287,7 +289,7 @@ When unsure how to write something, consult real examples in this order:
 
 - `tellur-renderer/examples/timeline_to_mp4.rs` — the minimal form of the
   absolute-time world (`BouncingDot`: the textbook pattern of time-driving a
-  `Frame.align` anchor)
+  `Positioned` target anchor inside a sized `Frame`)
 - the `tellur-live` demo scenes — canvas-world staging with every
   `phase`/`window`/`clamped()` pattern, plus the placement-clock world
   (`timeline_showcase`)
@@ -305,7 +307,7 @@ Verify before submitting code:
       (Replaced via the §3 conversion tables?)
 - [ ] Any relative positioning expressed through coordinate arithmetic
       (`* 0.5`, `- width / 2.0`, arithmetic progressions)? Could `Anchor` /
-      `Frame` / `Flex` / `Padding` express it?
+      `Frame` / `Flex` / `Stack` / `Padding` express it?
 - [ ] Are global `const`s genuine design tokens only? No derived values,
       timetables, or single-use values promoted to consts (§4)?
 - [ ] Does every non-obvious numeric literal carry a comment explaining its

@@ -23,6 +23,8 @@
 //!     cross-axis constraint so children fill the flex's cross extent.
 //!   - [`DecoratedBox`] paints a background fill (and optionally a border
 //!     on the vector variant) behind the child.
+//!   - [`Stack`] lets one `base` child decide the size, then paints arbitrary
+//!     `under` and `over` children against that resolved box.
 //!   - [`SizedBox`] is an empty placeholder of a given size.
 //!
 //! Vector containers live at the module root and operate on
@@ -35,6 +37,7 @@ mod flex;
 mod frame;
 mod padding;
 mod sized_box;
+mod stack;
 
 pub use crate::geometry::Axis;
 pub use decorated_box::DecoratedBox;
@@ -42,6 +45,7 @@ pub use flex::{CrossAlign, Flex, Flexible, MainAlign, VectorFlex};
 pub use frame::{Frame, SizeMode};
 pub use padding::Padding;
 pub use sized_box::SizedBox;
+pub use stack::Stack;
 
 // Re-export the raster flex trait at the module root, mirroring how
 // `placement` re-exports `RasterPlacement`.
@@ -56,4 +60,5 @@ pub mod raster {
     pub use super::frame::raster::Frame;
     pub use super::padding::raster::Padding;
     pub use super::sized_box::raster::SizedBox;
+    pub use super::stack::raster::Stack;
 }

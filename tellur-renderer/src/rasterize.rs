@@ -315,7 +315,9 @@ mod tests {
     use std::sync::Arc;
 
     use tellur_core::fragment::Fragment;
-    use tellur_core::geometry::Rect;
+    use tellur_core::geometry::{Anchor, Rect};
+    use tellur_core::layout::Stack;
+    use tellur_core::placement::VectorPlacement;
     use tellur_core::raster::{CpuRasterImage, GpuSurface};
     use tellur_core::render_context::{
         CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput, PassThrough,
@@ -572,12 +574,53 @@ mod tests {
     }
 
     #[test]
+    fn stack_anchor_overlay_spill_survives_cpu_rasterization() {
+        let size = Vec2(10.0, 10.0);
+        let stack = Stack::builder()
+            .base(
+                Rectangle::builder()
+                    .size(size)
+                    .fill(Paint::Solid(Color::rgb_u8(0, 0, 255))),
+            )
+            .over(
+                Rectangle::builder()
+                    .size(Vec2(2.0, 2.0))
+                    .fill(Paint::Solid(Color::rgb_u8(255, 0, 0)))
+                    .build()
+                    .anchored(Anchor::TOP_LEFT)
+                    .snap_to(Anchor::BOTTOM_RIGHT),
+            )
+            .build();
+        let expected_bounds = Rect {
+            origin: Vec2::ZERO,
+            size: Vec2(12.0, 12.0),
+        };
+
+        assert_eq!(stack.layout(Constraints::tight(size)), size);
+        assert_eq!(stack.paint_bounds(size), expected_bounds);
+        assert_eq!(stack.render(size).view_box, expected_bounds);
+
+        let image = stack.rasterize().render(
+            size,
+            Resolution::new(12, 12),
+            RasterResidency::Cpu,
+            &mut PassThrough,
+        );
+        assert!(
+            alpha_at(&image, 11, 11, 12) > 0,
+            "the overlay pixel outside the base box must not be clipped",
+        );
+    }
+
+    #[test]
     fn non_positive_paint_bounds_return_a_transparent_target() {
         let component = Rasterize {
             vector: Fragment::empty(),
         };
-        let mut ctx = TestContext::default();
-        ctx.preference = GpuPreference::Disabled;
+        let mut ctx = TestContext {
+            preference: GpuPreference::Disabled,
+            ..TestContext::default()
+        };
         let size = component.layout(Constraints::tight(Vec2(10.0, 10.0)));
 
         let image = component.render(size, Resolution::new(3, 2), RasterResidency::Gpu, &mut ctx);

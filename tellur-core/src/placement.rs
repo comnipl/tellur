@@ -394,10 +394,7 @@ mod tests {
     fn point_target_preserves_child_stroke_outset_while_translating_bounds() {
         let placed = Circle::builder()
             .radius(10.0)
-            .stroke(Stroke::new(
-                Paint::Solid(Color::rgb_u8(0, 0, 0)),
-                4.0,
-            ))
+            .stroke(Stroke::new(Paint::Solid(Color::rgb_u8(0, 0, 0)), 4.0))
             .build()
             .anchored(Anchor::CENTER)
             .snap_to(Vec2(50.0, 40.0))

@@ -333,8 +333,11 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))
-        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
-        .child(circle)
+        .child(
+            circle
+                .anchored(Anchor::CENTER)
+                .snap_to(Anchor::new(rx, 0.5)),
+        )
         .build()
 }
 ```

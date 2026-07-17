@@ -49,11 +49,7 @@ pub trait RasterBuilder: Sized {
 pub trait VectorBuilderPlacement: VectorBuilder {
     /// Places the built component's local origin at `position`.
     fn place_at(self, position: Vec2) -> Positioned {
-        Positioned::new(
-            self.build_component().boxed(),
-            Anchor::TOP_LEFT,
-            position,
-        )
+        Positioned::new(self.build_component().boxed(), Anchor::TOP_LEFT, position)
     }
 
     /// Begins an anchor placement; finish with
@@ -104,11 +100,7 @@ impl<B: VectorBuilder> VectorBuilderFlex for B {}
 /// Raster counterpart of [`VectorBuilderPlacement`].
 pub trait RasterBuilderPlacement: RasterBuilder {
     fn place_at(self, position: Vec2) -> RasterPositioned {
-        RasterPositioned::new(
-            self.build_component().boxed(),
-            Anchor::TOP_LEFT,
-            position,
-        )
+        RasterPositioned::new(self.build_component().boxed(), Anchor::TOP_LEFT, position)
     }
 
     fn anchored(self, anchor: Anchor) -> AnchoredRasterBuilder<Self::Output> {

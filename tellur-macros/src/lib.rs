@@ -49,8 +49,9 @@
 //! (extend), each with a `maybe_`-prefixed counterpart — `maybe_name(Option<_>)`
 //! and `maybe_<field-name>(Option<IntoIterator>)` — that adds nothing when the
 //! argument is `None`. All four add to the same vec, so they interleave and
-//! preserve order. All other `#[builder(...)]` attributes pass straight through
-//! to `bon`.
+//! preserve order. A component may declare multiple independent `#[children]`
+//! collections; each collection gets its own setters. All other
+//! `#[builder(...)]` attributes pass straight through to `bon`.
 //!
 //! A raster component's child field/argument annotated `#[effect]` (which must be
 //! a `Box<dyn RasterComponent>`) additionally gets an `Effect` impl on its builder
@@ -316,7 +317,7 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
         ));
     };
 
-    let mut children: Option<Children> = None;
+    let mut children: Vec<Children> = Vec::new();
     let mut effect_child: Option<Ident> = None;
     for field in named.named.iter_mut() {
         // `#[effect]`: tag this field as the effect-child slot (raster only).
@@ -331,19 +332,13 @@ fn expand_struct(mut s: ItemStruct, kind: Kind) -> syn::Result<TokenStream2> {
         else {
             continue;
         };
-        if children.is_some() {
-            return Err(syn::Error::new_spanned(
-                &field.attrs[pos],
-                "#[component] supports at most one #[children] field",
-            ));
-        }
         let attr = field.attrs.remove(pos);
         let each = parse_children_each(&attr)?;
         let item_ty = vec_inner(&field.ty).ok_or_else(|| {
             syn::Error::new_spanned(&field.ty, "#[children] field must be a `Vec<_>`")
         })?;
         field.attrs.push(parse_quote!(#[builder(field)]));
-        children = Some(Children {
+        children.push(Children {
             field: field.ident.clone().unwrap(),
             item_ty,
             each,
@@ -390,7 +385,7 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
     let mut available_type: Option<&Type> = None;
     let mut clock_ident: Option<&Ident> = None;
     let mut clock_type: Option<&Type> = None;
-    let mut children: Option<Children> = None;
+    let mut children: Vec<Children> = Vec::new();
     let mut effect_child: Option<Ident> = None;
 
     for arg in &func.sig.inputs {
@@ -447,18 +442,12 @@ fn expand_fn(func: ItemFn, kind: Kind, name_template: Option<LitStr>) -> syn::Re
         let mut forwarded: Vec<Attribute> = Vec::new();
         for a in attrs {
             if a.path().is_ident("children") {
-                if children.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        a,
-                        "component fn supports at most one #[children] argument",
-                    ));
-                }
                 let each = parse_children_each(a)?;
                 let item_ty = vec_inner(ty).ok_or_else(|| {
                     syn::Error::new_spanned(ty, "#[children] argument must be a `Vec<_>`")
                 })?;
                 forwarded.push(parse_quote!(#[builder(field)]));
-                children = Some(Children {
+                children.push(Children {
                     field: pi.ident.clone(),
                     item_ty,
                     each,
@@ -936,11 +925,11 @@ fn timeline_codegen<'a>(
 /// Emits, for component type `ident`:
 /// - `From<ident>` and `From<identBuilder<IsComplete>>` for `Box<dyn _>`,
 /// - the `VectorBuilder` / `RasterBuilder` marker on the complete builder,
-/// - streaming child setters when a `#[children]` member is present.
+/// - streaming child setters for every `#[children]` member.
 fn emit_glue(
     ident: &Ident,
     kind: Kind,
-    children: &Option<Children>,
+    children: &[Children],
     effect_child: &Option<Ident>,
 ) -> TokenStream2 {
     let builder_ty = format_ident!("{}Builder", ident);
@@ -980,7 +969,7 @@ fn emit_glue(
         _ => quote! {},
     };
 
-    let children_methods = children.as_ref().map(|c| {
+    let children_methods = children.iter().map(|c| {
         let field = &c.field;
         let item_ty = &c.item_ty;
         let maybe_field = format_ident!("maybe_{}", field);
@@ -1111,7 +1100,7 @@ fn emit_glue(
             }
         }
 
-        #children_methods
+        #(#children_methods)*
 
         #effect_impl
     }
@@ -1230,4 +1219,63 @@ fn pascal_to_snake(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_two_children_setter_families(expanded: TokenStream2) {
+        let expanded = expanded.to_string();
+        for method in [
+            "pub fn under (",
+            "pub fn maybe_under (",
+            "pub fn unders <",
+            "pub fn maybe_unders <",
+            "pub fn over (",
+            "pub fn maybe_over (",
+            "pub fn overs <",
+            "pub fn maybe_overs <",
+        ] {
+            assert!(
+                expanded.contains(method),
+                "missing generated method `{method}` in:\n{expanded}"
+            );
+        }
+        assert_eq!(expanded.matches("builder (field)").count(), 2);
+    }
+
+    #[test]
+    fn struct_form_supports_multiple_children_collections() {
+        let component: ItemStruct = parse_quote! {
+            pub struct Layered {
+                #[children(each = under)]
+                pub unders: Vec<u32>,
+                #[children(each = over)]
+                pub overs: Vec<u32>,
+                pub base: u32,
+            }
+        };
+
+        assert_two_children_setter_families(
+            expand_struct(component, Kind::Vector).expect("component should expand"),
+        );
+    }
+
+    #[test]
+    fn function_form_supports_multiple_children_collections() {
+        let component: ItemFn = parse_quote! {
+            fn Layered(
+                #[children(each = under)] unders: Vec<u32>,
+                #[children(each = over)] overs: Vec<u32>,
+                base: u32,
+            ) -> impl VectorComponent {
+                unimplemented!()
+            }
+        };
+
+        assert_two_children_setter_families(
+            expand_fn(component, Kind::Vector, None).expect("component should expand"),
+        );
+    }
 }
