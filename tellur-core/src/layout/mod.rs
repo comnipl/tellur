@@ -14,8 +14,8 @@
 //!   sizes up:
 //!   - [`Padding`] adds an outer border of empty space around a child.
 //!   - [`Frame`] picks the outer width / height per axis with [`SizeMode`]
-//!     (Fill / Hug / Fixed) and aligns the child inside that box by an
-//!     [`Alignment`] anchor pair (default: hug the child, top-left).
+//!     (Fill / Hug / Fixed) and keeps its child at top-left. Wrap the child in
+//!     [`Positioned`](crate::placement::Positioned) for anchor placement.
 //!   - [`Flex`] arranges children along an axis with spacing, main/cross
 //!     alignment, and flexbox-style grow weights: a [`Flexible`] child (made
 //!     with `.grow(w)` or [`Flexible::spacer`]) takes a weighted share of the
@@ -36,7 +36,7 @@ mod frame;
 mod padding;
 mod sized_box;
 
-pub use crate::geometry::{Alignment, Axis};
+pub use crate::geometry::Axis;
 pub use decorated_box::DecoratedBox;
 pub use flex::{CrossAlign, Flex, Flexible, MainAlign, VectorFlex};
 pub use frame::{Frame, SizeMode};

@@ -60,7 +60,7 @@ fn frame(
                 .span(MathSpan::builder().source(r"e^{i\pi}+1=0"))
                 .write_from_with_speed(time, 0.12, 1800.0)
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::CENTER.point(scene_size)),
+                .snap_to(Anchor::CENTER),
         )
         .build()
         .rasterize()

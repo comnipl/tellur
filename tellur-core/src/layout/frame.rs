@@ -1,6 +1,6 @@
-//! [`Frame`]: per-axis sizing plus anchored alignment of one child.
+//! [`Frame`]: per-axis sizing for one top-left-aligned child.
 
-use crate::geometry::{Alignment, Constraints, Rect, Transform, Vec2};
+use crate::geometry::{Constraints, Rect, Transform, Vec2};
 use crate::vector::{Group, Node, VectorComponent, VectorGraphic};
 use crate::Keyable;
 
@@ -27,39 +27,30 @@ pub(super) fn resolve_size_mode<F: FnOnce(Constraints) -> Vec2>(
 ) -> Vec2 {
     let needs_hug = matches!(width, SizeMode::Hug) || matches!(height, SizeMode::Hug);
     let hug = needs_hug.then(|| child_layout(constraints));
+    let fill = constraints.fill_size();
     let w = match width {
-        SizeMode::Fill => finite_axis(constraints.max.0),
+        SizeMode::Fill => fill.0,
         SizeMode::Hug => hug.unwrap().0,
         SizeMode::Fixed(v) => v,
     };
     let h = match height {
-        SizeMode::Fill => finite_axis(constraints.max.1),
+        SizeMode::Fill => fill.1,
         SizeMode::Hug => hug.unwrap().1,
         SizeMode::Fixed(v) => v,
     };
     constraints.constrain(Vec2(w, h))
 }
 
-fn finite_axis(v: f32) -> f32 {
-    if v.is_finite() {
-        v
-    } else {
-        0.0
-    }
-}
-
-/// Sizes the outer box independently on each axis (`Fill` / `Hug` /
-/// `Fixed`) and aligns the child inside it by an [`Alignment`] anchor
-/// pair.
+/// Sizes the outer box independently on each axis (`Fill` / `Hug` / `Fixed`).
 ///
-/// Both knobs default to the transparent choice — `Hug` on both axes and
-/// top-left alignment — so each call site only states what it changes:
+/// Both knobs default to `Hug`, and the child always stays at the box's
+/// top-left. Wrap the child in
+/// [`Positioned`](crate::placement::Positioned) for anchor-based placement:
 ///
 /// - sizing only: `Frame::builder().width(SizeMode::Fill).child(c)`
 /// - centering in the available space:
 ///   `Frame::builder().width(SizeMode::Fill).height(SizeMode::Fill)
-///   .align(Anchor::CENTER).child(c)`
-/// - asymmetric anchors: `.align(Anchor::CENTER.to(Anchor::new(0.8, 0.5)))`
+///   .child(c.anchored(Anchor::CENTER).snap_to(Anchor::CENTER))`
 #[crate::component(vector)]
 #[derive(Clone, Keyable)]
 pub struct Frame {
@@ -67,8 +58,6 @@ pub struct Frame {
     pub width: SizeMode,
     #[builder(default = SizeMode::Hug)]
     pub height: SizeMode,
-    #[builder(into, default = Alignment::TOP_LEFT)]
-    pub align: Alignment,
     #[builder(into)]
     pub child: Box<dyn VectorComponent>,
 }
@@ -82,9 +71,6 @@ impl VectorComponent for Frame {
 
     fn render(&self, size: Vec2) -> VectorGraphic {
         let child_size = self.child.layout(Constraints::loose(size));
-        let pos = child_size
-            .anchored(self.align.child)
-            .snap_to(self.align.at.point(size));
         let inner = self.child.render(child_size);
         VectorGraphic {
             view_box: Rect {
@@ -92,7 +78,7 @@ impl VectorComponent for Frame {
                 size,
             },
             root: Node::Group(Group {
-                transform: Transform::translate(pos),
+                transform: Transform::IDENTITY,
                 opacity: 1.0,
                 children: vec![inner.root],
             }),
@@ -102,15 +88,14 @@ impl VectorComponent for Frame {
 
 pub(super) mod raster {
     use super::{resolve_size_mode, SizeMode};
-    use crate::geometry::{Alignment, Constraints, Rect, Vec2};
+    use crate::geometry::{Constraints, Rect, Vec2};
     use crate::layer::{composite_children, translate_rect, union_rect};
     use crate::raster::{RasterComponent, RasterImage, RasterResidency, Resolution};
     use crate::render_context::RenderContext;
     use crate::Keyable;
 
-    /// Sizes the outer box on each axis (`Fill` / `Hug` / `Fixed`) and
-    /// aligns the child inside it by an [`Alignment`] anchor pair. See the
-    /// vector [`Frame`](super::Frame) for the knob defaults and examples.
+    /// Sizes the outer box on each axis (`Fill` / `Hug` / `Fixed`) and keeps
+    /// the child at top-left. See the vector [`Frame`](super::Frame).
     #[crate::component(raster)]
     #[derive(Clone, Keyable)]
     pub struct Frame {
@@ -118,8 +103,6 @@ pub(super) mod raster {
         pub width: SizeMode,
         #[builder(default = SizeMode::Hug)]
         pub height: SizeMode,
-        #[builder(into, default = Alignment::TOP_LEFT)]
-        pub align: Alignment,
         #[builder(into)]
         pub child: Box<dyn RasterComponent>,
     }
@@ -133,16 +116,13 @@ pub(super) mod raster {
 
         fn paint_bounds(&self, size: Vec2) -> Rect {
             let child_size = self.child.layout(Constraints::loose(size));
-            let pos = child_size
-                .anchored(self.align.child)
-                .snap_to(self.align.at.point(size));
             let child_paint = self.child.paint_bounds(child_size);
             union_rect(
                 Rect {
                     origin: Vec2::ZERO,
                     size,
                 },
-                translate_rect(child_paint, pos),
+                translate_rect(child_paint, Vec2::ZERO),
             )
         }
 
@@ -154,14 +134,11 @@ pub(super) mod raster {
             ctx: &mut dyn RenderContext,
         ) -> RasterImage {
             let child_size = self.child.layout(Constraints::loose(size));
-            let pos = child_size
-                .anchored(self.align.child)
-                .snap_to(self.align.at.point(size));
             let paint_rect = self.paint_bounds(size);
             composite_children(
                 paint_rect,
                 target,
-                &[(pos, child_size, self.child.as_ref())],
+                &[(Vec2::ZERO, child_size, self.child.as_ref())],
                 residency,
                 ctx,
             )
@@ -173,6 +150,9 @@ pub(super) mod raster {
 mod tests {
     use super::*;
     use crate::geometry::Anchor;
+    use crate::placement::raster::RasterPlacement;
+    use crate::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
+    use crate::render_context::{PassThrough, RenderContext};
     use crate::shapes::Rectangle;
     use crate::vector::VectorComponent;
 
@@ -196,7 +176,6 @@ mod tests {
         let frame = Frame {
             width: SizeMode::Hug,
             height: SizeMode::Hug,
-            align: Alignment::TOP_LEFT,
             child: rect(30.0, 20.0).boxed(),
         };
         let size = frame.layout(Constraints::loose(Vec2(100.0, 100.0)));
@@ -205,29 +184,81 @@ mod tests {
     }
 
     #[test]
-    fn frame_centers_child_in_filled_space() {
+    fn frame_fills_without_moving_its_child() {
         let frame = Frame {
             width: SizeMode::Fill,
             height: SizeMode::Fill,
-            align: Anchor::CENTER.into(),
             child: rect(20.0, 10.0).boxed(),
         };
         let size = frame.layout(Constraints::loose(Vec2(100.0, 50.0)));
         assert_eq!(size, Vec2(100.0, 50.0));
-        assert_eq!(root_translation(&frame.render(size)), Vec2(40.0, 20.0));
+        let graphic = frame.render(size);
+        assert_eq!(
+            graphic.view_box,
+            Rect {
+                origin: Vec2::ZERO,
+                size
+            }
+        );
+        assert_eq!(root_translation(&graphic), Vec2::ZERO);
+    }
+
+    #[derive(Clone, PartialEq, Hash)]
+    struct SolidRaster;
+
+    impl RasterComponent for SolidRaster {
+        fn layout(&self, constraints: Constraints) -> Vec2 {
+            constraints.constrain(Vec2(2.0, 2.0))
+        }
+
+        fn render(
+            &self,
+            _size: Vec2,
+            target: Resolution,
+            _residency: RasterResidency,
+            _ctx: &mut dyn RenderContext,
+        ) -> RasterImage {
+            RasterImage::cpu(
+                target.width,
+                target.height,
+                PixelFormat::Rgba8,
+                [255, 0, 0, 255].repeat((target.width * target.height) as usize),
+            )
+        }
     }
 
     #[test]
-    fn frame_asymmetric_alignment_snaps_child_anchor_onto_box_anchor() {
-        let frame = Frame {
-            width: SizeMode::Fill,
-            height: SizeMode::Fixed(60.0),
-            align: Anchor::CENTER.to(Anchor::new(1.0, 0.5)),
-            child: rect(20.0, 20.0).boxed(),
+    fn positioned_anchor_reproduces_centered_frame_pixels() {
+        let frame = raster::Frame {
+            width: SizeMode::Fixed(4.0),
+            height: SizeMode::Fixed(4.0),
+            child: SolidRaster
+                .anchored(Anchor::CENTER)
+                .snap_to(Anchor::CENTER)
+                .boxed(),
         };
-        let size = frame.layout(Constraints::loose(Vec2(100.0, 100.0)));
-        assert_eq!(size, Vec2(100.0, 60.0));
-        // Child center (10, 10) snaps onto (100, 30) → top-left at (90, 20).
-        assert_eq!(root_translation(&frame.render(size)), Vec2(90.0, 20.0));
+        let size = frame.layout(Constraints::loose(Vec2(10.0, 10.0)));
+        assert_eq!(size, Vec2(4.0, 4.0));
+
+        let image = frame
+            .render(
+                size,
+                Resolution::new(4, 4),
+                RasterResidency::Cpu,
+                &mut PassThrough,
+            )
+            .into_cpu()
+            .expect("frame renders to CPU");
+        for y in 0..4 {
+            for x in 0..4 {
+                let alpha = image.pixels[((y * 4 + x) * 4 + 3) as usize];
+                let expected = if (1..=2).contains(&x) && (1..=2).contains(&y) {
+                    255
+                } else {
+                    0
+                };
+                assert_eq!(alpha, expected, "alpha mismatch at ({x}, {y})");
+            }
+        }
     }
 }

@@ -18,6 +18,7 @@ use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
+use tellur_core::placement::RasterPlacement;
 use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
 use tellur_core::render_context::{PassThrough, RenderContext};
 use tellur_core::shapes::Circle;
@@ -32,7 +33,6 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))
-        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
         .child(
             Circle::builder()
                 .radius(30.0)
@@ -43,7 +43,9 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
                         .offset(Vec2(0.0, 8.0))
                         .blur(4.0)
                         .color(Color::rgba_u8(255, 255, 255, 100)),
-                ),
+                )
+                .anchored(Anchor::CENTER)
+                .snap_to(Anchor::new(rx, 0.5)),
         )
         .build()
 }

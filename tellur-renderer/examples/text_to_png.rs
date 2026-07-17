@@ -38,7 +38,7 @@ fn main() {
                 )
                 .span("!")
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::CENTER.point(scene_size)),
+                .snap_to(Anchor::CENTER),
         )
         .build();
 
