@@ -190,53 +190,6 @@ impl Anchor {
     pub fn point(self, size: Vec2) -> Vec2 {
         Vec2(size.0 * self.rx, size.1 * self.ry)
     }
-
-    /// Pairs this anchor (on the child) with an anchor on the surrounding box,
-    /// producing the [`Alignment`] that snaps the former onto the latter:
-    /// `Anchor::CENTER.to(Anchor::BOTTOM_RIGHT)` pins the child's center to the
-    /// box's bottom-right corner.
-    pub const fn to(self, at: Anchor) -> Alignment {
-        Alignment { child: self, at }
-    }
-}
-
-/// How a child box is aligned inside a surrounding box: the `child` anchor
-/// (a point on the child) is snapped onto the `at` anchor (a point on the
-/// surrounding box).
-///
-/// The common case where both anchors coincide — centering, corner-pinning —
-/// converts straight from a single [`Anchor`] (`Alignment::from(Anchor::CENTER)`
-/// or just passing an `Anchor` to an `impl Into<Alignment>` slot). Build the
-/// asymmetric form with [`Anchor::to`].
-#[derive(Debug, Clone, Copy, Keyable)]
-pub struct Alignment {
-    /// The anchor on the child box.
-    pub child: Anchor,
-    /// The anchor on the surrounding box the child anchor lands on.
-    pub at: Anchor,
-}
-
-impl Alignment {
-    pub const TOP_LEFT: Self = Self::uniform(Anchor::TOP_LEFT);
-    pub const CENTER: Self = Self::uniform(Anchor::CENTER);
-
-    pub const fn new(child: Anchor, at: Anchor) -> Self {
-        Self { child, at }
-    }
-
-    /// The same anchor on both boxes — centering, corner- or edge-pinning.
-    pub const fn uniform(anchor: Anchor) -> Self {
-        Self {
-            child: anchor,
-            at: anchor,
-        }
-    }
-}
-
-impl From<Anchor> for Alignment {
-    fn from(anchor: Anchor) -> Self {
-        Self::uniform(anchor)
-    }
 }
 
 /// A size paired with an anchor on that size, produced by [`Vec2::anchored`].
@@ -368,6 +321,15 @@ impl Constraints {
             size.0.clamp(self.min.0, self.max.0),
             size.1.clamp(self.min.1, self.max.1),
         )
+    }
+
+    /// Resolves the size used by fill-style layout: take each finite maximum,
+    /// collapse an unbounded axis to zero, then honor the constraint minimum.
+    /// Shared by [`SizeMode::Fill`](crate::layout::SizeMode::Fill) and
+    /// anchor-targeted [`Positioned`](crate::placement::Positioned).
+    pub(crate) fn fill_size(&self) -> Vec2 {
+        let finite_or_zero = |axis: f32| if axis.is_finite() { axis } else { 0.0 };
+        self.constrain(Vec2(finite_or_zero(self.max.0), finite_or_zero(self.max.1)))
     }
 
     /// Tightens the constraints' max to the provided size on each axis

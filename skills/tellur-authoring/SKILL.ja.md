@@ -103,19 +103,20 @@ fn TitleCard(#[builder(into)] source: String, alpha: f32) -> impl VectorComponen
 
 | 手書きしがちな計算 | Tellur らしい書き方 |
 |---|---|
-| `Vec2(canvas.0 * 0.5 - w * 0.5, ...)` の中央寄せ | `.anchored(Anchor::CENTER).snap_to(point)` / `Frame` の `.align(Anchor::CENTER)` |
+| `Vec2(canvas.0 * 0.5 - w * 0.5, ...)` の中央寄せ | 絶対配置なら `.anchored(Anchor::CENTER).snap_to(point)` / 解決済み box 内なら `.snap_to(Anchor::CENTER)` |
 | 兄弟の座標を等差数列で計算 | `Flex` + `.spacing(n)` |
+| 子を手動計測して装飾・overlay のサイズを合わせる | `Stack::builder().under(...).base(child).over(...)` |
 | 右寄せ・下寄せの座標逆算 | `Anchor::BOTTOM_RIGHT` 系 / `Flexible::spacer(1.0)` / `MainAlign::End` |
 | 余白ぶんのオフセット加算 | `Padding` + `EdgeInsets` |
 | 中心回転のための平行移動サンドイッチ | `.transform_around(Anchor::CENTER, t)` |
-| 「箱の中を子が滑る」座標補間 | `.align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))` で anchor 自体を時間駆動 |
+| 「箱の中を子が滑る」座標補間 | `.anchored(Anchor::CENTER).snap_to(Anchor::new(rx, 0.5))` で target anchor を時間駆動 |
 | はみ出しを消すための座標クランプ | `Clip` / `DecoratedBox`（raster） |
 
 **演出は座標で、構造はフローで。** モーショングラフィックスの演出配置
 （キャンバス世界: `Layer` + `place_at` / `anchored().snap_to()`）では絶対座標
 リテラルは演出判断そのものなので許容されます。字幕バー・HUD・表のような「UI 的」
 構造をキャンバス世界の座標計算で組み始めたら、それはフロー世界
-（`Frame`/`Flex`/`Padding`）の仕事です。
+（`Frame`/`Flex`/`Stack`/`Padding`）の仕事です。
 
 ## 4. 鉄則③ — `const` の増殖は設計ミスのシグナル
 
@@ -127,8 +128,9 @@ fn TitleCard(#[builder(into)] source: String, alpha: f32) -> impl VectorComponen
 `const` 化を考える前のチェック:
 
 1. **その数値は別の数値から導出されていないか？** `const TITLE_X: f32 = CANVAS_W *
-   0.5 - 120.0;` のような算術関係は、`Anchor` の相対指定や `Frame`/`Flex`/`Padding`
-   で構造として表現する。導出式を const に閉じ込めるのは隠蔽であって解決ではない
+   0.5 - 120.0;` のような算術関係は、`Anchor` の相対指定や
+   `Frame`/`Flex`/`Stack`/`Padding` で構造として表現する。導出式を const に
+   閉じ込めるのは隠蔽であって解決ではない
 2. **時刻表になっていないか？** `const SCENE2_START: f64 = 12.3;` のような絶対時刻の
    カスケードは、`Sequence` の並び・`TimeBox` の間・`Event` トリガで「配置から時刻が
    導かれる」形にする。台本を差し替えても壊れないのが正しい構造
@@ -223,32 +225,35 @@ source 設定 → effect → 配置の順を推奨する。`.fill()` は構造ma
 
 1. `SizeMode::Fill` は親が `UNBOUNDED` だと 0 に潰れる（キャンバス世界は子を無限
    制約で測る）
-2. `Flexible` / `.grow()` は `Flex` の**直下の子**でだけ効く
-3. grow を持つ子がいると `MainAlign` の `Center`/`End`/`Space*` は `Start` に退化する
-4. main 軸が無限制約のとき grow は不活性
-5. `phase` / `window` は `end > start` を要求し、破ると panic
-6. `Window::elapsed()` / `after()` は窓が閉じても止まらない（それが存在理由）。
+2. `SnapTarget::Anchor` は親の max が `UNBOUNDED` の軸で 0 に縮退する
+   （`SizeMode::Fill` と同族）
+3. `Flexible` / `.grow()` は `Flex` の**直下の子**でだけ効く
+4. grow を持つ子がいると `MainAlign` の `Center`/`End`/`Space*` は `Start` に退化する
+5. main 軸が無限制約のとき grow は不活性
+6. `phase` / `window` は `end > start` を要求し、破ると panic
+7. `Window::elapsed()` / `after()` は窓が閉じても止まらない（それが存在理由）。
    止めたければ `remaining()` か `clamped()`。ただし `Event::window` 由来の
    `elapsed()` は窓の終端で凍結する
-7. 生の `Window` をフィールドに置くとキャッシュが全滅する（§5）
-8. `eased(Easing::X)` は overshoot カーブを clamp する（§6）
-9. `.trigger_*` は `.at(..)` の**外側**（前）に付ける:
+8. 生の `Window` をフィールドに置くとキャッシュが全滅する（§5）
+9. `eased(Easing::X)` は overshoot カーブを clamp する（§6）
+10. `.trigger_*` は `.at(..)` の**外側**（前）に付ける:
    `x.trigger_at_start(e).at(5.0)`
-10. `.at(a..b)` は半開区間 `[a, b)`。境界フレームの二重描画は起きない
-11. `Clip` は vector 専用（raster で欲しければ切ってから `.rasterize()`）。
+11. `.at(a..b)` は半開区間 `[a, b)`。境界フレームの二重描画は起きない
+12. `Clip` は vector 専用（raster で欲しければ切ってから `.rasterize()`）。
     `.transform()` / `.transform_around()` も vector 専用。`.opacity()` は両方にある
-12. 再エクスポート（`some_crate::tellur`）越しに `#[component]` を使う場合、
+13. 再エクスポート（`some_crate::tellur`）越しに `#[component]` を使う場合、
     マクロのパス解決のため動画クレート側にも同一版の `tellur` 直接依存を併記する
-13. temporal builder call は順序付きwrapper。`.trim()` と audio effect の順を入れ替えると、
+14. temporal builder call は順序付きwrapper。`.trim()` と audio effect の順を入れ替えると、
     effect が見るlocal clockも意図的に変わる
-14. `.fill()` は親 `Timeline` が尺計算から除外できるよう、必ず最外側のtemporal verbにする
+15. `.fill()` は親 `Timeline` が尺計算から除外できるよう、必ず最外側のtemporal verbにする
 
 ## 9. 参照実装
 
 書き方に迷ったら、この優先順で実例を見てください:
 
 - `tellur-renderer/examples/timeline_to_mp4.rs` — 絶対時刻の世界の最小形
-  （`BouncingDot`: `Frame.align` の anchor を時間駆動する教科書パターン）
+  （`BouncingDot`: サイズ済み `Frame` 内で `Positioned` の target anchor を
+  時間駆動する教科書パターン）
 - `tellur-live` のデモシーン — キャンバス世界の演出と `phase`/`window`/`clamped()`
   の全パターン、および配置クロックの世界（`timeline_showcase`）
 - youtube リポジトリの `movies/202606/shorts_sqrt2_plus_sqrt3` — キュー駆動
@@ -264,7 +269,7 @@ source 設定 → effect → 配置の順を推奨する。`.fill()` は構造ma
 - [ ] 手書きの clamp / lerp / easing / スタッガー式が残っていないか
       （§3 の変換表で置き換えたか）
 - [ ] 座標の算術（`* 0.5`、`- width / 2.0`、等差数列）で相対関係を表現して
-      いないか。`Anchor` / `Frame` / `Flex` / `Padding` で書けないか
+      いないか。`Anchor` / `Frame` / `Flex` / `Stack` / `Padding` で書けないか
 - [ ] グローバル `const` は真のデザイントークンだけか。導出値・時刻表・
       1 箇所でしか使わない値を const 化していないか（§4）
 - [ ] 非自明な数値リテラルに由来を説明するコメントがあるか

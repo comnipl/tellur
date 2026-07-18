@@ -27,14 +27,14 @@ fn main() {
                 .size(Vec2(240.0, 240.0))
                 .fill(Paint::Solid(Color::hsl(200.0, 0.7, 0.55)))
                 .anchored(Anchor::TOP_LEFT)
-                .snap_to(Anchor::TOP_LEFT.point(scene_size)),
+                .snap_to(Anchor::TOP_LEFT),
         )
         .child(
             Circle::builder()
                 .radius(120.0)
                 .fill(Paint::Solid(Color::hsl(20.0, 0.7, 0.55)))
                 .anchored(Anchor::BOTTOM_RIGHT)
-                .snap_to(Anchor::BOTTOM_RIGHT.point(scene_size)),
+                .snap_to(Anchor::BOTTOM_RIGHT),
         )
         .build();
 

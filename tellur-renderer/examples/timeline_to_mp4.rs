@@ -6,8 +6,8 @@
 //! different framerates via `Time::fps`. A vertical `Flex`
 //! distributes the four tracks evenly inside a padded scene with
 //! `CrossAlign::Stretch`. The dot itself is purely a tree of layout
-//! containers — `Frame` declares its outer shape and anchors the
-//! decorated circle inside it. The circle is decorated via
+//! containers — `Frame` declares its outer shape and `Positioned`
+//! anchors the decorated circle inside it. The circle is decorated via
 //! `.rasterize().effect(Outline).effect(DropShadow)` — the first
 //! `.effect()` is innermost, so the white stroke applies first and the
 //! `DropShadow` falls behind the combined stroked shape.
@@ -21,6 +21,7 @@ use tellur_core::easing::PhaseEasing;
 use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
+use tellur_core::placement::RasterPlacement;
 use tellur_core::raster::{RasterComponent, Resolution};
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time};
@@ -30,8 +31,8 @@ use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across the
 /// track's width. `Frame` declares the track's outer shape (fill the
-/// parent width, fix the height at 60) and anchors the circle so it
-/// stays fully inside: both sides of the alignment use the same
+/// parent width, fix the height at 60), while `Positioned` anchors the
+/// circle so it stays fully inside: both sides of the placement use the same
 /// bounce-driven ratio. The circle itself is decorated via
 /// `.rasterize().effect(Outline).effect(DropShadow)` — the first
 /// `.effect()` is innermost, so the white `Outline` runs first and the
@@ -46,7 +47,6 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)
         .height(SizeMode::Fixed(60.0))
-        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
         .child(
             Circle::builder()
                 .radius(30.0)
@@ -62,7 +62,9 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
                         .offset(Vec2(0.0, 8.0))
                         .blur(10.0)
                         .color(Color::rgba_u8(0, 0, 0, 200)),
-                ),
+                )
+                .anchored(Anchor::CENTER)
+                .snap_to(Anchor::new(rx, 0.5)),
         )
         .build()
 }

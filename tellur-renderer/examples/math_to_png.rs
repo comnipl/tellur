@@ -40,7 +40,7 @@ fn main() {
                 .span(MathSpan::builder().source(r"y = \frac{2}{3} x^2"))
                 .span(".")
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::CENTER.point(scene_size)),
+                .snap_to(Anchor::CENTER),
         )
         .build();
 

@@ -503,7 +503,8 @@ mod builder_tests {
     use super::*;
     use crate::builder::{VectorBuilderPlacement, VectorBuilderTransform};
     use crate::color::Color;
-    use crate::geometry::{Anchor, Transform};
+    use crate::geometry::{Anchor, Constraints, Rect, Transform};
+    use crate::placement::SnapTarget;
     use crate::vector::Paint;
 
     fn paint() -> Paint {
@@ -538,15 +539,28 @@ mod builder_tests {
         let p = Ellipse::builder()
             .radii(Vec2(5.0, 5.0))
             .place_at(Vec2(2.0, 3.0));
-        assert_eq!(p.offset, Vec2(2.0, 3.0));
+        assert_eq!(p.anchor, Anchor::TOP_LEFT);
+        assert_eq!(p.target, SnapTarget::Point(Vec2(2.0, 3.0)));
+        assert_eq!(p.offset, Vec2::ZERO);
 
-        // anchored().snap_to() on a builder: CENTER of a 10x10 box snapped to
-        // (10,10) lands its origin at (5,5).
+        // anchored().snap_to() keeps the declarative target and resolves it
+        // during layout/paint instead of baking the position eagerly.
         let p2 = Ellipse::builder()
             .radii(Vec2(5.0, 5.0))
             .anchored(Anchor::CENTER)
             .snap_to(Vec2(10.0, 10.0));
-        assert_eq!(p2.offset, Vec2(5.0, 5.0));
+        assert_eq!(p2.anchor, Anchor::CENTER);
+        assert_eq!(p2.target, SnapTarget::Point(Vec2(10.0, 10.0)));
+        assert_eq!(p2.offset, Vec2::ZERO);
+
+        let size = p2.layout(Constraints::UNBOUNDED);
+        assert_eq!(
+            p2.paint_bounds(size),
+            Rect {
+                origin: Vec2(5.0, 5.0),
+                size: Vec2(10.0, 10.0),
+            }
+        );
     }
 
     #[test]

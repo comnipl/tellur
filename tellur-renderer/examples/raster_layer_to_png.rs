@@ -44,7 +44,7 @@ fn main() {
                 .hue(0.0)
                 .rasterize()
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.4, 0.4).point(scene_size)),
+                .snap_to(Anchor::new(0.4, 0.4)),
         )
         .child(
             Blob::builder()
@@ -52,7 +52,7 @@ fn main() {
                 .hue(120.0)
                 .rasterize()
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.6, 0.4).point(scene_size)),
+                .snap_to(Anchor::new(0.6, 0.4)),
         )
         .child(
             Blob::builder()
@@ -60,7 +60,7 @@ fn main() {
                 .hue(240.0)
                 .rasterize()
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::new(0.5, 0.65).point(scene_size)),
+                .snap_to(Anchor::new(0.5, 0.65)),
         )
         .build();
 

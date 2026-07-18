@@ -16,7 +16,7 @@ tellur's layout consists of **two worlds** riding on the same component protocol
 |---|---|---|
 | Metaphor | After Effects compositions | CSS flexbox / Figma Auto Layout |
 | How positions are decided | The author specifies absolute coordinates | The parent hands down constraints; the child answers with its size |
-| Main cast | `Layer`, `Positioned`, `Fragment` | `Frame`, `Flex`, `Padding`, `DecoratedBox`, `SizedBox` |
+| Main cast | `Layer`, `Fragment`, `Positioned` with a point target | `Frame`, `Flex`, `Stack`, `Padding`, `DecoratedBox`, `SizedBox`, `Positioned` with an anchor target |
 | Best for | staging motion-graphics direction | "UI-like" structure: subtitle bars, HUDs, ranking tables |
 
 Residents of both worlds are `VectorComponent`s (or `RasterComponent`s), so **they nest freely**. "A box placed on a canvas whose inside is laid out with flow" and "a small canvas inside a flow cell" are both natural to write.
@@ -45,7 +45,7 @@ The principle: **constraints flow down, sizes flow up, the parent decides positi
 
 One more principle: **what is invisible is not drawn.** Shapes draw emptiness themselves when invisible (fill/stroke alpha 0, zero size), `Text` when the string is empty or the fill invisible, `Transformed` at opacity 0. Callers never need visibility guards like "skip it when alpha is 0."
 
-> **footgun ①**: `SizeMode::Fill` takes the parent's max constraint, but when the max is infinite (`UNBOUNDED`) it **collapses to 0**. If something "Filled and disappeared", suspect a parent passing an infinite constraint (inside a `Fragment`, or a child placed via `place_at` / `anchored()` — the canvas world measures children under unbounded constraints).
+> **footgun ①**: `SizeMode::Fill` takes the parent's max constraint, but when the max is infinite (`UNBOUNDED`) it **collapses to 0**. If something "Filled and disappeared", suspect a parent passing an infinite constraint.
 
 ## 2. The canvas world — placing on a `Layer`
 
@@ -56,17 +56,43 @@ Layer::builder()
     .size(Vec2(1920.0, 1080.0))
     .child(background.place_at(Vec2::ZERO))
     .child(title.anchored(Anchor::CENTER).snap_to(Vec2(960.0, 400.0)))
+    .child(badge.anchored(Anchor::TOP_RIGHT).snap_to(Anchor::TOP_RIGHT))
     .build()
 ```
 
-There are two fluent APIs for placement.
+`Positioned` uses one sentence for both absolute and box-relative placement:
+"snap this anchor on the child to that target, then offset it".
 
 - `.place_at(pos)` — put the component's top-left corner at `pos`
-- `.anchored(anchor).snap_to(point)` — snap an anchor point on the component to a point on the canvas
+- `.anchored(child_anchor).snap_to(point)` — snap to an absolute `Vec2`
+- `.anchored(child_anchor).snap_to(parent_anchor)` — snap to a proportional point on the parent box
+- `.offset(Vec2(dx, dy))` — add a constant pixel translation after either kind of snap
 
-`anchored().snap_to()` lifts the geometric vocabulary (`Vec2::anchored` → `AnchoredSize::snap_to`) straight onto components; its charm is that "**which point of the child goes where**" reads left to right. Both simply return a `Positioned` — an ordinary component — so there is no special "placed world".
+The target is represented by `SnapTarget`: `Vec2` converts to
+`SnapTarget::Point`, while `Anchor` converts to `SnapTarget::Anchor`.
+`anchored().snap_to()` therefore reads left to right as "**which point of the
+child goes where**" without changing grammar between the two layout worlds.
+Every form returns an ordinary `Positioned`; there is no separate "placed"
+world.
 
-A placed child renders **at its intrinsic size (its measurement under unbounded constraints)**. The canvas never forces a size onto its children, so a circle larger than the canvas is not squashed — overflow is the clipper's job.
+A point target is **out of flow**: it measures the child under unbounded
+constraints and reports that intrinsic size. The canvas therefore never
+squashes an oversized circle. An anchor target instead reports the finite
+maximum offered by its parent, measures the actual child loosely inside that
+box, and resolves the target from the chosen box size during painting. This is
+the same fill rule used by `SizeMode::Fill`.
+
+```rust
+chip
+    .anchored(Anchor::CENTER_LEFT)       // point on the child
+    .snap_to(Anchor::TOP_LEFT)           // point on the parent box
+    .offset(Vec2(28.0, 0.0))             // final pixel nudge
+```
+
+> **footgun ②**: `SnapTarget::Anchor` collapses an axis to `0` when the
+> parent's maximum on that axis is `UNBOUNDED`, just like `SizeMode::Fill`.
+> Use it under a finite box such as `Layer`, `Frame`, or `Stack`; use a `Vec2`
+> point target for out-of-flow placement in an auto-fitting `Fragment`.
 
 A `Layer`'s size is **required**. When you want a "group that shrinks to its children", use `Fragment` below.
 
@@ -89,11 +115,14 @@ Fragment::empty()
 - Its own size auto-fits the bounding box of its children's paint bounds
 - An empty `Fragment` expresses "draw nothing"
 
-With `Positioned` (offset one) and `Fragment` (group many / none), all of "none, one, many, positioned" are expressible as components — this is tellur's React-like core.
+With `Positioned` (place one) and `Fragment` (group many / none), all of "none, one, many, positioned" are expressible as components — this is tellur's React-like core.
 
-## 4. Flow world ① — `Frame` decides size and alignment
+## 4. Flow world ① — `Frame` decides size, `Positioned` decides placement
 
-`Frame` is the flow-world container that single-handedly covers "size declaration + anchor alignment". Per axis, `SizeMode` decides the outer size; inside it, the child is placed with an `Alignment`.
+`Frame` is a deliberately small sizing container. Per axis, `SizeMode` decides
+the outer size; the child starts at the top-left. When the child should be
+aligned inside that box, wrap the child in the same `Positioned` vocabulary
+used on a canvas.
 
 ```rust
 pub enum SizeMode {
@@ -103,36 +132,44 @@ pub enum SizeMode {
 }
 ```
 
-The default is "both axes `Hug`, top-left alignment" — a transparent box that does nothing — so you write only what you want to change.
+The default is `Hug` on both axes, so a plain `Frame` is a transparent sizing
+wrapper and you write only what you want to change.
 
 ```rust
-// Width fills the parent, height is fixed; child centered.
+// Width fills the parent, height is fixed; the child is centered in that box.
 Frame::builder()
     .width(SizeMode::Fill)
     .height(SizeMode::Fixed(60.0))
-    .align(Anchor::CENTER)
-    .child(circle)
+    .child(
+        circle
+            .anchored(Anchor::CENTER)
+            .snap_to(Anchor::CENTER),
+    )
     .build()
 ```
 
-`.align()` comes in two forms.
+Symmetric and asymmetric placement now use the same expression:
 
 ```rust
-// Symmetric: the same anchor on both boxes (the common case).
-.align(Anchor::CENTER)             // centering
-.align(Anchor::BOTTOM_RIGHT)       // pin to the bottom-right corner
+// The same anchor on both boxes: centering or corner-pinning.
+child.anchored(Anchor::CENTER).snap_to(Anchor::CENTER)
+child.anchored(Anchor::BOTTOM_RIGHT).snap_to(Anchor::BOTTOM_RIGHT)
 
-// Asymmetric: snap the child's anchor onto a different box anchor.
-.align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))
+// Different anchors: the child's center follows a proportional target.
+child.anchored(Anchor::CENTER).snap_to(Anchor::new(rx, 0.5))
 ```
 
-Read `Anchor::CENTER.to(...)` as "the child's center goes to the box's `(rx, 0.5)` point". Drive `rx` with time and the child glides across the `Frame` (the `BouncingDot` in `timeline_to_mp4` is this pattern).
-
-> Where the canvas world's `anchored().snap_to(point)` snaps to a **point**, `Frame.align` snaps to a **relative position**. The former is absolute coordinates; the latter tracks the box's size.
+Drive `rx` with time and the child glides across the box; this is the
+`BouncingDot` pattern in `timeline_to_mp4`. Because an anchor-targeted
+`Positioned` fills both offered axes, put it under a finite reference box. In
+particular, wrapping it in a `Frame` with a `Hug` axis makes that axis fill
+rather than hug; use the unwrapped child when an axis should derive its size
+from the child's intrinsic size.
 
 ## 5. Flow world ② — lining up with `Flex`
 
-`Flex` is a single-line arrangement container modeled on CSS flexbox. Stacking is the job of `Layer`/`Fragment`; `Flex` is strictly for lining things up.
+`Flex` is a single-line arrangement container modeled on CSS flexbox. Use
+`Layer` / `Stack` for overlays and `Flex` for lining things up.
 
 ```rust
 Flex::builder()
@@ -178,11 +215,11 @@ Flex::builder()
     .build()
 ```
 
-> **footgun ②**: `Flexible` must be a **direct child** of `Flex`. Put a `Padding` or similar in between and grow is ignored (the wrapper just behaves transparently).
+> **footgun ③**: `Flexible` must be a **direct child** of `Flex`. Put a `Padding` or similar in between and grow is ignored (the wrapper just behaves transparently).
 >
-> **footgun ③**: once any child grows, the leftover space is consumed by grow first, so `MainAlign`'s `Center`/`End`/`Space*` effectively degenerate to `Start`. Same as the CSS relationship between `flex-grow` and `justify-content`.
+> **footgun ④**: once any child grows, the leftover space is consumed by grow first, so `MainAlign`'s `Center`/`End`/`Space*` effectively degenerate to `Start`. Same as the CSS relationship between `flex-grow` and `justify-content`.
 >
-> **footgun ④**: grow is inert when the main axis is under an infinite constraint (there is no defined "leftover" to share). Also the same behavior as CSS.
+> **footgun ⑤**: grow is inert when the main axis is under an infinite constraint (there is no defined "leftover" to share). Also the same behavior as CSS.
 
 ## 6. Flow world ③ — spacing and decoration
 
@@ -203,6 +240,48 @@ DecoratedBox::builder()
 - `SizedBox` — a fixed-size empty box, for fixed spacers and reserving area (the growing spacer is `Flexible::spacer`)
 - `Clip` — a vector container that **geometrically** cuts its child by a rectangle (or any path): `Clip::builder().region(ClipRegion::rect(rect)).child(x)`. Layout passes through to the child untouched; only the drawing is cut. Distinct from `DecoratedBox`'s "pin the paint bounds to the box" — `Clip` truly cuts at the given region, whether mid-box or an arbitrary path
 
+### `Stack` — overlays sized by one base child
+
+`Stack` fills the missing "decorate or overlay whatever size this content
+chooses" role. It has three slots and deliberately contains no placement
+grammar of its own:
+
+- exactly one `.base(child)` decides the Stack's layout size
+- zero or more `.under(child)` paint behind the base
+- zero or more `.over(child)` paint in front of the base
+- `.maybe_under(option)` / `.maybe_over(option)` add optional layers
+
+`base` is a required builder field, so `.build()` is unavailable until it has
+been supplied.
+
+```rust
+Stack::builder()
+    .under(decorations) // receives the base size as tight constraints
+    .base(
+        Padding::builder()
+            .insets(EdgeInsets::all(16.0))
+            .child(content),
+    )
+    .over(
+        chip
+            .anchored(Anchor::CENTER_LEFT)
+            .snap_to(Anchor::TOP_LEFT)
+            .offset(Vec2(28.0, 0.0)),
+    )
+    .build()
+```
+
+The Stack passes its incoming constraints unchanged to `base` and reports the
+base's answer. Every under/over child is then laid out with tight constraints
+at that resolved size, so `SizeMode::Fill`, `#[available]`, and
+`SnapTarget::Anchor` all see the same box. Paint order is unders in declaration
+order, then base, then overs in declaration order.
+
+Under/over children never change layout size, but their full paint bounds are
+unioned into the Stack's paint bounds. An offset shadow, overhanging chip, or
+outset stroke therefore survives rasterization instead of being clipped. Use
+`Positioned` inside a slot for all edge-relative or offset placement.
+
 ## 7. Worked example — where the two worlds meet
 
 One dot track from `tellur-renderer/examples/timeline_to_mp4.rs`.
@@ -214,8 +293,11 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     Frame::builder()
         .width(SizeMode::Fill)            // the track spans the parent width
         .height(SizeMode::Fixed(60.0))    // fixed track height
-        .align(Anchor::CENTER.to(Anchor::new(rx, 0.5)))  // time-driven sweep
-        .child(circle)
+        .child(
+            circle
+                .anchored(Anchor::CENTER)
+                .snap_to(Anchor::new(rx, 0.5)), // time-driven sweep
+        )
         .build()
 }
 ```
@@ -226,10 +308,12 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 
 | Goal | Reach for |
 |---|---|
-| Place at coordinates on a fixed canvas | `Layer` + `.place_at()` / `.anchored().snap_to()` |
+| Place at coordinates on a fixed canvas | `Layer` + `.place_at()` / `.snap_to(Vec2)` |
+| Place relative to a resolved box | `.anchored(child_anchor).snap_to(parent_anchor)` |
 | Group siblings / conditionally render nothing | `Fragment` / `Fragment::empty()` |
-| Offset just one thing | `.place_at()` (= `Positioned`) |
-| Declare a size / align inside a box | `Frame` (`SizeMode` × `Alignment`) |
+| Nudge a snapped child by pixels | `.offset(Vec2)` on `Positioned` |
+| Declare a size | `Frame` + `SizeMode` |
+| Paint behind/over content at the content's size | `Stack` (`under` / `base` / `over`) |
 | Line up vertically / horizontally | `Flex` |
 | Share leftover space by ratio / growing blank | `.grow(w)` / `Flexible::spacer(w)` |
 | Spacing | `Padding` |
@@ -244,8 +328,8 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 Every container comes in vector and raster variants with the **same name and the same semantics**.
 
 ```rust
-use tellur_core::layout::{Frame, Flex, Flexible};          // vector
-use tellur_core::layout::raster::{Frame, Flex, Flexible};  // raster
+use tellur_core::layout::{Frame, Flex, Flexible, Stack};          // vector
+use tellur_core::layout::raster::{Frame, Flex, Flexible, Stack};  // raster
 ```
 
 In the source, both variants live in one file per container (`layout/frame.rs` etc.). The raster side's only extra responsibilities are `paint_bounds` (the drawn extent including overflow such as drop shadows) and its relationship with the cache (`Flexible` and `Positioned` use `CachePolicy::Transparent` to hand their cache slot to the child).

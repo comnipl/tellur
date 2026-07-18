@@ -50,7 +50,7 @@ fn main() {
                         .scale_y(1.42),
                 )
                 .anchored(Anchor::CENTER)
-                .snap_to(Anchor::CENTER.point(scene_size)),
+                .snap_to(Anchor::CENTER),
         )
         .child(
             Text::builder()

@@ -14,8 +14,8 @@
 //!   sizes up:
 //!   - [`Padding`] adds an outer border of empty space around a child.
 //!   - [`Frame`] picks the outer width / height per axis with [`SizeMode`]
-//!     (Fill / Hug / Fixed) and aligns the child inside that box by an
-//!     [`Alignment`] anchor pair (default: hug the child, top-left).
+//!     (Fill / Hug / Fixed) and keeps its child at top-left. Wrap the child in
+//!     [`Positioned`](crate::placement::Positioned) for anchor placement.
 //!   - [`Flex`] arranges children along an axis with spacing, main/cross
 //!     alignment, and flexbox-style grow weights: a [`Flexible`] child (made
 //!     with `.grow(w)` or [`Flexible::spacer`]) takes a weighted share of the
@@ -23,6 +23,8 @@
 //!     cross-axis constraint so children fill the flex's cross extent.
 //!   - [`DecoratedBox`] paints a background fill (and optionally a border
 //!     on the vector variant) behind the child.
+//!   - [`Stack`] lets one `base` child decide the size, then paints arbitrary
+//!     `under` and `over` children against that resolved box.
 //!   - [`SizedBox`] is an empty placeholder of a given size.
 //!
 //! Vector containers live at the module root and operate on
@@ -35,13 +37,15 @@ mod flex;
 mod frame;
 mod padding;
 mod sized_box;
+mod stack;
 
-pub use crate::geometry::{Alignment, Axis};
+pub use crate::geometry::Axis;
 pub use decorated_box::DecoratedBox;
 pub use flex::{CrossAlign, Flex, Flexible, MainAlign, VectorFlex};
 pub use frame::{Frame, SizeMode};
 pub use padding::Padding;
 pub use sized_box::SizedBox;
+pub use stack::Stack;
 
 // Re-export the raster flex trait at the module root, mirroring how
 // `placement` re-exports `RasterPlacement`.
@@ -56,4 +60,5 @@ pub mod raster {
     pub use super::frame::raster::Frame;
     pub use super::padding::raster::Padding;
     pub use super::sized_box::raster::SizedBox;
+    pub use super::stack::raster::Stack;
 }
