@@ -10,9 +10,12 @@ use tellur_core::render_context::{
 };
 use tellur_core::vector::{
     ClipGroup as TellurClipGroup, DashPattern, Node, Paint, Path as TellurPath, PathCommand,
-    VectorGraphic,
+    Stroke as TellurStroke, StrokeCap, StrokeJoin, VectorGraphic,
 };
-use vello::kurbo::{Affine, BezPath, PathEl, Rect as VelloRect, Stroke as VelloStroke};
+use vello::kurbo::{
+    Affine, BezPath, Cap as VelloCap, Join as VelloJoin, PathEl, Rect as VelloRect,
+    Stroke as VelloStroke,
+};
 use wgpu::util::DeviceExt;
 
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
@@ -1280,8 +1283,7 @@ fn encode_vello_path(
     if let Some(stroke) = &path.stroke {
         if stroke.width > 0.0 {
             if let Some(paint) = to_vello_color(&stroke.paint, opacity) {
-                let vello_stroke =
-                    apply_dash(VelloStroke::new(stroke.width as f64), stroke.dash.as_ref());
+                let vello_stroke = to_vello_stroke(stroke);
                 if has_zero_length_closing_segment(&vello_path) {
                     // Vello 0.2's GPU stroker can misinterpret its synthetic
                     // closed-subpath marker when the final segment already ends
@@ -1309,6 +1311,30 @@ fn encode_vello_path(
     }
 
     Some(())
+}
+
+fn to_vello_stroke(stroke: &TellurStroke) -> VelloStroke {
+    let stroke_style = VelloStroke::new(stroke.width as f64)
+        .with_caps(to_vello_cap(stroke.cap))
+        .with_join(to_vello_join(stroke.join))
+        .with_miter_limit(stroke.miter_limit() as f64);
+    apply_dash(stroke_style, stroke.dash.as_ref())
+}
+
+fn to_vello_cap(cap: StrokeCap) -> VelloCap {
+    match cap {
+        StrokeCap::Butt => VelloCap::Butt,
+        StrokeCap::Square => VelloCap::Square,
+        StrokeCap::Round => VelloCap::Round,
+    }
+}
+
+fn to_vello_join(join: StrokeJoin) -> VelloJoin {
+    match join {
+        StrokeJoin::Bevel => VelloJoin::Bevel,
+        StrokeJoin::Miter => VelloJoin::Miter,
+        StrokeJoin::Round => VelloJoin::Round,
+    }
 }
 
 /// Applies a [`DashPattern`] to a [`VelloStroke`], mirroring
@@ -1922,6 +1948,38 @@ mod tests {
     }
 
     #[test]
+    fn maps_all_stroke_caps_to_vello() {
+        assert_eq!(to_vello_cap(StrokeCap::Butt), VelloCap::Butt);
+        assert_eq!(to_vello_cap(StrokeCap::Square), VelloCap::Square);
+        assert_eq!(to_vello_cap(StrokeCap::Round), VelloCap::Round);
+    }
+
+    #[test]
+    fn maps_all_stroke_joins_to_vello() {
+        assert_eq!(to_vello_join(StrokeJoin::Bevel), VelloJoin::Bevel);
+        assert_eq!(to_vello_join(StrokeJoin::Miter), VelloJoin::Miter);
+        assert_eq!(to_vello_join(StrokeJoin::Round), VelloJoin::Round);
+    }
+
+    #[test]
+    fn builds_vello_stroke_with_explicit_style_before_dashing() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 7.5)
+            .with_cap(StrokeCap::Square)
+            .with_join(StrokeJoin::Miter)
+            .with_miter_limit(4.001)
+            .with_dash(DashPattern::new(vec![3.0, 2.0], 1.0));
+
+        let vello = to_vello_stroke(&stroke);
+        assert_eq!(vello.width, 7.5);
+        assert_eq!(vello.start_cap, VelloCap::Square);
+        assert_eq!(vello.end_cap, VelloCap::Square);
+        assert_eq!(vello.join, VelloJoin::Miter);
+        assert_eq!(vello.miter_limit, 4.0);
+        assert_eq!(vello.dash_pattern.as_slice(), &[3.0, 2.0]);
+        assert_eq!(vello.dash_offset, 1.0);
+    }
+
+    #[test]
     #[ignore = "requires a GPU adapter"]
     fn composite_rejects_cpu_input_without_implicit_upload() {
         let Some(mut gpu) = gpu_or_skip() else {
@@ -2392,11 +2450,10 @@ mod tests {
                                     PathCommand::LineTo(Vec2(4.0, 2.0)),
                                 ],
                                 fill: None,
-                                stroke: Some(Stroke {
-                                    paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
-                                    width: 4.0,
-                                    dash: None,
-                                }),
+                                stroke: Some(Stroke::new(
+                                    Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
+                                    4.0,
+                                )),
                                 transform: Transform::IDENTITY,
                             })),
                         }),

@@ -15,7 +15,10 @@ use lru::LruCache;
 
 use crate::builder::VectorBuilder;
 use crate::geometry::{Constraints, Rect, Transform, Vec2};
-use crate::vector::{Fill, Node, Paint, Path, PathCommand, Stroke, VectorComponent, VectorGraphic};
+use crate::vector::{
+    Fill, Node, Paint, Path, PathCommand, Stroke, StrokeCap, StrokeJoin, VectorComponent,
+    VectorGraphic,
+};
 use crate::Keyable;
 
 const DEFAULT_TOLERANCE: f32 = 0.2;
@@ -371,9 +374,28 @@ fn path_stroke_to_paths(
     if bez.elements().is_empty() {
         return None;
     }
-    let style = kurbo::Stroke::new((stroke.width * max_scale(transform)).max(0.0) as f64)
-        .with_join(kurbo::Join::Round)
-        .with_caps(kurbo::Cap::Round);
+    let stroke_scale = max_scale(transform);
+    let mut style = kurbo::Stroke::new((stroke.width * stroke_scale).max(0.0) as f64)
+        .with_join(match stroke.join {
+            StrokeJoin::Bevel => kurbo::Join::Bevel,
+            StrokeJoin::Miter => kurbo::Join::Miter,
+            StrokeJoin::Round => kurbo::Join::Round,
+        })
+        .with_caps(match stroke.cap {
+            StrokeCap::Butt => kurbo::Cap::Butt,
+            StrokeCap::Square => kurbo::Cap::Square,
+            StrokeCap::Round => kurbo::Cap::Round,
+        })
+        .with_miter_limit(stroke.miter_limit() as f64);
+    if let Some(dash) = stroke.dash.as_ref() {
+        if let Some(lengths) = dash.normalized_lengths() {
+            let scale = stroke_scale as f64;
+            style = style.with_dashes(
+                dash.offset as f64 * scale,
+                lengths.into_iter().map(|length| length as f64 * scale),
+            );
+        }
+    }
     let stroked = kurbo::stroke(
         bez.elements().iter().copied(),
         &style,
@@ -838,5 +860,76 @@ mod tests {
 
         assert_eq!(renders.load(Ordering::Relaxed), 1);
         clear_outline_cache_for_tests();
+    }
+
+    #[test]
+    fn stroke_silhouette_honors_cap_style() {
+        let commands = [
+            PathCommand::MoveTo(Vec2(2.0, 5.0)),
+            PathCommand::LineTo(Vec2(8.0, 5.0)),
+        ];
+        let butt = Stroke::new(red(), 2.0).with_cap(StrokeCap::Butt);
+        let square = Stroke::new(red(), 2.0).with_cap(StrokeCap::Square);
+
+        let butt_bounds = paths_bounds(
+            &path_stroke_to_paths(&commands, &butt, Transform::IDENTITY, DEFAULT_TOLERANCE)
+                .expect("butt-capped line should produce a silhouette"),
+        )
+        .expect("butt-capped silhouette should have bounds");
+        let square_bounds = paths_bounds(
+            &path_stroke_to_paths(&commands, &square, Transform::IDENTITY, DEFAULT_TOLERANCE)
+                .expect("square-capped line should produce a silhouette"),
+        )
+        .expect("square-capped silhouette should have bounds");
+
+        assert!(square_bounds.origin.0 < butt_bounds.origin.0 - 0.9);
+        assert!(square_bounds.size.0 > butt_bounds.size.0 + 1.8);
+    }
+
+    #[test]
+    fn stroke_silhouette_honors_join_style() {
+        let commands = [
+            PathCommand::MoveTo(Vec2(2.0, 8.0)),
+            PathCommand::LineTo(Vec2(5.0, 2.0)),
+            PathCommand::LineTo(Vec2(8.0, 8.0)),
+        ];
+        let bevel = Stroke::new(red(), 2.0)
+            .with_cap(StrokeCap::Butt)
+            .with_join(StrokeJoin::Bevel);
+        let miter = Stroke::new(red(), 2.0)
+            .with_cap(StrokeCap::Butt)
+            .with_join(StrokeJoin::Miter)
+            .with_miter_limit(4.0);
+
+        let bevel_bounds = paths_bounds(
+            &path_stroke_to_paths(&commands, &bevel, Transform::IDENTITY, DEFAULT_TOLERANCE)
+                .expect("bevel-joined angle should produce a silhouette"),
+        )
+        .expect("bevel-joined silhouette should have bounds");
+        let miter_bounds = paths_bounds(
+            &path_stroke_to_paths(&commands, &miter, Transform::IDENTITY, DEFAULT_TOLERANCE)
+                .expect("miter-joined angle should produce a silhouette"),
+        )
+        .expect("miter-joined silhouette should have bounds");
+
+        assert!(miter_bounds.origin.1 < bevel_bounds.origin.1 - 0.9);
+    }
+
+    #[test]
+    fn stroke_silhouette_preserves_dash_gaps() {
+        let commands = [
+            PathCommand::MoveTo(Vec2(0.0, 5.0)),
+            PathCommand::LineTo(Vec2(20.0, 5.0)),
+        ];
+        let dashed = Stroke::new(red(), 2.0)
+            .with_cap(StrokeCap::Butt)
+            .with_dash(crate::vector::DashPattern::new(vec![4.0, 4.0], 0.0));
+
+        let paths =
+            path_stroke_to_paths(&commands, &dashed, Transform::IDENTITY, DEFAULT_TOLERANCE)
+                .expect("dashed line should produce silhouettes");
+        let contours: Vec<Vec<(f64, f64)>> = paths.into();
+
+        assert_eq!(contours.len(), 3, "one contour per visible dash");
     }
 }
