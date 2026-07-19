@@ -122,11 +122,7 @@ fn fill_rect(cx: f32, cy: f32, w: f32, h: f32, c: Color) -> Positioned {
 fn stroke_rect(cx: f32, cy: f32, w: f32, h: f32, c: Color, width: f32) -> Positioned {
     Rectangle::builder()
         .size(Vec2(w, h))
-        .stroke(Stroke {
-            paint: Paint::Solid(c),
-            width,
-            dash: None,
-        })
+        .stroke(Stroke::new(c, width))
         .place_at(Vec2(cx - w * 0.5, cy - h * 0.5))
 }
 
@@ -142,11 +138,7 @@ fn fill_circle(cx: f32, cy: f32, r: f32, c: Color) -> Positioned {
 fn stroke_circle(cx: f32, cy: f32, r: f32, c: Color, width: f32) -> Positioned {
     Circle::builder()
         .radius(r)
-        .stroke(Stroke {
-            paint: Paint::Solid(c),
-            width,
-            dash: None,
-        })
+        .stroke(Stroke::new(c, width))
         .place_at(Vec2(cx - r, cy - r))
 }
 

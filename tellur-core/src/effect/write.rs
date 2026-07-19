@@ -632,7 +632,7 @@ fn node_write_outset(node: &Node, fallback_stroke_width: f32, parent: Transform)
             write_stroke(path, fallback_stroke_width)
                 .map(|stroke| {
                     let transform = parent.concat(path.transform);
-                    stroke.width.max(0.0) * max_scale(transform) * 0.5
+                    stroke.conservative_outset() * max_scale(transform)
                 })
                 .unwrap_or(0.0)
         }
@@ -872,11 +872,7 @@ fn write_stroke(path: &Path, fallback_stroke_width: f32) -> Option<Stroke> {
     path.fill
         .as_ref()
         .filter(|fill| fill.is_visible())
-        .map(|fill| Stroke {
-            paint: fill.paint.clone(),
-            width: fallback_stroke_width,
-            dash: None,
-        })
+        .map(|fill| Stroke::new(fill.paint.clone(), fallback_stroke_width))
         .filter(|stroke| stroke.is_visible())
 }
 
@@ -1361,11 +1357,7 @@ mod tests {
         assert!(path.fill.is_none());
         assert_eq!(
             path.stroke,
-            Some(Stroke {
-                paint: paint(),
-                width: DEFAULT_STROKE_WIDTH,
-                dash: None,
-            })
+            Some(Stroke::new(paint(), DEFAULT_STROKE_WIDTH))
         );
         assert_eq!(path.transform, Transform::IDENTITY);
         assert_eq!(

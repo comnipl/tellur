@@ -132,11 +132,7 @@ pub fn Overture(time: LocalTime, palette: Palette) -> impl VectorComponent {
         .child(
             Rectangle::builder()
                 .size(Vec2(420.0, 420.0))
-                .stroke(Stroke {
-                    paint: p.pink.with_alpha(hero_life * 0.82).into(),
-                    width: 3.0,
-                    dash: None,
-                })
+                .stroke(Stroke::new(p.pink.with_alpha(hero_life * 0.82), 3.0))
                 .transform_around(
                     Anchor::CENTER,
                     Transform::scale(Vec2(s_clamped, s_clamped))

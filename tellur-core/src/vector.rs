@@ -358,10 +358,49 @@ impl Fill {
     }
 }
 
+/// Default miter limit used by [`Stroke`].
+///
+/// The limit is a ratio of miter length to stroke width. A miter join falls
+/// back before it exceeds this ratio.
+pub const DEFAULT_STROKE_MITER_LIMIT: f32 = 4.0;
+
+/// Shape drawn at the ends of an open stroked subpath and each visible dash.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum StrokeCap {
+    /// Stop the stroke at the path endpoint without extending it.
+    Butt,
+    /// Extend the stroke by half its width with a square edge.
+    Square,
+    /// Extend the stroke with a semicircular end.
+    #[default]
+    Round,
+}
+
+/// Shape drawn where two stroked path segments meet.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum StrokeJoin {
+    /// Connect the outside edges with a straight bevel.
+    Bevel,
+    /// Extend the segment edges to their intersection, subject to the stroke's
+    /// miter limit.
+    Miter,
+    /// Connect the segments with a circular arc.
+    #[default]
+    Round,
+}
+
 #[derive(Debug, Clone, Keyable)]
+#[non_exhaustive]
 pub struct Stroke {
+    /// Paint applied to the stroked path.
     pub paint: Paint,
+    /// Stroke width in logical units.
     pub width: f32,
+    /// Shape drawn at open path and dash endpoints.
+    pub cap: StrokeCap,
+    /// Shape drawn where consecutive path segments meet.
+    pub join: StrokeJoin,
+    miter_limit: f32,
     /// Optional dash pattern (SVG `stroke-dasharray`/`stroke-dashoffset`
     /// equivalent). `None` strokes solid.
     pub dash: Option<DashPattern>,
@@ -372,6 +411,9 @@ impl Stroke {
         Self {
             paint: paint.into(),
             width,
+            cap: StrokeCap::default(),
+            join: StrokeJoin::default(),
+            miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             dash: None,
         }
     }
@@ -381,11 +423,64 @@ impl Stroke {
         self.width > 0.0 && self.paint.is_visible()
     }
 
+    /// Conservative axis-aligned stroke outset for paint-bounds calculations.
+    pub(crate) fn conservative_outset(&self) -> f32 {
+        let half_width = (self.width * 0.5).max(0.0);
+        let join_factor = if self.join == StrokeJoin::Miter {
+            self.miter_limit()
+        } else {
+            1.0
+        };
+        let cap_factor = if self.cap == StrokeCap::Square {
+            std::f32::consts::SQRT_2
+        } else {
+            1.0
+        };
+        half_width * join_factor.max(cap_factor)
+    }
+
+    /// Returns the maximum miter-length ratio in the range and precision
+    /// shared by all renderers.
+    ///
+    /// Values passed to [`Stroke::with_miter_limit`] below `1.0` are clamped,
+    /// non-finite values use [`DEFAULT_STROKE_MITER_LIMIT`], and the result is
+    /// quantized to the precision supported by both CPU and GPU rendering.
+    pub fn miter_limit(&self) -> f32 {
+        self.miter_limit
+    }
+
     /// Returns this stroke with the given dash pattern.
     pub fn with_dash(mut self, dash: DashPattern) -> Self {
         self.dash = Some(dash);
         self
     }
+
+    /// Returns this stroke with the given endpoint cap style.
+    pub fn with_cap(mut self, cap: StrokeCap) -> Self {
+        self.cap = cap;
+        self
+    }
+
+    /// Returns this stroke with the given segment join style.
+    pub fn with_join(mut self, join: StrokeJoin) -> Self {
+        self.join = join;
+        self
+    }
+
+    /// Returns this stroke with the given miter limit.
+    pub fn with_miter_limit(mut self, miter_limit: f32) -> Self {
+        self.miter_limit = normalize_miter_limit(miter_limit);
+        self
+    }
+}
+
+fn normalize_miter_limit(miter_limit: f32) -> f32 {
+    let clamped = if miter_limit.is_finite() {
+        miter_limit.clamp(1.0, half::f16::MAX.to_f32())
+    } else {
+        DEFAULT_STROKE_MITER_LIMIT
+    };
+    half::f16::from_f32(clamped).to_f32()
 }
 
 /// A dash pattern for [`Stroke`], mirroring SVG's `stroke-dasharray` /
@@ -492,6 +587,9 @@ impl From<Paint> for Stroke {
         Self {
             paint,
             width: 1.0,
+            cap: StrokeCap::default(),
+            join: StrokeJoin::default(),
+            miter_limit: DEFAULT_STROKE_MITER_LIMIT,
             dash: None,
         }
     }
@@ -531,6 +629,9 @@ mod tests {
         let stroke = Stroke::from(color);
         assert_eq!(stroke.paint, Paint::Solid(color));
         assert_eq!(stroke.width, 1.0);
+        assert_eq!(stroke.cap, StrokeCap::Round);
+        assert_eq!(stroke.join, StrokeJoin::Round);
+        assert_eq!(stroke.miter_limit(), DEFAULT_STROKE_MITER_LIMIT);
     }
 
     #[test]
@@ -561,6 +662,9 @@ mod tests {
             Some(Stroke {
                 paint: Paint::Solid(color),
                 width: 1.0,
+                cap: StrokeCap::Round,
+                join: StrokeJoin::Round,
+                miter_limit: DEFAULT_STROKE_MITER_LIMIT,
                 dash: None,
             })
         );
@@ -705,12 +809,83 @@ mod tests {
     }
 
     #[test]
-    fn stroke_new_has_no_dash() {
+    fn stroke_new_uses_round_defaults_and_has_no_dash() {
         let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0);
+        assert_eq!(stroke.cap, StrokeCap::Round);
+        assert_eq!(stroke.join, StrokeJoin::Round);
+        assert_eq!(stroke.miter_limit(), DEFAULT_STROKE_MITER_LIMIT);
         assert_eq!(stroke.dash, None);
 
         let dashed = stroke.with_dash(DashPattern::new(vec![4.0, 2.0], 0.0));
         assert!(dashed.dash.is_some());
+    }
+
+    #[test]
+    fn stroke_style_builders_override_defaults() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0)
+            .with_cap(StrokeCap::Square)
+            .with_join(StrokeJoin::Miter)
+            .with_miter_limit(8.0);
+
+        assert_eq!(stroke.cap, StrokeCap::Square);
+        assert_eq!(stroke.join, StrokeJoin::Miter);
+        assert_eq!(stroke.miter_limit(), 8.0);
+    }
+
+    #[test]
+    fn stroke_miter_limit_builder_normalizes_invalid_values() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0);
+
+        assert_eq!(stroke.clone().with_miter_limit(0.5).miter_limit(), 1.0);
+        assert_eq!(
+            stroke.clone().with_miter_limit(f32::NAN).miter_limit(),
+            DEFAULT_STROKE_MITER_LIMIT
+        );
+        assert_eq!(
+            stroke.with_miter_limit(f32::INFINITY).miter_limit(),
+            DEFAULT_STROKE_MITER_LIMIT
+        );
+        assert_eq!(
+            Stroke::new(Color::rgb_u8(0, 0, 0), 2.0)
+                .with_miter_limit(f32::MAX)
+                .miter_limit(),
+            half::f16::MAX.to_f32()
+        );
+    }
+
+    #[test]
+    fn stroke_miter_limit_uses_renderer_shared_precision() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0).with_miter_limit(4.001);
+
+        assert_eq!(stroke.miter_limit(), 4.0);
+    }
+
+    #[test]
+    fn conservative_stroke_outset_accounts_for_caps_and_joins() {
+        let round = Stroke::new(Color::rgb_u8(0, 0, 0), 4.0);
+        assert_eq!(round.conservative_outset(), 2.0);
+        assert_eq!(
+            round
+                .clone()
+                .with_cap(StrokeCap::Square)
+                .conservative_outset(),
+            2.0 * std::f32::consts::SQRT_2
+        );
+        assert_eq!(
+            round
+                .clone()
+                .with_join(StrokeJoin::Miter)
+                .conservative_outset(),
+            8.0
+        );
+
+        assert_eq!(
+            round
+                .with_join(StrokeJoin::Miter)
+                .with_miter_limit(f32::NEG_INFINITY)
+                .conservative_outset(),
+            8.0
+        );
     }
 
     #[test]
@@ -756,5 +931,15 @@ mod tests {
 
         let same_dash = solid.with_dash(DashPattern::new(vec![4.0, 2.0], 0.0));
         assert_eq!(dashed, same_dash);
+    }
+
+    #[test]
+    fn strokes_with_different_cap_join_or_miter_limit_compare_unequal() {
+        let round = Stroke::new(Color::rgb_u8(0, 0, 0), 2.0);
+        assert_ne!(round, round.clone().with_cap(StrokeCap::Butt));
+        assert_ne!(round, round.clone().with_join(StrokeJoin::Bevel));
+
+        let miter = round.with_join(StrokeJoin::Miter);
+        assert_ne!(miter, miter.clone().with_miter_limit(8.0));
     }
 }

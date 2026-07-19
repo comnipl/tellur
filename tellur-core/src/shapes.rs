@@ -2,9 +2,9 @@
 //!
 //! Each shape declares its intrinsic size through `layout` and produces a
 //! `VectorGraphic` whose view box matches its paint bounds. A stroked shape
-//! widens that view box by half the stroke width on each side. The shape will
-//! adapt if the parent imposes tight constraints — e.g. a `Circle` placed
-//! under tight non-square constraints renders as an ellipse.
+//! widens that view box by a conservative outset based on its width, cap, and
+//! join. The shape will adapt if the parent imposes tight constraints — e.g. a
+//! `Circle` placed under tight non-square constraints renders as an ellipse.
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
@@ -283,9 +283,10 @@ fn assert_valid_sides(sides: usize) {
 /// Draws an arbitrary set of [`PathCommand`]s over a fixed logical canvas.
 ///
 /// `size` is the `layout` size and the logical canvas used to derive paint
-/// bounds. Like the other shapes here, a stroke outsets those bounds by half
-/// its width on every side. Commands outside the declared canvas are not
-/// included automatically, so size the canvas to fit all command geometry.
+/// bounds. Like the other shapes here, a stroke applies a conservative outset
+/// for its width, cap, and join on every side. Commands outside the declared
+/// canvas are not included automatically, so size the canvas to fit all
+/// command geometry.
 ///
 /// This is the escape hatch for geometry the other shapes cannot express
 /// (freeform outlines, letter/glyph-style paths, etc.) without having to hand
@@ -343,7 +344,7 @@ const KAPPA: f32 = 0.552_284_8;
 fn stroked_bounds(size: Vec2, stroke: &Option<Stroke>) -> Rect {
     let outset = stroke
         .as_ref()
-        .map(|stroke| (stroke.width * 0.5).max(0.0))
+        .map(Stroke::conservative_outset)
         .unwrap_or(0.0);
     if outset == 0.0 {
         return Rect {
@@ -577,11 +578,7 @@ mod builder_tests {
     fn shape_paint_bounds_include_stroke_outset() {
         let rect = Rectangle::builder()
             .size(Vec2(10.0, 20.0))
-            .stroke(Stroke {
-                paint: paint(),
-                width: 4.0,
-                dash: None,
-            })
+            .stroke(Stroke::new(paint(), 4.0))
             .build();
         assert_eq!(
             rect.paint_bounds(Vec2(10.0, 20.0)),
@@ -594,11 +591,7 @@ mod builder_tests {
 
     #[test]
     fn shape_view_box_matches_stroked_paint_bounds() {
-        let stroke = Stroke {
-            paint: paint(),
-            width: 4.0,
-            dash: None,
-        };
+        let stroke = Stroke::new(paint(), 4.0);
         let expected = Rect {
             origin: Vec2(-2.0, -2.0),
             size: Vec2(14.0, 24.0),
@@ -622,6 +615,26 @@ mod builder_tests {
             Rect {
                 origin: Vec2(-2.0, -2.0),
                 size: Vec2(14.0, 14.0),
+            }
+        );
+    }
+
+    #[test]
+    fn miter_join_expands_shape_bounds_to_its_limit() {
+        let stroke = Stroke::new(paint(), 4.0)
+            .with_join(crate::vector::StrokeJoin::Miter)
+            .with_miter_limit(3.0);
+        let triangle = RegularPolygon::builder()
+            .sides(3)
+            .radius(5.0)
+            .stroke(stroke)
+            .build();
+
+        assert_eq!(
+            triangle.paint_bounds(Vec2(10.0, 10.0)),
+            Rect {
+                origin: Vec2(-6.0, -6.0),
+                size: Vec2(22.0, 22.0),
             }
         );
     }

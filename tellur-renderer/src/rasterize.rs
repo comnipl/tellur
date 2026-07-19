@@ -5,7 +5,8 @@ use tellur_core::geometry::{Constraints, Rect, Transform, Vec2};
 use tellur_core::raster::{PixelFormat, RasterComponent, RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::vector::{
-    DashPattern, Node, Paint, Path, PathCommand, VectorComponent, VectorGraphic,
+    DashPattern, Node, Paint, Path, PathCommand, Stroke, StrokeCap, StrokeJoin, VectorComponent,
+    VectorGraphic,
 };
 
 /// A `RasterComponent` that rasterizes a `VectorComponent`. The layout
@@ -248,12 +249,34 @@ fn render_path(pixmap: &mut tiny_skia::Pixmap, path: &Path, xform: tiny_skia::Tr
             ..Default::default()
         };
         apply_paint(&mut paint, &stroke.paint);
-        let skia_stroke = tiny_skia::Stroke {
-            width: stroke.width,
-            dash: to_skia_dash(stroke.dash.as_ref()),
-            ..Default::default()
-        };
+        let skia_stroke = to_skia_stroke(stroke);
         pixmap.stroke_path(&skia_path, &paint, &skia_stroke, xform, None);
+    }
+}
+
+fn to_skia_stroke(stroke: &Stroke) -> tiny_skia::Stroke {
+    tiny_skia::Stroke {
+        width: stroke.width,
+        miter_limit: stroke.miter_limit(),
+        line_cap: to_skia_cap(stroke.cap),
+        line_join: to_skia_join(stroke.join),
+        dash: to_skia_dash(stroke.dash.as_ref()),
+    }
+}
+
+fn to_skia_cap(cap: StrokeCap) -> tiny_skia::LineCap {
+    match cap {
+        StrokeCap::Butt => tiny_skia::LineCap::Butt,
+        StrokeCap::Square => tiny_skia::LineCap::Square,
+        StrokeCap::Round => tiny_skia::LineCap::Round,
+    }
+}
+
+fn to_skia_join(join: StrokeJoin) -> tiny_skia::LineJoin {
+    match join {
+        StrokeJoin::Bevel => tiny_skia::LineJoin::Bevel,
+        StrokeJoin::Miter => tiny_skia::LineJoin::Miter,
+        StrokeJoin::Round => tiny_skia::LineJoin::Round,
     }
 }
 
@@ -574,6 +597,69 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gpu_explicit_stroke_caps_and_joins_match_cpu_footprints() {
+        let Ok(mut renderer) = GpuRenderer::new() else {
+            eprintln!("skipping GPU stroke-style test: no GPU adapter available");
+            return;
+        };
+        let target = Resolution::new(128, 96);
+        let cases = [
+            ("butt-bevel", StrokeCap::Butt, StrokeJoin::Bevel, 4.0),
+            ("square-miter", StrokeCap::Square, StrokeJoin::Miter, 8.0),
+            ("round-round", StrokeCap::Round, StrokeJoin::Round, 4.0),
+        ];
+
+        for (label, cap, join, miter_limit) in cases {
+            let graphic = VectorGraphic {
+                view_box: Rect {
+                    origin: Vec2::ZERO,
+                    size: Vec2(target.width as f32, target.height as f32),
+                },
+                root: Node::Path(Path {
+                    // An open angle exercises both endpoint caps and its
+                    // interior join without relying on a component's bounds.
+                    commands: vec![
+                        PathCommand::MoveTo(Vec2(24.0, 76.0)),
+                        PathCommand::LineTo(Vec2(64.0, 20.0)),
+                        PathCommand::LineTo(Vec2(104.0, 76.0)),
+                    ],
+                    fill: None,
+                    stroke: Some(
+                        Stroke::new(Color::rgb_u8(255, 255, 255), 14.0)
+                            .with_cap(cap)
+                            .with_join(join)
+                            .with_miter_limit(miter_limit),
+                    ),
+                    transform: Transform::IDENTITY,
+                }),
+            };
+            let cpu = rasterize(&graphic, target.width, target.height);
+            let cpu = cpu.as_cpu().expect("CPU rasterization returns CPU pixels");
+            let gpu = GpuRasterBackend::rasterize(&mut renderer, &graphic, target)
+                .expect("GPU rasterization should succeed");
+            let gpu = GpuRasterBackend::readback(&mut renderer, gpu)
+                .expect("GPU rasterization should read back");
+
+            let unexpected = pixels_outside_alpha_footprint(&gpu, cpu, 3, 32);
+            assert!(
+                unexpected.is_empty(),
+                "{label}: GPU stroke escaped the CPU footprint at {} pixels; first pixels: {:?}",
+                unexpected.len(),
+                &unexpected[..unexpected.len().min(8)]
+            );
+
+            let missing = pixels_outside_alpha_footprint(cpu, &gpu, 3, 32);
+            assert!(
+                missing.is_empty(),
+                "{label}: GPU stroke missed the CPU footprint at {} pixels; first pixels: {:?}",
+                missing.len(),
+                &missing[..missing.len().min(8)]
+            );
+        }
+    }
+
     #[derive(Clone, PartialEq, Eq, Hash)]
     struct StaleViewBoxVector;
 
@@ -619,6 +705,34 @@ mod tests {
     #[test]
     fn to_skia_dash_is_none_without_a_pattern() {
         assert!(to_skia_dash(None).is_none());
+    }
+
+    #[test]
+    fn maps_all_stroke_caps_to_tiny_skia() {
+        assert_eq!(to_skia_cap(StrokeCap::Butt), tiny_skia::LineCap::Butt);
+        assert_eq!(to_skia_cap(StrokeCap::Square), tiny_skia::LineCap::Square);
+        assert_eq!(to_skia_cap(StrokeCap::Round), tiny_skia::LineCap::Round);
+    }
+
+    #[test]
+    fn maps_all_stroke_joins_to_tiny_skia() {
+        assert_eq!(to_skia_join(StrokeJoin::Bevel), tiny_skia::LineJoin::Bevel);
+        assert_eq!(to_skia_join(StrokeJoin::Miter), tiny_skia::LineJoin::Miter);
+        assert_eq!(to_skia_join(StrokeJoin::Round), tiny_skia::LineJoin::Round);
+    }
+
+    #[test]
+    fn builds_tiny_skia_stroke_with_explicit_style() {
+        let stroke = Stroke::new(Color::rgb_u8(0, 0, 0), 7.5)
+            .with_cap(StrokeCap::Square)
+            .with_join(StrokeJoin::Miter)
+            .with_miter_limit(4.001);
+
+        let skia = to_skia_stroke(&stroke);
+        assert_eq!(skia.width, 7.5);
+        assert_eq!(skia.line_cap, tiny_skia::LineCap::Square);
+        assert_eq!(skia.line_join, tiny_skia::LineJoin::Miter);
+        assert_eq!(skia.miter_limit, 4.0);
     }
 
     #[test]
@@ -765,11 +879,8 @@ mod tests {
         // 4-on/4-off dashes along a horizontal line spanning the full
         // 20x10 view box (1 logical unit == 1 pixel, so sampled x positions
         // land squarely inside a dash or a gap).
-        let stroke = tellur_core::vector::Stroke {
-            paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
-            width: 2.0,
-            dash: Some(DashPattern::new(vec![4.0, 4.0], 0.0)),
-        };
+        let stroke = Stroke::new(Paint::Solid(Color::rgba_u8(0, 0, 0, 255)), 2.0)
+            .with_dash(DashPattern::new(vec![4.0, 4.0], 0.0));
         let graphic = VectorGraphic {
             view_box: Rect {
                 origin: Vec2::ZERO,
@@ -804,11 +915,7 @@ mod tests {
 
     #[test]
     fn undashed_stroke_paints_the_whole_line() {
-        let stroke = tellur_core::vector::Stroke {
-            paint: Paint::Solid(Color::rgba_u8(0, 0, 0, 255)),
-            width: 2.0,
-            dash: None,
-        };
+        let stroke = Stroke::new(Paint::Solid(Color::rgba_u8(0, 0, 0, 255)), 2.0);
         let graphic = VectorGraphic {
             view_box: Rect {
                 origin: Vec2::ZERO,
