@@ -12,11 +12,13 @@ use tellur_core::vector::{
     ClipGroup as TellurClipGroup, DashPattern, Node, Paint, Path as TellurPath, PathCommand,
     VectorGraphic,
 };
-use vello::kurbo::{Affine, BezPath, Rect as VelloRect, Stroke as VelloStroke};
+use vello::kurbo::{Affine, BezPath, PathEl, Rect as VelloRect, Stroke as VelloStroke};
 use wgpu::util::DeviceExt;
 
 const BACKEND: &str = "tellur-wgpu-buffer-v1";
 const WORKGROUP: u32 = 16;
+// Matches Vello 0.2's own CPU stroke-expansion fallback tolerance.
+const VELLO_STROKE_TOLERANCE: f64 = 0.01;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuAdapterInfo {
@@ -1280,7 +1282,28 @@ fn encode_vello_path(
             if let Some(paint) = to_vello_color(&stroke.paint, opacity) {
                 let vello_stroke =
                     apply_dash(VelloStroke::new(stroke.width as f64), stroke.dash.as_ref());
-                scene.stroke(&vello_stroke, transform, paint, None, &vello_path);
+                if has_zero_length_closing_segment(&vello_path) {
+                    // Vello 0.2's GPU stroker can misinterpret its synthetic
+                    // closed-subpath marker when the final segment already ends
+                    // at the subpath start, producing a detached full-width band.
+                    // Expanding only this case on the CPU preserves the closed
+                    // join semantics; dropping Close would turn the join into caps.
+                    let outline = vello::kurbo::stroke(
+                        vello_path.iter(),
+                        &vello_stroke,
+                        &Default::default(),
+                        VELLO_STROKE_TOLERANCE,
+                    );
+                    scene.fill(
+                        vello::peniko::Fill::NonZero,
+                        transform,
+                        paint,
+                        None,
+                        &outline,
+                    );
+                } else {
+                    scene.stroke(&vello_stroke, transform, paint, None, &vello_path);
+                }
             }
         }
     }
@@ -1335,6 +1358,40 @@ fn build_vello_path(commands: &[PathCommand]) -> Option<BezPath> {
         }
     }
     (!path.elements().is_empty()).then_some(path)
+}
+
+fn has_zero_length_closing_segment(path: &BezPath) -> bool {
+    let mut subpath_start = None;
+    let mut current = None;
+    let mut has_segment = false;
+
+    for element in path.iter() {
+        match element {
+            PathEl::MoveTo(point) => {
+                subpath_start = Some(point);
+                current = Some(point);
+                has_segment = false;
+            }
+            PathEl::LineTo(point) => {
+                current = Some(point);
+                has_segment = true;
+            }
+            PathEl::QuadTo(_, point) | PathEl::CurveTo(_, _, point) => {
+                current = Some(point);
+                has_segment = true;
+            }
+            PathEl::ClosePath => {
+                if has_segment && current == subpath_start {
+                    return true;
+                }
+                subpath_start = None;
+                current = None;
+                has_segment = false;
+            }
+        }
+    }
+
+    false
 }
 
 fn to_vello_point(p: Vec2) -> (f64, f64) {
@@ -1836,6 +1893,32 @@ mod tests {
 
     fn readback(gpu: &mut GpuRenderer, image: RasterImage) -> CpuRasterImage {
         GpuRasterBackend::readback(gpu, image).expect("GPU image should read back")
+    }
+
+    #[test]
+    fn detects_only_closes_whose_current_point_is_already_the_start() {
+        let implicit_closing_line = build_vello_path(&[
+            PathCommand::MoveTo(Vec2(1.0, 0.0)),
+            PathCommand::LineTo(Vec2(9.0, 0.0)),
+            PathCommand::LineTo(Vec2(9.0, 9.0)),
+            PathCommand::LineTo(Vec2(1.0, 9.0)),
+            PathCommand::Close,
+        ])
+        .unwrap();
+        assert!(!has_zero_length_closing_segment(&implicit_closing_line));
+
+        let explicit_return_to_start = build_vello_path(&[
+            PathCommand::MoveTo(Vec2(1.0, 0.0)),
+            PathCommand::LineTo(Vec2(9.0, 0.0)),
+            PathCommand::LineTo(Vec2(9.0, 9.0)),
+            PathCommand::QuadTo {
+                control: Vec2(0.0, 9.0),
+                to: Vec2(1.0, 0.0),
+            },
+            PathCommand::Close,
+        ])
+        .unwrap();
+        assert!(has_zero_length_closing_segment(&explicit_return_to_start));
     }
 
     #[test]
