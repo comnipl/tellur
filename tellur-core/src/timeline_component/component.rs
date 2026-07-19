@@ -22,7 +22,10 @@ use super::*;
 /// every [`RasterComponent`] (a *timeless* visual).
 ///
 /// The trait must be usable as `Box<dyn TimelineComponent + Send>` (audit M2),
-/// so it is object-safe and every implementor is expected to be `Send`.
+/// so it is object-safe and every implementor placed in a timeline is expected
+/// to be `Send`. Implementors must also be [`Clone`], normally by deriving it;
+/// this keeps erased timeline children cloneable inside function-form
+/// `#[component(timeline)]` state.
 ///
 /// The [`DynEq`] / [`DynHash`] super-traits mirror
 /// [`RasterComponent`](crate::raster::RasterComponent): they give
@@ -36,7 +39,7 @@ use super::*;
 /// deriving over a comparable child vec. Timeline nodes are never memoized
 /// through `ctx.render` (`.sketch/02 §11`), so this identity is purely the
 /// builder-marker key, not a per-frame cache key.
-pub trait TimelineComponent: DynEq + DynHash {
+pub trait TimelineComponent: TimelineComponentClone + DynEq + DynHash {
     /// Intrinsic length in seconds, or `None` for a *timeless* component (a
     /// visual / 字幕) whose length is given by the window it is placed into.
     ///
@@ -152,9 +155,52 @@ pub trait TimelineComponent: DynEq + DynHash {
     }
 }
 
-// Compile-time guarantee that `TimelineComponent` is object-safe *and*
-// spellable with `+ Send` (audit M2).
+// Compile-time guarantees that `TimelineComponent` is dyn-safe both as the
+// plain trait object supported by `clone_box` and in the canonical `+ Send`
+// form stored by timeline containers (audit M2).
+const _: Option<&dyn TimelineComponent> = None;
 const _: Option<&(dyn TimelineComponent + Send)> = None;
+
+/// Clone support for [`Box<dyn TimelineComponent>`]. Blanket-implemented for
+/// every [`TimelineComponent`] that is [`Clone`]; callers never implement it by
+/// hand.
+pub trait TimelineComponentClone {
+    fn clone_box(&self) -> Box<dyn TimelineComponent>;
+
+    // Timeline containers canonically retain `Send` on their erased children.
+    // Keep that auto-trait on the cloned object without making `Send` a
+    // supertrait of every TimelineComponent (which would exclude otherwise
+    // valid `!Send` raster components from the one-way blanket below).
+    #[doc(hidden)]
+    fn clone_box_send(&self) -> Box<dyn TimelineComponent + Send>
+    where
+        Self: Send;
+}
+
+impl<T: TimelineComponent + Clone + 'static> TimelineComponentClone for T {
+    fn clone_box(&self) -> Box<dyn TimelineComponent> {
+        Box::new(self.clone())
+    }
+
+    fn clone_box_send(&self) -> Box<dyn TimelineComponent + Send>
+    where
+        Self: Send,
+    {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn TimelineComponent> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl Clone for Box<dyn TimelineComponent + Send> {
+    fn clone(&self) -> Self {
+        self.clone_box_send()
+    }
+}
 
 // `dyn TimelineComponent + Send` gets object-safe `PartialEq` / `Hash` through
 // the `DynEq` / `DynHash` super-traits, exactly as `dyn RasterComponent` does
@@ -187,7 +233,7 @@ impl Hash for dyn TimelineComponent + Send {
 /// or the pair becomes an `E0119`.
 impl<C> TimelineComponent for C
 where
-    C: RasterComponent + 'static,
+    C: RasterComponent + Clone + 'static,
 {
     // A timeless visual has no intrinsic length; the placement window sets it.
     fn duration(&self) -> Option<f64> {

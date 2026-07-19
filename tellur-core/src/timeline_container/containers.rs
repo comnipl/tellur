@@ -25,7 +25,7 @@ use crate::timeline_component::{
 /// `TimelineBuilder` marker — but NO trait impl. The behaviour is the
 /// hand-written `impl TimelineComponent` below.
 #[crate::component(timeline)]
-#[derive(crate::Keyable)]
+#[derive(Clone, crate::Keyable)]
 pub struct Timeline {
     // `#[builder(field)]` members (the streamed children) must precede the
     // setter members, per bon's member-ordering rule (mirrors raster `Flex`).
@@ -363,7 +363,7 @@ impl TimelineComponent for Timeline {
 /// instead. `.fill()` is a runtime `Placed` value, so this is caught at resolve
 /// time (via [`ResolveCtx::error`]), not by the type system.
 #[crate::component(timeline)]
-#[derive(crate::Keyable)]
+#[derive(Clone, crate::Keyable)]
 pub struct Sequence {
     #[children(each = child)]
     pub children: Vec<Box<dyn TimelineComponent + Send>>,

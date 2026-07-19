@@ -164,6 +164,7 @@ impl Default for Event {
 
 /// A transparent wrapper that registers an [`Event`]'s time during the resolve
 /// pass and otherwise plays its child unchanged. A [`TimelineComponent`].
+#[derive(Clone)]
 pub struct Triggered<T> {
     child: T,
     event: Event,
@@ -213,7 +214,7 @@ impl<T> Triggered<T> {
     }
 }
 
-impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Triggered<T> {
+impl<T: TimelineComponent + Clone + PartialEq + Hash + 'static> TimelineComponent for Triggered<T> {
     fn duration(&self) -> Option<f64> {
         self.child.duration()
     }
@@ -281,7 +282,7 @@ impl<T: TimelineComponent + PartialEq + Hash + 'static> TimelineComponent for Tr
 /// [`Placed`] does.
 impl<T> From<Triggered<T>> for Box<dyn TimelineComponent + Send>
 where
-    T: TimelineComponent + PartialEq + Hash + Send + 'static,
+    T: TimelineComponent + Clone + PartialEq + Hash + Send + 'static,
 {
     fn from(triggered: Triggered<T>) -> Self {
         Box::new(triggered)
@@ -298,6 +299,7 @@ where
 /// forwarded verbatim to `inner`; `arrangement` stamps the location onto the
 /// returned node (only if it is not already set — the innermost wrapper wins,
 /// which is the most specific call site).
+#[derive(Clone)]
 pub struct Sourced {
     source: &'static ::core::panic::Location<'static>,
     inner: Box<dyn TimelineComponent + Send>,

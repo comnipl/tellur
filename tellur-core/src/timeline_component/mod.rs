@@ -34,7 +34,7 @@ mod trim;
 pub use audio_effect::{AudioEffects, AudioEffectsBuilder, EnvelopePoint, GainEnvelope};
 pub use audio_render::{AudioBlockMut, AudioRenderContext, AudioRenderRequest};
 pub use clock::Clock;
-pub use component::{TimelineBuilder, TimelineComponent};
+pub use component::{TimelineBuilder, TimelineComponent, TimelineComponentClone};
 pub use output::{Arrangement, AudioBuffer, Cue, NodeKind, SourceLoc, TriggerMark};
 pub use placed::{Placed, Placement, Timed, TimedBuilder};
 pub use resolve::{
