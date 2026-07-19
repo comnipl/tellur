@@ -341,9 +341,9 @@ fn pixel_stride(format: PixelFormat) -> usize {
 /// A render context that memoizes `RasterImage` outputs.
 ///
 /// Construct one per export / preview session and pass it into
-/// [`tellur_core::timeline::Timeline::build`]; the cache persists across frames,
-/// admitting a subtree after its second observation and retaining the entries
-/// expected to save the most render time per byte.
+/// [`tellur_core::timeline_component::ResolvedTimeline::frame`]; the cache
+/// persists across frames, admitting a subtree after its second observation and
+/// retaining the entries expected to save the most render time per byte.
 pub struct CachingRenderContext {
     cache: FrequencyCache<CacheKey, RenderCacheClass, CachedRasterImage>,
     gpu_cache_max_bytes: usize,

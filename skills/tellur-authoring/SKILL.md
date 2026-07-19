@@ -23,8 +23,7 @@ Before writing any code, **read both tutorials** in the tellur repository in
 full (this skill layers norms on top of them; it does not replace them):
 
 - `docs/layout-tutorial.md` — the layout system (canvas world and flow world)
-- `docs/time-tutorial.md` — the time system (absolute-time world and
-  placement-clock world)
+- `docs/time-tutorial.md` — the time system (global and local clock axes)
 
 If this skill directory lives outside the tellur repository, fetch them from a
 tellur checkout (or from docs/ at https://github.com/comnipl/tellur). Japanese
@@ -212,7 +211,7 @@ The proven layout (the shorts_sqrt2_plus_sqrt3 shape):
 
 ```
 src/
-  lib.rs        -- build() -> Timeline; export_timeline!; top-level composition only
+  lib.rs        -- #[component(timeline)] root; export_timeline!; top-level composition only
   script.rs     -- the script (a Sequence of audio/subtitle clips) + a Cues struct (bundle of Events)
   <canvas>/
     mod.rs      -- the #[component(timeline)] root: derives every scene's state
@@ -289,11 +288,11 @@ marker and must stay the final, outermost verb: write
 
 When unsure how to write something, consult real examples in this order:
 
-- `tellur-renderer/examples/timeline_to_mp4.rs` — the minimal form of the
-  absolute-time world (`BouncingDot`: the textbook pattern of time-driving a
-  `Positioned` target anchor inside a sized `Frame`)
+- `tellur-renderer/examples/timeline_to_mp4.rs` — the minimal global-clock
+  pattern (`BouncingDot`: the textbook pattern of time-driving a `Positioned`
+  target anchor inside a sized `Frame`)
 - the `tellur-live` demo scenes — canvas-world staging with every
-  `phase`/`window`/`clamped()` pattern, plus the placement-clock world
+  `phase`/`window`/`clamped()` pattern, plus global/local clock composition
   (`timeline_showcase`)
 - `movies/202606/shorts_sqrt2_plus_sqrt3` in the youtube repository — a
   complete video with the cue-driven architecture (§7). Caveat: it predates

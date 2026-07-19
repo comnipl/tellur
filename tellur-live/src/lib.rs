@@ -13,6 +13,6 @@ pub use server::{serve, ServerOptions};
 // existing call sites — `tellur_live::export_timeline!`, the demo plugins, and
 // the server's `TimelineInfo` — keep reaching it through `tellur_live`.
 pub use tellur_plugin::{
-    export_legacy_timeline, export_timeline, export_timeline_collection, single_timeline,
-    single_timeline_with_canvas, LegacyTimeline, SingleTimeline, TimelineCollection, TimelineInfo,
+    export_timeline, export_timeline_collection, single_timeline, single_timeline_with_canvas,
+    SingleTimeline, TimelineCollection, TimelineInfo,
 };

@@ -565,7 +565,8 @@ export function Timeline(props: TimelineProps) {
   // hot-reloads (`reloadKey` = the info cacheKey). The id is stable across a
   // reload, so without `reloadKey` the lanes would go stale; `/api/arrangement`
   // re-resolves per request, so a refetch always returns the latest tree. `null`
-  // (failed resolve / legacy adapter) leaves us in the flat fallback below.
+  // (failed resolve / custom collection without an arrangement) leaves us in
+  // the flat fallback below.
   const timelineId = timeline?.id ?? null;
   useEffect(() => {
     if (!timelineId) {

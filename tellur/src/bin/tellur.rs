@@ -670,7 +670,7 @@ fn project_manifest(name: &str, workspace_dependency: bool) -> String {
 
 fn starter_scene(title: &str) -> String {
     format!(
-        r##"//! A starter tellur timeline. Edit `build` to design your scene, then run
+        r##"//! A starter tellur timeline. Edit `Main` to design your scene, then run
 //! `tellur live` in this directory to preview it.
 
 use tellur::core::geometry::{{Constraints, Vec2}};
@@ -715,13 +715,18 @@ impl RasterComponent for Block {{
     }}
 }}
 
-fn build() -> Timeline {{
+#[component(timeline)]
+fn Main() -> impl tellur::core::timeline_component::TimelineComponent {{
     Timeline::builder()
         .child(Block::builder().size(200.0).build().at(0.0..3.0))
         .build()
 }}
 
-tellur::export_timeline!("main", "{title}", build, canvas = (1920.0, 1080.0));
+tellur::export_timeline!(
+    root = Main::builder().build(),
+    title = "{title}",
+    canvas = (1920.0, 1080.0),
+);
 "##
     )
 }
@@ -1221,6 +1226,19 @@ mod tests {
         assert!(manifest.contains("size = \"1280x720\""));
         assert!(manifest.contains("fps = 30"));
         assert!(manifest.contains("color_range = \"full\""));
+    }
+
+    #[test]
+    fn starter_scene_exports_a_function_form_timeline_root() {
+        let scene = starter_scene("Demo Timeline");
+
+        assert!(scene.contains(
+            "#[component(timeline)]\nfn Main() -> impl tellur::core::timeline_component::TimelineComponent"
+        ));
+        assert!(scene.contains("root = Main::builder().build()"));
+        assert!(scene.contains("title = \"Demo Timeline\""));
+        assert!(!scene.contains("fn build() -> Timeline"));
+        assert!(!scene.contains("export_timeline!(\"main\""));
     }
 
     #[test]

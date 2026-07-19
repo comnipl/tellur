@@ -32,7 +32,10 @@ fn loads_demo_plugin_when_built() {
         .reload_if_changed()
         .expect("demo plugin should load when host and plugin share the workspace lock");
     let collection = loader.collection().expect("collection");
-    assert!(!collection.timelines().is_empty());
+    let timelines = collection.timelines();
+    assert_eq!(timelines.len(), 1);
+    assert_eq!(timelines[0].id, "main");
+    assert_eq!(timelines[0].title, "Kinetic Motion");
 }
 
 #[test]

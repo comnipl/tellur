@@ -21,9 +21,8 @@ pub use tellur_renderer as renderer;
 // The plugin authoring contract: the collection trait and the `export_*!` macros
 // a `cdylib` project uses to expose its timeline(s) to the host.
 pub use tellur_plugin::{
-    export_legacy_timeline, export_timeline, export_timeline_collection, single_timeline,
-    single_timeline_with_canvas, EntryFn, LegacyTimeline, SingleTimeline, TimelineCollection,
-    TimelineInfo, ENTRY_SYMBOL,
+    export_timeline, export_timeline_collection, single_timeline, single_timeline_with_canvas,
+    EntryFn, SingleTimeline, TimelineCollection, TimelineInfo, ENTRY_SYMBOL,
 };
 
 /// Common authoring imports: the component macros plus the most-used value types.
@@ -40,7 +39,7 @@ pub mod prelude {
     };
     pub use tellur_core::{component, raster_component, vector_component, Keyable};
 
-    pub use crate::{export_legacy_timeline, export_timeline, export_timeline_collection};
+    pub use crate::{export_timeline, export_timeline_collection};
 }
 
 #[cfg(test)]

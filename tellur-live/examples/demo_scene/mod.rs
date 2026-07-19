@@ -8,7 +8,7 @@
 //!   length) — the four vector sections (`overture`/`field`/`scan`/
 //!   `resolve`) composited into ONE rasterization so a single shared pair
 //!   of drop shadows wraps their combined silhouette. The sections are
-//!   absolute-time canvas-world pieces (each self-gates on its own span and
+//!   clock-driven canvas-world pieces (each self-gates on its own span and
 //!   keys its animation to the clock it is handed), so they stay vector
 //!   children here rather than becoming separately-rasterized timeline
 //!   clips — that would break the shared shadows.
@@ -33,7 +33,7 @@ use tellur_core::color::Color;
 use tellur_core::geometry::Vec2;
 use tellur_core::layer::VectorLayer;
 use tellur_core::time::Time;
-use tellur_core::timeline_component::{Clock, TimedBuilder, TimelineComponent};
+use tellur_core::timeline_component::{Clock, TimedBuilder};
 use tellur_core::timeline_container::Timeline;
 use tellur_renderer::{DropShadow, MotionBlur, Rasterizable, RasterizableBuilder};
 
@@ -62,7 +62,7 @@ const PALETTE: Palette = Palette {
 /// The whole piece: the timeline tree below IS the scene — the resolve pass
 /// reads the arrangement from it and `frame` renders it, layer by layer.
 #[tellur_core::component(timeline, name = "Kinetic Motion")]
-fn KineticMotion() -> impl TimelineComponent {
+pub fn KineticMotion() -> impl TimelineComponent {
     Timeline::builder()
         .child(BackdropSection::builder().fill())
         // The explicit `0..DURATION` window (not `.fill()`) ANCHORS the
@@ -188,13 +188,6 @@ fn OverlaySection(#[clock] clock: Clock) -> impl TimelineComponent {
         .fade(t.phase(OVERLAY_FADE_START, DURATION))
         .palette(PALETTE)
         .rasterize()
-}
-
-/// The scene as a [`TimelineComponent`]. Resolve it against the [`SCENE_CANVAS`]
-/// canvas (the plugin export passes `canvas = (1920, 1080)`; the mp4 encoder
-/// resolves with the same canvas) so layout matches the authored SCENE_SIZE.
-pub fn build_timeline() -> impl TimelineComponent + Send {
-    KineticMotion::builder().build()
 }
 
 pub const TITLE: &str = "Kinetic Motion";

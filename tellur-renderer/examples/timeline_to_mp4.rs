@@ -22,12 +22,14 @@ use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::placement::RasterPlacement;
-use tellur_core::raster::{RasterComponent, Resolution};
+use tellur_core::raster::Resolution;
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time};
-use tellur_core::timeline::timeline;
+use tellur_core::timeline_component::{resolve_with_canvas, Clock, Timed};
 use tellur_core::vector::Paint;
-use tellur_renderer::{DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
+use tellur_renderer::{AudioExport, DropShadow, FfmpegEncoder, Outline, RasterizableBuilder};
+
+const SCENE_SIZE: Vec2 = Vec2(1280.0, 720.0);
 
 /// A circle that triangle-wave scrubs left-to-right-to-left across the
 /// track's width. `Frame` declares the track's outer shape (fill the
@@ -69,32 +71,36 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
         .build()
 }
 
+#[component(timeline)]
+fn QuantizedDots(#[clock] clock: Clock) -> impl TimelineComponent {
+    let t = clock.global();
+    DecoratedBox::builder()
+        .background(Color::rgb_u8(20, 20, 30))
+        .child(
+            Padding::builder().insets(EdgeInsets::all(100.0)).child(
+                Flex::builder()
+                    .axis(Axis::Vertical)
+                    .main_align(MainAlign::SpaceEvenly)
+                    .cross_align(CrossAlign::Stretch)
+                    .child(BouncingDot::builder().t(t))
+                    .child(BouncingDot::builder().t(t.fps(60)))
+                    .child(BouncingDot::builder().t(t.fps(30)))
+                    .child(BouncingDot::builder().t(t.fps(24)))
+                    .child(BouncingDot::builder().t(t.fps(16))),
+            ),
+        )
+        .build()
+}
+
 fn main() {
-    let scene_size = Vec2(1280.0, 720.0);
-    let tl = timeline(5.0, move |t, target, residency, ctx| {
-        DecoratedBox::builder()
-            .background(Color::rgb_u8(20, 20, 30))
-            .child(
-                Padding::builder().insets(EdgeInsets::all(100.0)).child(
-                    Flex::builder()
-                        .axis(Axis::Vertical)
-                        .main_align(MainAlign::SpaceEvenly)
-                        .cross_align(CrossAlign::Stretch)
-                        .child(BouncingDot::builder().t(t))
-                        .child(BouncingDot::builder().t(t.fps(60)))
-                        .child(BouncingDot::builder().t(t.fps(30)))
-                        .child(BouncingDot::builder().t(t.fps(24)))
-                        .child(BouncingDot::builder().t(t.fps(16))),
-                ),
-            )
-            .build()
-            .render(scene_size, target, residency, ctx)
-    });
+    let resolved = resolve_with_canvas(QuantizedDots::builder().build().at(0.0..5.0), SCENE_SIZE)
+        .expect("quantized-dots timeline resolves");
 
     let out = Path::new("/tmp/timeline.mp4");
     FfmpegEncoder::new(Resolution::new(1920, 1080), 60)
+        .audio(AudioExport::Omit)
         .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18"])
-        .encode(&tl, out)
+        .encode(&resolved, out)
         .expect("encode mp4");
 
     println!("Wrote {}", out.display());

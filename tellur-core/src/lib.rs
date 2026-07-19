@@ -23,7 +23,6 @@ pub mod shapes;
 pub mod span;
 pub mod text;
 pub mod time;
-pub mod timeline;
 pub mod timeline_component;
 pub mod timeline_container;
 pub mod vector;

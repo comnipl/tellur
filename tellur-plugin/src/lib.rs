@@ -11,17 +11,13 @@
 //! vtable mismatch, and [`abi::ABI_FINGERPRINT_SYMBOL`] carries a finer-grained
 //! fingerprint checked at load time.
 
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, MutexGuard};
-
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{RasterImage, RasterResidency, Resolution};
 use tellur_core::render_context::RenderContext;
 use tellur_core::time::TimelineTime;
-use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::{
-    resolve, resolve_with_canvas, Arrangement, AudioBuffer, Clock, NodeKind, ResolveError,
-    ResolvedTimeline, TimelineComponent,
+    resolve, resolve_with_canvas, Arrangement, AudioBuffer, ResolveError, ResolvedTimeline,
+    TimelineComponent,
 };
 
 // Re-exported under a hidden name so `export_timeline!` can reach `tellur-core`
@@ -278,157 +274,92 @@ impl TimelineCollection for SingleTimeline {
     }
 }
 
-/// Adapts an old closure-based [`Timeline`] to the new [`TimelineComponent`]
-/// model so the existing demo scene (which still builds a `Timeline`) can be
-/// served by the migrated collection without rewriting it.
-///
-/// A `Timeline` is opaque (a closure with a fixed `duration`), so this presents
-/// it as a single timed leaf: its `frame` plays the timeline at the global
-/// clock, its length is the timeline's `duration`, and its `arrangement` is one
-/// Video-kind node spanning `[0, duration]`.
-///
-/// `TimelineComponent` requires `PartialEq + Hash` (via the `DynEq`/`DynHash`
-/// super-traits). A `Timeline` closure is neither, and timeline nodes are never
-/// memoized through `ctx.render` (`.sketch/02 §11`) — this identity is only the
-/// builder-marker key — so the wrapper compares all instances equal and hashes
-/// to a constant. There is exactly one per collection, so that is sound. The
-/// opaque legacy timeline also does not promise `Clone`; sharing it behind a
-/// mutex keeps this adapter cloneable without adding `Clone` or `Sync` to the
-/// legacy builder contract.
-pub struct LegacyTimeline<T: Timeline + Send> {
-    timeline: Arc<Mutex<T>>,
-}
-
-impl<T: Timeline + Send> LegacyTimeline<T> {
-    /// Wraps `timeline` so it can be placed in the new timeline world.
-    pub fn new(timeline: T) -> Self {
-        Self {
-            timeline: Arc::new(Mutex::new(timeline)),
-        }
-    }
-
-    fn timeline(&self) -> MutexGuard<'_, T> {
-        self.timeline
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
-impl<T: Timeline + Send> Clone for LegacyTimeline<T> {
-    fn clone(&self) -> Self {
-        Self {
-            timeline: Arc::clone(&self.timeline),
-        }
-    }
-}
-
-impl<T: Timeline + Send> PartialEq for LegacyTimeline<T> {
-    fn eq(&self, _other: &Self) -> bool {
-        // Opaque closure timeline: treat the single wrapped instance as its own
-        // identity. Not used as a per-frame cache key (see the type doc).
-        true
-    }
-}
-
-impl<T: Timeline + Send> Eq for LegacyTimeline<T> {}
-
-impl<T: Timeline + Send> Hash for LegacyTimeline<T> {
-    fn hash<H: Hasher>(&self, _state: &mut H) {
-        // Constant hash: consistent with the all-equal `PartialEq` above.
-    }
-}
-
-impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
-    fn duration(&self) -> Option<f64> {
-        Some(self.timeline().duration())
-    }
-
-    fn frame(
-        &self,
-        clock: Clock<'_>,
-        canvas: Vec2,
-        target: Resolution,
-        residency: RasterResidency,
-        ctx: &mut dyn RenderContext,
-    ) -> Option<RasterImage> {
-        // The legacy closure handles its own SCENE_SIZE internally; the logical
-        // `canvas` is not threaded into it.
-        let _ = canvas;
-        Some(
-            self.timeline()
-                .build(clock.global(), target, residency, ctx),
-        )
-    }
-
-    fn arrangement(&self, offset: f64) -> Arrangement {
-        // One Video-kind node spanning the whole timeline; no source crop,
-        // no triggers, no children — the legacy timeline is opaque.
-        Arrangement {
-            kind: NodeKind::Video,
-            label: String::new(),
-            name: None,
-            source: None,
-            start: offset,
-            end: offset + self.timeline().duration(),
-            trim: None,
-            triggers: Vec::new(),
-            children: Vec::new(),
-        }
-    }
-}
-
-/// Exports a single [`TimelineComponent`] builder from a `cdylib`.
+/// Exports a single [`TimelineComponent`] root from a `cdylib`.
 ///
 /// ```ignore
-/// fn build() -> impl tellur_core::timeline_component::TimelineComponent + Send { ... }
-/// tellur_plugin::export_timeline!("main", "Main", build);
+/// #[tellur_core::component(timeline)]
+/// fn Main() -> impl tellur_core::timeline_component::TimelineComponent { ... }
+///
+/// tellur_plugin::export_timeline!(
+///     root = Main::builder().build(),
+///     title = "Main",
+/// );
 /// ```
+///
+/// `title` is the human-readable label surfaced by [`TimelineInfo`]. The
+/// machine-facing timeline id defaults to `"main"`; set `id = "..."` after
+/// `title` when a different stable lookup key is required. Set
+/// `canvas = (width, height)` last to resolve the root against an explicit
+/// logical canvas.
 #[macro_export]
 macro_rules! export_timeline {
-    ($id:expr, $title:expr, $builder:path) => {
+    (@__emit root = $root:expr, title = $title:expr, id = $id:expr) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
-            ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
+            let __root = $root;
+            ::std::boxed::Box::new($crate::single_timeline($id, $title, __root))
         }
     };
-    ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
+    (
+        @__emit
+        root = $root:expr,
+        title = $title:expr,
+        id = $id:expr,
+        canvas = ($w:expr, $h:expr)
+    ) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
         pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
+            let __root = $root;
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
                 $title,
-                $builder(),
+                __root,
                 $crate::__core::geometry::Vec2($w, $h),
             ))
         }
     };
-}
-
-/// Exports a single OLD closure-based [`tellur_core::timeline::Timeline`]
-/// builder from a `cdylib`, wrapping it in a [`LegacyTimeline`] adapter so it
-/// serves through the migrated collection unchanged.
-///
-/// ```ignore
-/// fn build() -> impl tellur_core::timeline::Timeline + Send { ... }
-/// tellur_plugin::export_legacy_timeline!("main", "Main", build);
-/// ```
-#[macro_export]
-macro_rules! export_legacy_timeline {
-    ($id:expr, $title:expr, $builder:path) => {
-        $crate::__tellur_export_abi_fingerprint!();
-        #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v9(
-        ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
-            ::std::boxed::Box::new($crate::single_timeline(
-                $id,
-                $title,
-                $crate::LegacyTimeline::new($builder()),
-            ))
-        }
+    (root = $root:expr, title = $title:expr $(,)?) => {
+        $crate::export_timeline!(@__emit root = $root, title = $title, id = "main");
+    };
+    (root = $root:expr, title = $title:expr, canvas = ($w:expr, $h:expr) $(,)?) => {
+        $crate::export_timeline!(
+            @__emit
+            root = $root,
+            title = $title,
+            id = "main",
+            canvas = ($w, $h)
+        );
+    };
+    (root = $root:expr, title = $title:expr, id = $id:expr $(,)?) => {
+        $crate::export_timeline!(@__emit root = $root, title = $title, id = $id);
+    };
+    (
+        root = $root:expr,
+        title = $title:expr,
+        id = $id:expr,
+        canvas = ($w:expr, $h:expr) $(,)?
+    ) => {
+        $crate::export_timeline!(
+            @__emit
+            root = $root,
+            title = $title,
+            id = $id,
+            canvas = ($w, $h)
+        );
+    };
+    ($id:expr, $title:expr, $builder:path $(,)?) => {
+        ::core::compile_error!(
+            "export_timeline! now accepts `root = <TimelineComponent expression>, title = <title>`; call the former factory explicitly as `root = build()`"
+        );
+    };
+    ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr) $(,)?) => {
+        ::core::compile_error!(
+            "export_timeline! now accepts `root = <TimelineComponent expression>, title = <title>, canvas = (width, height)`; call the former factory explicitly as `root = build()`"
+        );
     };
 }
 
@@ -453,10 +384,10 @@ mod tests {
     use tellur_core::geometry::{Constraints, Vec2};
     use tellur_core::raster::{PixelFormat, RasterComponent, RasterResidency};
     use tellur_core::render_context::PassThrough;
-    use tellur_core::timeline_component::Timed;
+    use tellur_core::timeline_component::{Clock, NodeKind, Timed};
     use tellur_core::timeline_container::Timeline as TimelineContainer;
 
-    // A trivial timeless visual so a small NEW-API timeline can be built without
+    // A trivial timeless visual so a small native timeline can be built without
     // pulling in media decode. Reaches the timeline world via the one-way
     // blanket over `RasterComponent`.
     #[derive(Clone, PartialEq, Hash)]
@@ -478,7 +409,7 @@ mod tests {
         }
     }
 
-    // Builds an overlay `Timeline` of two windowed visuals — a small NEW-API
+    // Builds an overlay `Timeline` of two windowed visuals — a small native
     // timeline that resolves to a determinate length (no media probe).
     fn build_new_api_timeline() -> TimelineContainer {
         TimelineContainer::builder()
@@ -591,30 +522,5 @@ mod tests {
             assert_eq!(child.kind, NodeKind::Video);
             assert!(child.children.is_empty());
         }
-    }
-
-    #[test]
-    fn legacy_timeline_adapter_arrangement_is_one_video_span() {
-        // The legacy adapter presents an opaque closure timeline as a single
-        // Video-kind node spanning its whole duration.
-        let legacy = LegacyTimeline::new(tellur_core::timeline::timeline(
-            4.0,
-            |_t, target: Resolution, _residency, _ctx| {
-                RasterImage::cpu(
-                    target.width,
-                    target.height,
-                    PixelFormat::Rgba8,
-                    vec![0u8; (target.width * target.height * 4) as usize],
-                )
-            },
-        ));
-        let collection = single_timeline("main", "Main", legacy);
-
-        assert_eq!(collection.timelines()[0].duration, 4.0);
-        let root = collection.arrangement("main").expect("resolves to a span");
-        assert_eq!(root.kind, NodeKind::Video);
-        assert_eq!(root.start, 0.0);
-        assert_eq!(root.end, 4.0);
-        assert!(root.children.is_empty());
     }
 }

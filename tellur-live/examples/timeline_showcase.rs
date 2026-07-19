@@ -34,9 +34,7 @@ use tellur_core::placement::{Positioned, RasterPlacement};
 use tellur_core::shapes::{Circle, Rectangle};
 use tellur_core::text::{Text, Weight, SANS_SERIF};
 use tellur_core::time::Time;
-use tellur_core::timeline_component::{
-    Clock, Event, TimedBuilder, TimelineComponent, TriggersBuilder,
-};
+use tellur_core::timeline_component::{Clock, Event, TimedBuilder, TriggersBuilder};
 use tellur_core::timeline_container::{Sequence, Subtitle, Timeline};
 use tellur_core::vector::{Paint, Stroke};
 
@@ -597,7 +595,7 @@ fn SequenceDiagram(#[clock] clock: Clock) -> impl TimelineComponent {
 // A playhead crosses a track at a constant rate; the marker sits exactly where
 // the playhead lands at `EVENT_LOCAL`. The ring is driven by `event.phase`, so
 // the in-chapter pulse and the ruler's pulse are the SAME event — the chapter
-// fires `mark` (see `build`), and both this diagram and the persistent ruler
+// fires `mark` (see `TimelineShowcase`), and both this diagram and the persistent ruler
 // react to it.
 #[tellur_core::component(timeline, name = "EventDiagram")]
 fn EventDiagram(#[clock] clock: Clock, event: Event) -> impl TimelineComponent {
@@ -826,10 +824,11 @@ fn TimelineChapter() -> impl TimelineComponent {
 /// The whole piece: a persistent backdrop + ruler overlaid with a `Sequence` of
 /// the five chapters. The `mark` event is fired inside the Event chapter (via
 /// `trigger_at`) and read by both that chapter's diagram and the persistent
-/// ruler, so firing it ripples across components.
-pub fn build() -> impl TimelineComponent + Send {
-    let mark = Event::named("mark");
-
+/// ruler, so firing it ripples across components. Keeping `mark` as a stored
+/// field preserves its minted identity across the function-form component's
+/// structural and per-frame builds.
+#[tellur_core::component(timeline, name = "Anatomy of a Timeline")]
+fn TimelineShowcase(mark: Event) -> impl TimelineComponent {
     Timeline::builder()
         .child(Backdrop::builder().fill())
         .child(Ruler::builder().event(mark).fill())
@@ -853,8 +852,9 @@ pub fn build() -> impl TimelineComponent + Send {
 }
 
 tellur_live::export_timeline!(
-    "main",
-    "Anatomy of a Timeline",
-    build,
-    canvas = (CANVAS_W, CANVAS_H)
+    root = TimelineShowcase::builder()
+        .mark(Event::named("mark"))
+        .build(),
+    title = "Anatomy of a Timeline",
+    canvas = (CANVAS_W, CANVAS_H),
 );

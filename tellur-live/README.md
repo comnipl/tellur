@@ -10,17 +10,25 @@ from the same workspace/toolchain; this is not intended as a stable C ABI.
 ## Build a Plugin
 
 ```rust
-use tellur_core::timeline::{timeline, Timeline};
+use tellur_core::component;
+use tellur_core::timeline_container::{TimeBox, Timeline};
 
-fn build_timeline() -> impl Timeline {
-    timeline(5.0, move |t, target, ctx| {
-        // build and render a RasterComponent here
-        todo!()
-    })
+#[component(timeline)]
+fn Main() -> impl tellur_core::timeline_component::TimelineComponent {
+    Timeline::builder()
+        // Add visual, audio, and subtitle components as children.
+        .child(TimeBox::builder().duration(5.0))
+        .build()
 }
 
-tellur_live::export_timeline!("main", "Main", build_timeline);
+tellur_live::export_timeline!(
+    root = Main::builder().build(),
+    title = "Main",
+);
 ```
+
+Single-timeline exports use the lookup id `"main"` by default. Add
+`id = "..."` after `title` only when clients need a different stable id.
 
 The bundled demo plugin can be built with:
 

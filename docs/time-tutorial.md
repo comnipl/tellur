@@ -8,16 +8,16 @@ Companion tutorial: [Layout System Tutorial](./layout-tutorial.md)
 
 日本語版: [time-tutorial.ja.md](./time-tutorial.ja.md)
 
-## 0. The big picture — two time worlds
+## 0. The big picture — two time axes
 
-Just as layout has its "canvas world and flow world", time also has **two worlds**.
+Every timeline component is sampled with a [`Clock`](../tellur-core/src/timeline_component/clock.rs). The clock exposes **two time axes** so choreography can use an absolute cursor without giving up clip-local composition.
 
-| | Absolute-time world | Placement-clock world |
+| | Global axis | Local axis |
 |---|---|---|
-| Where time comes from | the `TimelineTime` passed by `Timeline::build` | the `Clock` injected via `#[clock]` |
-| How moments are decided | the author specifies absolute seconds on the timeline | the container assigns them from `.at(..)` placements |
-| Main cast | `Time` / `Phase` / `Window` | `Clock`, `Timeline`, `Sequence`, `Placed`, `Event` |
-| Best for | single-piece motion-graphics direction | compositional videos whose clips get reordered and swapped |
+| Where time comes from | `clock.global()` (`TimelineTime`) | `clock.local()` / `clock.window()` (`LocalTime` / `Window`) |
+| Origin | the resolved timeline root | this component's resolved placement start |
+| Main cast | `TimelineTime`, `Event` | `LocalTime`, `Window`, `Placed` |
+| Best for | whole-piece motion-graphics direction and shared event timing | reusable clips that follow reordering, trimming, and placement |
 
 The correspondence with the spatial side lines up cleanly.
 
@@ -28,7 +28,7 @@ The correspondence with the spatial side lines up cleanly.
 | `Positioned` (place one) | `Placed` (the result of `.at(..)`) |
 | `SizedBox` (fixed-size blank) | `TimeBox` (fixed-length beat, §7) |
 
-In both worlds, the vocabulary for turning time into values is shared: **`Time` → `Phase` / `Window` → eased values**.
+On both axes, the vocabulary for turning time into values is shared: **`Time` → `Phase` / `Window` → eased values**.
 
 ## 1. The basic pipeline — `Time` → `Phase` → value
 
@@ -178,7 +178,7 @@ let tint = INK.interpolate(MUTED, p); // Color: straight per-channel lerp in sRG
 
 > **footgun ④**: `eased` stays within `Phase`, so **overshoot curves (`InBack` / `OutElastic`, and `CubicBezier` whose y leaves the unit interval) are clamped to the unit interval**. To keep the overshoot, ease directly into the value range with the `(from, to)` methods (`p.ease_out_elastic(from, to)` / `p.ease_bezier(x1, y1, x2, y2, from, to)`).
 
-## 7. The placement-clock world — the two axes of `Clock`
+## 7. `Clock` — choosing between the two axes
 
 A component placed on a `Timeline` / `Sequence` with `.at(..)` receives a `Clock` via `#[clock]`. A `Clock` carries **two time axes**.
 
@@ -322,11 +322,20 @@ What you get back is a **clamped snapshot** (§4): before the window opens — a
 | Crop any component, including from its end | `.trim(a..b)` / `.trim(-a..-b)` |
 | Fade or automate an audio contribution | `.fade_in(d)` / `.fade_out(d)` / `.gain_envelope(..)` |
 
-## 9. Worked example — where the two worlds meet
+## 9. Worked example — where the two axes meet
 
-The dot in `tellur-renderer/examples/timeline_to_mp4.rs` is the minimal form of the absolute-time world.
+The outer scene in `tellur-renderer/examples/timeline_to_mp4.rs` selects the global axis, then passes quantized snapshots into raster components.
 
 ```rust
+#[component(timeline)]
+fn QuantizedDots(#[clock] clock: Clock) -> impl TimelineComponent {
+    let t = clock.global();
+    Flex::builder()
+        .child(BouncingDot::builder().t(t.fps(60)))
+        .child(BouncingDot::builder().t(t.fps(24)))
+        .build()
+}
+
 #[component(raster)]
 fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
     let rx = t.bounce(2.5).linear(0.0, 1.0);   // periodic Phase → anchor ratio
@@ -342,4 +351,4 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
 }
 ```
 
-Meanwhile `tellur-live`'s `timeline_showcase` lives in the placement-clock world, letting `clock.local()`-driven self-animation and `clock.global()`-driven whole-piece progression coexist on one screen. `demo_scene` is the absolute-time world, where every one of the `phase` / `window` / `clamped()` patterns appears. **Direct the choreography in absolute time; compose the structure with placement clocks.** The same split as layout's "direction in coordinates, structure in flow".
+Meanwhile `tellur-live`'s `timeline_showcase` lets `clock.local()`-driven self-animation and `clock.global()`-driven whole-piece progression coexist on one screen. `demo_scene` uses the same component model with the `phase` / `window` / `clamped()` patterns throughout. **Direct whole-piece choreography on the global axis; make reusable clips follow their local axis.**
