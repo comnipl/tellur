@@ -314,6 +314,7 @@ mod tests {
     use std::any::Any;
     use std::sync::Arc;
 
+    use crate::gpu::GpuRenderer;
     use tellur_core::fragment::Fragment;
     use tellur_core::geometry::{Anchor, Rect};
     use tellur_core::layout::Stack;
@@ -323,6 +324,7 @@ mod tests {
         CompositeInput, DropShadowInput, GpuPreference, GpuRasterBackend, OutlineInput, PassThrough,
     };
     use tellur_core::shapes::Rectangle;
+    use tellur_core::vector::Stroke;
 
     const TEST_GPU_BACKEND: &str = "tellur-rasterize-test";
 
@@ -457,6 +459,119 @@ mod tests {
             .as_cpu()
             .expect("rasterize() always returns a CPU image");
         cpu.pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    fn pixels_outside_alpha_footprint(
+        source: &CpuRasterImage,
+        reference: &CpuRasterImage,
+        dilation: u32,
+        threshold: u8,
+    ) -> Vec<(u32, u32)> {
+        assert_eq!(source.width, reference.width);
+        assert_eq!(source.height, reference.height);
+
+        let mut outside = Vec::new();
+        for y in 0..source.height {
+            for x in 0..source.width {
+                let source_alpha = source.pixels[((y * source.width + x) * 4 + 3) as usize];
+                if source_alpha <= threshold {
+                    continue;
+                }
+                let near_reference =
+                    y.saturating_sub(dilation)..=(y + dilation).min(source.height - 1);
+                let near_reference = near_reference.into_iter().any(|near_y| {
+                    (x.saturating_sub(dilation)..=(x + dilation).min(source.width - 1)).any(
+                        |near_x| {
+                            reference.pixels[((near_y * source.width + near_x) * 4 + 3) as usize]
+                                > 0
+                        },
+                    )
+                });
+                if !near_reference {
+                    outside.push((x, y));
+                }
+            }
+        }
+        outside
+    }
+
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn gpu_closed_curve_stroke_matches_cpu_footprint() {
+        // The original Vello 0.2 failure is driver-dependent: native Vulkan
+        // reproduces it, while a software Vulkan adapter may not.
+        let size = Vec2(64.0, 32.0);
+        let radius = 8.0;
+        let graphic = VectorGraphic {
+            // Asymmetric fractional padding exercises the view-box transform
+            // without tying the case to any particular component or asset.
+            view_box: Rect {
+                origin: Vec2(-1.25, -1.25),
+                size: Vec2(68.5, 36.5),
+            },
+            root: Node::Path(Path {
+                commands: vec![
+                    PathCommand::MoveTo(Vec2(radius, 0.0)),
+                    PathCommand::LineTo(Vec2(size.0 - radius, 0.0)),
+                    PathCommand::QuadTo {
+                        control: Vec2(size.0, 0.0),
+                        to: Vec2(size.0, radius),
+                    },
+                    PathCommand::LineTo(Vec2(size.0, size.1 - radius)),
+                    PathCommand::QuadTo {
+                        control: size,
+                        to: Vec2(size.0 - radius, size.1),
+                    },
+                    PathCommand::LineTo(Vec2(radius, size.1)),
+                    PathCommand::QuadTo {
+                        control: Vec2(0.0, size.1),
+                        to: Vec2(0.0, size.1 - radius),
+                    },
+                    PathCommand::LineTo(Vec2(0.0, radius)),
+                    PathCommand::QuadTo {
+                        control: Vec2::ZERO,
+                        to: Vec2(radius, 0.0),
+                    },
+                    PathCommand::Close,
+                ],
+                fill: None,
+                stroke: Some(Stroke::new(Color::rgb_u8(255, 255, 255), 2.5)),
+                transform: Transform::IDENTITY,
+            }),
+        };
+        let target = Resolution::new(68, 36);
+        let cpu = rasterize(&graphic, target.width, target.height);
+        let cpu = cpu.as_cpu().expect("CPU rasterization returns CPU pixels");
+
+        let Ok(mut renderer) = GpuRenderer::new() else {
+            eprintln!("skipping GPU regression test: no GPU adapter available");
+            return;
+        };
+        let gpu = GpuRasterBackend::rasterize(&mut renderer, &graphic, target)
+            .expect("GPU rasterization should succeed");
+        let gpu = GpuRasterBackend::readback(&mut renderer, gpu)
+            .expect("GPU rasterization should read back");
+
+        // Antialiasing implementations may disagree along the edge. A three-pixel
+        // footprint dilation accepts that normal difference while still rejecting
+        // detached artifacts or a stroke missing from either renderer.
+        let unexpected = pixels_outside_alpha_footprint(&gpu, cpu, 3, 32);
+
+        assert!(
+            unexpected.is_empty(),
+            "GPU stroke escaped the CPU footprint at {} pixels; first pixels: {:?}",
+            unexpected.len(),
+            &unexpected[..unexpected.len().min(8)]
+        );
+
+        let missing = pixels_outside_alpha_footprint(cpu, &gpu, 3, 32);
+
+        assert!(
+            missing.is_empty(),
+            "GPU stroke missed the CPU footprint at {} pixels; first pixels: {:?}",
+            missing.len(),
+            &missing[..missing.len().min(8)]
+        );
     }
 
     #[derive(Clone, PartialEq, Eq, Hash)]
