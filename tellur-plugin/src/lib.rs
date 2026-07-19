@@ -12,6 +12,7 @@
 //! fingerprint checked at load time.
 
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use tellur_core::geometry::Vec2;
 use tellur_core::raster::{RasterImage, RasterResidency, Resolution};
@@ -71,7 +72,12 @@ pub use tellur_core as __core;
 /// `Stroke`, and therefore `VectorGraphic`, which crosses the live-plugin
 /// boundary through `GpuRasterBackend::rasterize`. Stale `v7` plugins must fail
 /// before passing an incompatible graphic layout to the host renderer.
-pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v8\0";
+///
+/// Bumped to `v9` because `TimelineComponent` gained clone support through a
+/// new supertrait, changing the vtable layout of timeline trait objects held by
+/// live-preview plugins. Stale `v8` plugins must fail before the host loads an
+/// incompatible component contract.
+pub const ENTRY_SYMBOL: &[u8] = b"tellur_timeline_collection_v9\0";
 
 pub mod abi;
 pub use abi::{
@@ -285,15 +291,34 @@ impl TimelineCollection for SingleTimeline {
 /// super-traits). A `Timeline` closure is neither, and timeline nodes are never
 /// memoized through `ctx.render` (`.sketch/02 §11`) — this identity is only the
 /// builder-marker key — so the wrapper compares all instances equal and hashes
-/// to a constant. There is exactly one per collection, so that is sound.
+/// to a constant. There is exactly one per collection, so that is sound. The
+/// opaque legacy timeline also does not promise `Clone`; sharing it behind a
+/// mutex keeps this adapter cloneable without adding `Clone` or `Sync` to the
+/// legacy builder contract.
 pub struct LegacyTimeline<T: Timeline + Send> {
-    timeline: T,
+    timeline: Arc<Mutex<T>>,
 }
 
 impl<T: Timeline + Send> LegacyTimeline<T> {
     /// Wraps `timeline` so it can be placed in the new timeline world.
     pub fn new(timeline: T) -> Self {
-        Self { timeline }
+        Self {
+            timeline: Arc::new(Mutex::new(timeline)),
+        }
+    }
+
+    fn timeline(&self) -> MutexGuard<'_, T> {
+        self.timeline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl<T: Timeline + Send> Clone for LegacyTimeline<T> {
+    fn clone(&self) -> Self {
+        Self {
+            timeline: Arc::clone(&self.timeline),
+        }
     }
 }
 
@@ -315,7 +340,7 @@ impl<T: Timeline + Send> Hash for LegacyTimeline<T> {
 
 impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
     fn duration(&self) -> Option<f64> {
-        Some(self.timeline.duration())
+        Some(self.timeline().duration())
     }
 
     fn frame(
@@ -329,7 +354,10 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
         // The legacy closure handles its own SCENE_SIZE internally; the logical
         // `canvas` is not threaded into it.
         let _ = canvas;
-        Some(self.timeline.build(clock.global(), target, residency, ctx))
+        Some(
+            self.timeline()
+                .build(clock.global(), target, residency, ctx),
+        )
     }
 
     fn arrangement(&self, offset: f64) -> Arrangement {
@@ -341,7 +369,7 @@ impl<T: Timeline + Send + 'static> TimelineComponent for LegacyTimeline<T> {
             name: None,
             source: None,
             start: offset,
-            end: offset + self.timeline.duration(),
+            end: offset + self.timeline().duration(),
             trim: None,
             triggers: Vec::new(),
             children: Vec::new(),
@@ -360,7 +388,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v8(
+        pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline($id, $title, $builder()))
         }
@@ -368,7 +396,7 @@ macro_rules! export_timeline {
     ($id:expr, $title:expr, $builder:path, canvas = ($w:expr, $h:expr)) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v8(
+        pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline_with_canvas(
                 $id,
@@ -393,7 +421,7 @@ macro_rules! export_legacy_timeline {
     ($id:expr, $title:expr, $builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v8(
+        pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($crate::single_timeline(
                 $id,
@@ -410,7 +438,7 @@ macro_rules! export_timeline_collection {
     ($builder:path) => {
         $crate::__tellur_export_abi_fingerprint!();
         #[no_mangle]
-        pub extern "Rust" fn tellur_timeline_collection_v8(
+        pub extern "Rust" fn tellur_timeline_collection_v9(
         ) -> ::std::boxed::Box<dyn $crate::TimelineCollection> {
             ::std::boxed::Box::new($builder())
         }
@@ -461,7 +489,7 @@ mod tests {
 
     static LAST_COLLECTION_RESIDENCY: AtomicU8 = AtomicU8::new(0);
 
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct ResidencyTimeline;
 
     impl TimelineComponent for ResidencyTimeline {
@@ -506,8 +534,8 @@ mod tests {
     }
 
     #[test]
-    fn entry_symbol_marks_the_configurable_stroke_abi() {
-        assert_eq!(ENTRY_SYMBOL, b"tellur_timeline_collection_v8\0");
+    fn entry_symbol_marks_the_cloneable_timeline_component_abi() {
+        assert_eq!(ENTRY_SYMBOL, b"tellur_timeline_collection_v9\0");
     }
 
     #[test]

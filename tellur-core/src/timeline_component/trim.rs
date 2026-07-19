@@ -194,7 +194,7 @@ impl<C: Hash> Hash for Trim<C> {
 
 impl<C> TimelineComponent for Trim<C>
 where
-    C: TimelineComponent + PartialEq + Hash + 'static,
+    C: TimelineComponent + Clone + PartialEq + Hash + 'static,
 {
     fn duration(&self) -> Option<f64> {
         let range = self.resolved_range();
@@ -294,7 +294,7 @@ where
 
 impl<C> From<Trim<C>> for Box<dyn TimelineComponent + Send>
 where
-    C: TimelineComponent + PartialEq + Hash + Send + 'static,
+    C: TimelineComponent + Clone + PartialEq + Hash + Send + 'static,
 {
     fn from(trimmed: Trim<C>) -> Self {
         Box::new(trimmed)

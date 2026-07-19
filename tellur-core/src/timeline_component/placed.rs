@@ -92,7 +92,7 @@ impl From<Range<f64>> for Placement {
 ///
 /// Per the DECIDED stretch semantics (`.sketch/01` A.3): `.at(a..b)` footprint
 /// is the window; the implied speed factor is recorded for later sampling.
-#[derive(crate::Keyable)]
+#[derive(Clone, crate::Keyable)]
 pub struct Placed {
     /// Where on the parent clock this sits.
     placement: Placement,

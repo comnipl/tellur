@@ -763,7 +763,7 @@ fn sequence_gates_each_child_to_its_slot() {
     );
 }
 
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct GpuFrame;
 
 impl TimelineComponent for GpuFrame {

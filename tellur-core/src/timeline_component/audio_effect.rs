@@ -196,7 +196,7 @@ impl<C: Hash> Hash for GainEnvelope<C> {
 
 impl<C> TimelineComponent for GainEnvelope<C>
 where
-    C: TimelineComponent + PartialEq + Hash + 'static,
+    C: TimelineComponent + Clone + PartialEq + Hash + 'static,
 {
     fn duration(&self) -> Option<f64> {
         self.child.duration()
@@ -266,7 +266,7 @@ where
 /// Lets an effect-wrapped component drop directly into timeline containers.
 impl<C> From<GainEnvelope<C>> for Box<dyn TimelineComponent + Send>
 where
-    C: TimelineComponent + PartialEq + Hash + Send + 'static,
+    C: TimelineComponent + Clone + PartialEq + Hash + Send + 'static,
 {
     fn from(envelope: GainEnvelope<C>) -> Self {
         Box::new(envelope)

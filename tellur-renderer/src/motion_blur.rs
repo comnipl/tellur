@@ -41,7 +41,7 @@ use tellur_core::Keyable;
 const MAX_SAMPLES: u32 = 64;
 
 #[tellur_core::component(timeline)]
-#[derive(Keyable)]
+#[derive(Clone, Keyable)]
 pub struct MotionBlur {
     /// How long the virtual shutter stays open, in the child's local
     /// seconds. Samples cover the trailing window `[t - shutter, t]`.
@@ -219,7 +219,7 @@ mod tests {
     /// `x = round(local seconds)` of a `target`-wide strip, and nothing at
     /// all before `appear_at`. Fresh buffer every call (a timeline leaf is
     /// never memoized), so it exercises the full averaging path.
-    #[derive(PartialEq, Hash)]
+    #[derive(Clone, PartialEq, Hash)]
     struct MovingDot {
         appear_at_ms: i64,
     }

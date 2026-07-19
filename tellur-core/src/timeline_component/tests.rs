@@ -56,6 +56,23 @@ fn raster_component_macro_name_flows_through_the_blanket() {
 }
 
 #[test]
+fn boxed_timeline_component_clone_is_dyn_equal() {
+    let original: Box<dyn TimelineComponent> = Box::new(Dot);
+    let cloned = original.clone();
+    assert!(crate::dyn_compare::DynEq::dyn_eq(
+        original.as_ref(),
+        cloned.as_ref().as_any(),
+    ));
+
+    let original: Box<dyn TimelineComponent + Send> = Box::new(Dot);
+    let cloned = original.clone();
+    assert!(crate::dyn_compare::DynEq::dyn_eq(
+        original.as_ref(),
+        cloned.as_ref().as_any(),
+    ));
+}
+
+#[test]
 fn raster_component_macro_routes_cache_policy_by_build_mode() {
     assert_eq!(
         PositionedBadge::builder().build().cache_policy(),
@@ -76,7 +93,7 @@ fn raster_component_macro_routes_cache_policy_by_build_mode() {
 
 static LAST_TIMELINE_RESIDENCY: AtomicU8 = AtomicU8::new(0);
 
-#[derive(PartialEq, Hash)]
+#[derive(Clone, PartialEq, Hash)]
 struct ResidencyProbe;
 
 impl TimelineComponent for ResidencyProbe {
