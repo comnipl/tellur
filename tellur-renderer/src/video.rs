@@ -1,15 +1,17 @@
 //! Video encoding via an `ffmpeg` subprocess.
 //!
-//! [`FfmpegEncoder`] streams frames of a [`Timeline`] into `ffmpeg`'s stdin
-//! as raw RGBA. The output codec, container, pixel format, and any filters
-//! are controlled entirely through caller-supplied `args` — the encoder
-//! itself only fixes the input side (raw RGBA at a known size/framerate),
-//! so any container/codec `ffmpeg` knows about is reachable (mp4, mov +
-//! ProRes, webm, image sequences, ...).
+//! [`FfmpegEncoder`] streams frames of a resolved [`ResolvedTimeline`] into
+//! `ffmpeg`'s stdin as raw RGBA. The output codec, container, pixel format, and
+//! any filters are controlled entirely through caller-supplied `args` — the
+//! encoder itself only fixes the input side (raw RGBA at a known
+//! size/framerate), so any container/codec `ffmpeg` knows about is reachable
+//! (mp4, mov + ProRes, webm, image sequences, ...).
 //!
 //! Frames are produced by repeatedly calling
-//! `Timeline::build(t, resolution, RasterResidency::Cpu, ctx)` with
-//! `t = frame_idx / fps` for `frame_idx` in `0..ceil(duration * fps)`.
+//! [`ResolvedTimeline::frame`] with `t = frame_idx / fps` for `frame_idx` in
+//! `0..ceil(duration * fps)`. By default its mixed audio is rendered to a
+//! temporary WAV and muxed alongside the video; use
+//! [`AudioExport::Omit`] for video-only output.
 //!
 //! Progress: a three-row display, driven by [`indicatif`]:
 //!
@@ -39,7 +41,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressState, ProgressStyle};
 use tellur_core::raster::{PixelFormat, RasterResidency, Resolution};
 use tellur_core::render_context::{GpuPreference, RenderContext};
 use tellur_core::time::TimelineTime;
-use tellur_core::timeline::Timeline;
 use tellur_core::timeline_component::ResolvedTimeline;
 use thiserror::Error;
 
@@ -107,7 +108,19 @@ impl fmt::Display for ColorRange {
     }
 }
 
-/// Builder that spawns `ffmpeg` and drives a [`Timeline`] through it.
+/// Whether the encoder muxes the resolved timeline's mixed audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AudioExport {
+    /// Render the timeline's audio at the fixed encoder-boundary rate and mux
+    /// it as an AAC stream. This is the default, including for silent trees.
+    #[default]
+    Mux,
+    /// Emit only the video stream. Audio rendering and temporary-WAV creation
+    /// are both skipped.
+    Omit,
+}
+
+/// Builder that spawns `ffmpeg` and drives a [`ResolvedTimeline`] through it.
 ///
 /// The frame size is fixed at construction (`resolution`) and frames are
 /// emitted at `fps` Hz. Output-side `ffmpeg` arguments (codec, container,
@@ -124,12 +137,18 @@ pub struct FfmpegEncoder {
     progress: bool,
     color_range: ColorRange,
     gpu_preference: GpuPreference,
+    audio: AudioExport,
 }
 
 #[derive(Debug, Error)]
 pub enum FfmpegError {
     #[error("failed to spawn ffmpeg (is it on PATH?): {0}")]
     Spawn(std::io::Error),
+    #[error("failed to prepare temporary audio file `{}`: {source}", path.display())]
+    PrepareAudio {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to write frame {frame} to ffmpeg stdin: {source}")]
     Write { frame: u64, source: std::io::Error },
     #[error("failed to read ffmpeg stderr: {0}")]
@@ -163,6 +182,7 @@ impl FfmpegEncoder {
             progress: true,
             color_range: ColorRange::default(),
             gpu_preference: GpuPreference::default(),
+            audio: AudioExport::default(),
         }
     }
 
@@ -183,6 +203,14 @@ impl FfmpegEncoder {
     /// bisecting whether a visual difference comes from the GPU backend.
     pub fn gpu_preference(mut self, preference: GpuPreference) -> Self {
         self.gpu_preference = preference;
+        self
+    }
+
+    /// Selects whether to mux the resolved timeline's mixed audio. Defaults to
+    /// [`AudioExport::Mux`]. [`AudioExport::Omit`] produces video-only output
+    /// and avoids rendering or writing audio altogether.
+    pub fn audio(mut self, audio: AudioExport) -> Self {
+        self.audio = audio;
         self
     }
 
@@ -208,52 +236,22 @@ impl FfmpegEncoder {
         self
     }
 
-    pub fn encode<T: Timeline>(&self, tl: &T, out: &Path) -> Result<(), FfmpegError> {
-        if self.fps == 0 {
-            return Err(FfmpegError::ZeroFps);
-        }
-        let duration = tl.duration();
-        if !duration.is_finite() || duration < 0.0 {
-            return Err(FfmpegError::InvalidDuration(duration));
-        }
-        // ceil(duration * fps), saturating to u64.
-        let total_frames = (duration * self.fps as f64).ceil().max(0.0) as u64;
-
-        // No audio input for the old path: pass no extra args, so the command
-        // is byte-identical to the pre-step-8 behaviour.
-        let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
-        self.drive_ffmpeg(&[], total_frames, out, |frame_idx| {
-            let t = TimelineTime::new(frame_idx as f64 / self.fps as f64);
-            let image = tl.build(t, self.resolution, RasterResidency::Cpu, &mut ctx);
-            Ok(ctx.readback(image))
-        })
-        .map(|_| {
-            if self.progress {
-                eprint!("{}", ctx.metrics());
-            }
-        })
-    }
-
-    /// A/V encode for the timeline subsystem (`.sketch/01` A.7 / B4 v1). Does NOT
-    /// touch the old [`encode`](Self::encode) path.
+    /// Encodes a resolved timeline (`.sketch/01` A.7 / B4 v1).
     ///
-    /// Pre-renders the whole mixed audio track to a temp 32-bit float WAV
-    /// ([`ResolvedTimeline::render_audio`]), then spawns ffmpeg with the video on
-    /// stdin (`-i -`, as today) AND the temp WAV as a SECOND input — the audio
-    /// `-i <tmp.wav>` plus the `-c:a aac` / `-map` flags are injected through the
-    /// SAME `.args()` path that lands between the input and the output, so the
-    /// `FfmpegEncoder` struct is unchanged. Video frames stream from
-    /// [`ResolvedTimeline::frame`]; a `None` frame is emitted as
-    /// transparent.
+    /// With the default [`AudioExport::Mux`], this pre-renders the whole mixed
+    /// audio track to a temporary 32-bit float WAV
+    /// ([`ResolvedTimeline::render_audio`]), then spawns ffmpeg with raw video
+    /// on stdin and the WAV as a second input. The audio `-i <tmp.wav>` plus
+    /// `-c:a aac` / `-map` flags are inserted before the caller's output args.
+    /// [`AudioExport::Omit`] skips that preparation and emits video only.
+    /// Video frames stream from [`ResolvedTimeline::frame`]; a `None` frame is
+    /// emitted as transparent.
     ///
-    /// The WAV is sized to `ceil(duration * fps) / fps` seconds (the video's
-    /// frame-quantized length), NOT `duration`, so a `-shortest` in the caller's
-    /// args never tail-clips the audio against a slightly longer video.
-    pub fn encode_timeline(
-        &self,
-        resolved: &ResolvedTimeline,
-        out: &Path,
-    ) -> Result<(), FfmpegError> {
+    /// When audio is muxed, the WAV is sized to `ceil(duration * fps) / fps`
+    /// seconds (the video's frame-quantized length), not the raw duration, so a
+    /// caller-supplied `-shortest` never tail-clips the audio against a slightly
+    /// longer video.
+    pub fn encode(&self, resolved: &ResolvedTimeline, out: &Path) -> Result<(), FfmpegError> {
         if self.fps == 0 {
             return Err(FfmpegError::ZeroFps);
         }
@@ -262,37 +260,49 @@ impl FfmpegEncoder {
             return Err(FfmpegError::InvalidDuration(duration));
         }
         let total_frames = (duration * self.fps as f64).ceil().max(0.0) as u64;
-        // Frame-quantized video length: the audio is rendered to exactly this
-        // many seconds so the two streams end together.
-        let video_seconds = total_frames as f64 / self.fps as f64;
+        let (audio_args, wav_path) = match self.audio {
+            AudioExport::Mux => {
+                // Frame-quantized video length: the audio is rendered to
+                // exactly this many seconds so the two streams end together.
+                let video_seconds = total_frames as f64 / self.fps as f64;
+                let mut mixed = resolved.render_audio(AUDIO_RATE, AUDIO_CHANNELS);
+                fit_audio_to_seconds(
+                    &mut mixed.samples,
+                    AUDIO_RATE,
+                    AUDIO_CHANNELS,
+                    video_seconds,
+                );
+                let wav_path = unique_temp_wav();
+                if let Err(source) =
+                    write_wav_f32le(&wav_path, &mixed.samples, AUDIO_RATE, AUDIO_CHANNELS)
+                {
+                    let _ = std::fs::remove_file(&wav_path);
+                    return Err(FfmpegError::PrepareAudio {
+                        path: wav_path,
+                        source,
+                    });
+                }
 
-        // Render + write the mixed audio track to a temp WAV.
-        let mut mixed = resolved.render_audio(AUDIO_RATE, AUDIO_CHANNELS);
-        fit_audio_to_seconds(
-            &mut mixed.samples,
-            AUDIO_RATE,
-            AUDIO_CHANNELS,
-            video_seconds,
-        );
-        let wav_path = unique_temp_wav();
-        write_wav_f32le(&wav_path, &mixed.samples, AUDIO_RATE, AUDIO_CHANNELS)
-            .map_err(FfmpegError::Spawn)?;
-
-        // The second input + stream maps, injected through the SAME arg slot the
-        // user's `.args()` use (between input and output). `-map 0:v -map 1:a`
-        // pairs the rawvideo stdin (input 0) with the WAV (input 1); the user's
-        // own args (codec/container/-shortest/...) follow.
-        let wav_str = wav_path.to_string_lossy().to_string();
-        let audio_args = vec![
-            "-i".to_string(),
-            wav_str,
-            "-c:a".to_string(),
-            "aac".to_string(),
-            "-map".to_string(),
-            "0:v:0".to_string(),
-            "-map".to_string(),
-            "1:a:0".to_string(),
-        ];
+                // The second input + stream maps are inserted between the raw
+                // video input and the caller's output args. `-map 0:v -map 1:a`
+                // pairs rawvideo stdin (input 0) with the WAV (input 1).
+                let wav_str = wav_path.to_string_lossy().to_string();
+                (
+                    vec![
+                        "-i".to_string(),
+                        wav_str,
+                        "-c:a".to_string(),
+                        "aac".to_string(),
+                        "-map".to_string(),
+                        "0:v:0".to_string(),
+                        "-map".to_string(),
+                        "1:a:0".to_string(),
+                    ],
+                    Some(wav_path),
+                )
+            }
+            AudioExport::Omit => (Vec::new(), None),
+        };
 
         let mut ctx = CachingRenderContext::new().with_gpu_preference(self.gpu_preference);
         let result = self.drive_ffmpeg(&audio_args, total_frames, out, |frame_idx| {
@@ -304,7 +314,9 @@ impl FfmpegEncoder {
         });
 
         // Best-effort cleanup of the temp WAV regardless of the encode outcome.
-        let _ = std::fs::remove_file(&wav_path);
+        if let Some(wav_path) = wav_path {
+            let _ = std::fs::remove_file(wav_path);
+        }
 
         result.map(|_| {
             if self.progress {
@@ -314,14 +326,11 @@ impl FfmpegEncoder {
     }
 
     /// Shared ffmpeg lifecycle: spawn with the fixed rawvideo input, the
-    /// caller's `extra_args` (the audio second input for the A/V path, empty for
-    /// the video-only path) followed by `self.args`, then stream `total_frames`
+    /// caller's `extra_args` (the audio second input when muxing, empty for
+    /// video-only output) followed by `self.args`, then streams `total_frames`
     /// produced by `frame_fn` to stdin while driving the progress display.
     ///
-    /// `frame_fn(idx)` returns the readback CPU image for frame `idx`. Splitting
-    /// this out lets both [`encode`](Self::encode) and
-    /// [`encode_timeline`](Self::encode_timeline) reuse the exact same command
-    /// shape, progress machinery, and error handling.
+    /// `frame_fn(idx)` returns the readback CPU image for frame `idx`.
     fn drive_ffmpeg(
         &self,
         extra_args: &[String],
@@ -553,7 +562,7 @@ impl FfmpegEncoder {
 // ── A/V mux helpers (step 8) ──────────────────────────────────────────────
 
 /// A fully transparent RGBA frame at `res`. Used when a timeline contributes no
-/// visual at a given time (`ResolvedTimeline::frame` ⇒ `None`) so ffmpeg still
+/// visual at a given time (`ResolvedTimeline::frame` => `None`) so ffmpeg still
 /// gets a well-formed rawvideo frame.
 fn transparent_frame(res: Resolution) -> tellur_core::raster::RasterImage {
     let count = (res.width as usize) * (res.height as usize) * 4;
@@ -579,7 +588,8 @@ fn unique_temp_wav() -> PathBuf {
 
 /// Pads / truncates an interleaved f32 buffer to exactly `seconds` at `rate` /
 /// `channels` so the audio matches the frame-quantized video length (see
-/// `encode_timeline`'s doc — this is what stops `-shortest` tail-clipping).
+/// [`FfmpegEncoder::encode`]'s doc — this is what stops `-shortest`
+/// tail-clipping).
 fn fit_audio_to_seconds(samples: &mut Vec<f32>, rate: u32, channels: u16, seconds: f64) {
     let ch = channels.max(1) as usize;
     let target_frames = (seconds.max(0.0) * rate as f64).round() as usize;
@@ -910,6 +920,15 @@ mod av_mux_tests {
     }
 
     #[test]
+    fn audio_export_defaults_to_mux_and_is_overridable() {
+        let default = FfmpegEncoder::new(Resolution::new(64, 64), 24);
+        assert_eq!(default.audio, AudioExport::Mux);
+
+        let video_only = FfmpegEncoder::new(Resolution::new(64, 64), 24).audio(AudioExport::Omit);
+        assert_eq!(video_only.audio, AudioExport::Omit);
+    }
+
+    #[test]
     fn bounded_stderr_tail_keeps_latest_bytes() {
         let mut tail = Vec::new();
 
@@ -979,7 +998,7 @@ mod av_mux_tests {
 
     #[test]
     #[ignore = "requires ffmpeg + ffprobe on PATH"]
-    fn encode_timeline_muxes_audio_stream() {
+    fn encode_muxes_audio_stream_by_default() {
         let src = sine_wav();
 
         // A 1s timeline: a solid visual windowed to 1s sets the length; the
@@ -997,13 +1016,35 @@ mod av_mux_tests {
             .progress(false)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest"]);
         encoder
-            .encode_timeline(&resolved, &out)
+            .encode(&resolved, &out)
             .expect("ffmpeg A/V mux succeeds");
 
         assert!(out.exists(), "output mp4 was written");
         assert!(has_audio_stream(&out), "muxed mp4 has an audio stream");
 
         let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    #[ignore = "requires ffmpeg + ffprobe on PATH"]
+    fn encode_can_omit_audio_stream() {
+        let tl = Timeline::builder().child(Solid.at(0.0..0.2)).build();
+        let resolved = resolve(tl).expect("solid timeline resolves");
+
+        let mut out = std::env::temp_dir();
+        out.push(format!("tellur_video_only_{}.mp4", std::process::id()));
+
+        FfmpegEncoder::new(Resolution::new(64, 64), 24)
+            .progress(false)
+            .audio(AudioExport::Omit)
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .encode(&resolved, &out)
+            .expect("video-only encode succeeds");
+
+        assert!(has_stream(&out, "v"), "output has a video stream");
+        assert!(!has_stream(&out, "a"), "output omits the audio stream");
+
         let _ = std::fs::remove_file(&out);
     }
 
@@ -1016,7 +1057,7 @@ mod av_mux_tests {
     // differ from the paused PNG.
     #[test]
     #[ignore = "requires ffmpeg + ffprobe on PATH"]
-    fn encode_timeline_tags_bt709_color_metadata() {
+    fn encode_tags_bt709_color_metadata() {
         let tl = Timeline::builder().child(Solid.at(0.0..0.2)).build();
         let resolved = resolve(tl).expect("solid timeline resolves");
 
@@ -1026,7 +1067,7 @@ mod av_mux_tests {
         FfmpegEncoder::new(Resolution::new(64, 64), 24)
             .progress(false)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-            .encode_timeline(&resolved, &full)
+            .encode(&resolved, &full)
             .expect("full-range encode succeeds");
         assert_eq!(
             probe_color(&full),
@@ -1042,7 +1083,7 @@ mod av_mux_tests {
             .progress(false)
             .color_range(ColorRange::Limited)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
-            .encode_timeline(&resolved, &lim)
+            .encode(&resolved, &lim)
             .expect("limited-range encode succeeds");
         assert_eq!(
             probe_color(&lim),
@@ -1056,11 +1097,11 @@ mod av_mux_tests {
 
     // End-to-end A/V: a REAL decoded video background (`testsrc` mp4 via
     // `VideoFile`) + an `AudioFile` + a burned-in caption overlay + a `Subtitle`
-    // cue, encoded with `encode_timeline` to an mp4 carrying BOTH a video and an
+    // cue, encoded to an mp4 carrying BOTH a video and an
     // audio stream. This is the full timeline subsystem firing end-to-end.
     #[test]
     #[ignore = "requires ffmpeg + ffprobe on PATH"]
-    fn encode_timeline_real_video_audio_caption() {
+    fn encode_real_video_audio_caption() {
         use tellur_core::timeline_container::{Subtitle, VideoFile};
 
         let bg = write_testsrc_mp4(1, 128, 96);
@@ -1092,7 +1133,7 @@ mod av_mux_tests {
             .progress(false)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest"]);
         encoder
-            .encode_timeline(&resolved, &out)
+            .encode(&resolved, &out)
             .expect("ffmpeg A/V mux of a real-video timeline succeeds");
 
         assert!(out.exists(), "output mp4 was written");
@@ -1106,7 +1147,7 @@ mod av_mux_tests {
 
     // Export-path integrity: unlike the live mux (which paces frames in real time
     // and races a fully-available audio file under `-shortest`), the offline
-    // `encode_timeline` pre-fits the audio to the frame-quantized video length, so
+    // `encode` pre-fits the audio to the frame-quantized video length, so
     // the output must contain EXACTLY `ceil(duration*fps)` video frames at a
     // perfectly uniform 1/fps cadence — no dropped tail, no startup PTS gap.
     // Exports the real /tmp media fixtures to /tmp/export_check.mp4 (kept for
@@ -1131,7 +1172,7 @@ mod av_mux_tests {
         FfmpegEncoder::new(Resolution::new(640, 360), fps)
             .progress(false)
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest"])
-            .encode_timeline(&resolved, &out)
+            .encode(&resolved, &out)
             .expect("A/V export succeeds");
 
         // Decoded video frame count must equal ceil(duration * fps).

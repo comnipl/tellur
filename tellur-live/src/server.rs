@@ -1155,9 +1155,9 @@ fn handle_video_stream(
     // Render only this stream's audio window and stage it as a temp WAV. Full
     // timeline audio can be huge, and live preview requests many short cache
     // segments, so every segment must mix only `[start, start + video_seconds)`.
-    // `None` only for legacy/custom collections that do not expose audio, where
-    // the stream falls back to a generated silent track. The guard removes the
-    // file when this function returns.
+    // `None` only for custom collections that do not expose audio, where the
+    // stream falls back to a generated silent track. The guard removes the file
+    // when this function returns.
     let audio_start = Instant::now();
     let audio_wav = {
         let mut app = app

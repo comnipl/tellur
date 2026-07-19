@@ -12,8 +12,7 @@ mod scene;
 // resolve pass lays the tree out at SCENE_SIZE — matching the original
 // `.render(SCENE_SIZE,…)`.
 tellur_live::export_timeline!(
-    "main",
-    scene::TITLE,
-    scene::build_timeline,
-    canvas = (1920.0, 1080.0)
+    root = scene::KineticMotion::builder().build(),
+    title = scene::TITLE,
+    canvas = (1920.0, 1080.0),
 );

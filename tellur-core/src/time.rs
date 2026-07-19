@@ -3,12 +3,14 @@
 //! Two concrete time types are distinguished by what coordinate space they
 //! live in:
 //!
-//! - [`TimelineTime`] — a point on the global timeline. This is what
-//!   [`crate::timeline::Timeline::build`] receives.
+//! - [`TimelineTime`] — a point on the global timeline. Renderers pass it to
+//!   [`ResolvedTimeline::frame`](crate::timeline_component::ResolvedTimeline::frame),
+//!   and timeline components read it from
+//!   [`Clock::global`](crate::timeline_component::Clock::global).
 //! - [`LocalTime`] — a rebased time whose `seconds()` is relative to some
-//!   local frame rather than the global timeline origin. The timeline
-//!   world's [`Clock`](crate::timeline_component::Clock) hands one out as
-//!   its local axis.
+//!   local frame rather than the global timeline origin. A timeline
+//!   component's [`Clock`](crate::timeline_component::Clock) hands one out
+//!   as its local axis.
 //!
 //! Both implement the [`Time`] trait, which provides the gating /
 //! quantization combinators, periodic decompositions ([`Time::cycle`],
@@ -18,7 +20,7 @@
 //! methods are defaulted so the operations work identically on either type.
 //!
 //! ```ignore
-//! // `t: TimelineTime` from Timeline::build.
+//! // `t: TimelineTime`, for example from `clock.global()` in a timeline component.
 //! if let Some(t) = t.during(3.0, 5.0) {
 //!     // Pure gate: `t` is still `TimelineTime`, `t.seconds()` ∈ [3.0, 5.0).
 //! }
@@ -128,9 +130,10 @@ fn assert_valid_period(period: f64, caller: &str) {
     );
 }
 
-/// A point on the global timeline that a [`crate::timeline::Timeline`] is
-/// being sampled at. Produced by the renderer; users typically don't
-/// construct it directly.
+/// A point on the global timeline. Renderers use it to sample a
+/// [`ResolvedTimeline`](crate::timeline_component::ResolvedTimeline), and
+/// timeline components receive the same axis through
+/// [`Clock::global`](crate::timeline_component::Clock::global).
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct TimelineTime {
     seconds: f64,
@@ -152,7 +155,7 @@ impl Time for TimelineTime {
 }
 
 /// A rebased time, no longer relative to the global timeline origin.
-/// The timeline world's [`Clock`](crate::timeline_component::Clock)
+/// A timeline component's [`Clock`](crate::timeline_component::Clock)
 /// produces one as its local axis.
 #[derive(Debug, Clone, Copy, Keyable)]
 pub struct LocalTime {

@@ -19,13 +19,15 @@ use tellur_core::geometry::{Anchor, EdgeInsets, Vec2};
 use tellur_core::layout::raster::{DecoratedBox, Flex, Frame, Padding};
 use tellur_core::layout::{Axis, CrossAlign, MainAlign, SizeMode};
 use tellur_core::placement::RasterPlacement;
-use tellur_core::raster::{RasterComponent, RasterResidency, Resolution};
+use tellur_core::raster::{RasterResidency, Resolution};
 use tellur_core::render_context::{PassThrough, RenderContext};
 use tellur_core::shapes::Circle;
 use tellur_core::time::{LocalTime, Time, TimelineTime};
-use tellur_core::timeline::{timeline, Timeline};
+use tellur_core::timeline_component::{resolve_with_canvas, Clock, ResolvedTimeline, Timed};
 use tellur_core::vector::Paint;
 use tellur_renderer::{CachingRenderContext, DropShadow, RasterizableBuilder};
+
+const SCENE_SIZE: Vec2 = Vec2(1280.0, 720.0);
 
 #[component(raster)]
 fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
@@ -50,9 +52,29 @@ fn BouncingDot(#[builder(into)] t: LocalTime) -> impl RasterComponent {
         .build()
 }
 
+#[component(timeline)]
+fn BenchmarkScene(#[clock] clock: Clock) -> impl TimelineComponent {
+    let t = clock.local();
+    DecoratedBox::builder()
+        .background(Color::rgb_u8(20, 20, 30))
+        .child(
+            Padding::builder().insets(EdgeInsets::all(100.0)).child(
+                Flex::builder()
+                    .axis(Axis::Vertical)
+                    .main_align(MainAlign::SpaceEvenly)
+                    .cross_align(CrossAlign::Stretch)
+                    .child(BouncingDot::builder().t(t.fps(60)))
+                    .child(BouncingDot::builder().t(t.fps(30)))
+                    .child(BouncingDot::builder().t(t.fps(24)))
+                    .child(BouncingDot::builder().t(t.fps(16))),
+            ),
+        )
+        .build()
+}
+
 fn bench(
     label: &str,
-    tl: &impl Timeline,
+    timeline: &ResolvedTimeline,
     resolution: Resolution,
     fps: u32,
     total_frames: u64,
@@ -64,7 +86,9 @@ fn bench(
         // Pull the image into a local so the optimizer can't elide the
         // render — `bytes::Bytes` clone is cheap so this doesn't skew
         // the comparison.
-        let _image = tl.build(t, resolution, RasterResidency::Cpu, ctx);
+        let _image = timeline
+            .frame(t, resolution, RasterResidency::Cpu, ctx)
+            .expect("benchmark scene contributes a frame");
     }
     let elapsed = start.elapsed();
     let per_frame_ms = elapsed.as_secs_f64() * 1000.0 / total_frames as f64;
@@ -77,30 +101,12 @@ fn bench(
 }
 
 fn main() {
-    let scene_size = Vec2(1280.0, 720.0);
     let resolution = Resolution::new(1920, 1080);
     let fps = 60u32;
-    let duration = 5.0f64;
+    let timeline = resolve_with_canvas(BenchmarkScene::builder().build().at(0.0..5.0), SCENE_SIZE)
+        .expect("benchmark timeline resolves");
+    let duration = timeline.duration();
     let total_frames = (duration * fps as f64).ceil() as u64;
-
-    let tl = timeline(duration, move |t, target, residency, ctx| {
-        DecoratedBox::builder()
-            .background(Color::rgb_u8(20, 20, 30))
-            .child(
-                Padding::builder().insets(EdgeInsets::all(100.0)).child(
-                    Flex::builder()
-                        .axis(Axis::Vertical)
-                        .main_align(MainAlign::SpaceEvenly)
-                        .cross_align(CrossAlign::Stretch)
-                        .child(BouncingDot::builder().t(t.fps(60)))
-                        .child(BouncingDot::builder().t(t.fps(30)))
-                        .child(BouncingDot::builder().t(t.fps(24)))
-                        .child(BouncingDot::builder().t(t.fps(16))),
-                ),
-            )
-            .build()
-            .render(scene_size, target, residency, ctx)
-    });
 
     println!(
         "Rendering {} frames at {}x{} ({} fps, {:.1}s timeline)\n",
@@ -113,7 +119,7 @@ fn main() {
     let mut pass_ctx = PassThrough;
     bench(
         "PassThrough",
-        &tl,
+        &timeline,
         resolution,
         fps,
         total_frames,
@@ -123,7 +129,7 @@ fn main() {
     let mut cache_ctx = CachingRenderContext::new();
     bench(
         "CachingRenderContext",
-        &tl,
+        &timeline,
         resolution,
         fps,
         total_frames,
