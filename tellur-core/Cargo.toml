@@ -40,7 +40,7 @@ rustybuzz = "0.20"
 # full Symphonia feature set so users can import common audio containers/codecs
 # such as WAV/AIFF, FLAC, Ogg/Vorbis, MP3, and MP4 AAC/ALAC.
 symphonia = { version = "0.5.4", default-features = false, features = ["all"] }
-tellur-macros = { path = "../tellur-macros", version = "0.2.1" }
+tellur-macros = { path = "../tellur-macros", version = "0.3.0" }
 thiserror = "2.0.18"
 
 # LaTeX math layout (RaTeX), gated behind the `latex` feature. `ratex-layout`
